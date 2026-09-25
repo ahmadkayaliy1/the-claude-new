@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="dashboard-token" content="__DASHBOARD_TOKEN__">
+  <title>Trading Desk</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header>
+    <div class="brand">Trading Desk</div>
+    <nav id="tabs">
+      <button data-tab="live" class="active">Live</button>
+      <button data-tab="charts">Charts</button>
+      <button data-tab="decisions">Decisions</button>
+      <button data-tab="performance">Performance</button>
+      <button data-tab="health">Health</button>
+    </nav>
+    <div class="meta">
+      <span id="mode-badge" class="badge">—</span>
+      <span id="ai-badge" class="badge muted">AI —</span>
+      <span id="ws-dot" class="dot off" title="live connection"></span>
+      <span id="clock" class="muted">—</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="tab-live" class="tab active">
+      <div id="pair-cards" class="cards"></div>
+      <h2>Data collectors</h2>
+      <table class="grid" id="collectors"><thead><tr>
+        <th>Collector</th><th>State</th><th>Last data</th><th>Heartbeat</th><th>Details</th><th>Last error</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+
+    <section id="tab-charts" class="tab">
+      <div class="toolbar">
+        <label>Instrument <select id="ch-inst"></select></label>
+        <label>Timeframe <select id="ch-tf"></select></label>
+        <label>From <input type="datetime-local" id="ch-from"></label>
+        <label>To <input type="datetime-local" id="ch-to"></label>
+        <button id="ch-load">Load</button>
+        <label class="inline"><input type="checkbox" id="ch-levels" checked> show latest recommendation levels</label>
+      </div>
+      <div id="chart"></div>
+      <div id="ch-note" class="muted small"></div>
+    </section>
+
+    <section id="tab-decisions" class="tab">
+      <div class="toolbar">
+        <label>Pair <select id="dec-pair"><option value="">All</option></select></label>
+        <button id="dec-refresh">Refresh</button>
+      </div>
+      <table class="grid clickable" id="decisions"><thead><tr>
+        <th>Time (UTC)</th><th>Pair</th><th>Status</th><th>Decision</th><th>Type</th><th>Conf.</th><th>RR</th>
+        <th>Execution</th><th>Outcome</th><th>Virtual</th><th>Cost $</th><th>Mode / trigger</th>
+      </tr></thead><tbody></tbody></table>
+      <div id="dec-detail" class="detail hidden"></div>
+    </section>
+
+    <section id="tab-performance" class="tab">
+      <div id="kpis" class="cards kpis"></div>
+      <div class="two-col">
+        <div><h2>Executed outcomes</h2><table class="grid" id="perf-outcomes"><tbody></tbody></table></div>
+        <div><h2>Virtual outcomes (every trade idea on real prices)</h2><table class="grid" id="perf-virtual"><tbody></tbody></table></div>
+      </div>
+      <h2>By pair</h2><table class="grid" id="perf-pairs"><tbody></tbody></table>
+    </section>
+
+    <section id="tab-health" class="tab">
+      <div id="health-kpis" class="cards kpis"></div>
+      <div class="two-col">
+        <div><h2>Processes</h2><table class="grid" id="procs"><tbody></tbody></table></div>
+        <div><h2>AI usage today</h2><table class="grid" id="ai-usage"><tbody></tbody></table></div>
+      </div>
+      <h2>Ingestion events</h2>
+      <table class="grid" id="events"><thead><tr><th>Time (UTC)</th><th>Collector</th><th>Event</th><th>Detail</th><th>Outage</th></tr></thead><tbody></tbody></table>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
