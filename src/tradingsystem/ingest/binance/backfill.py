@@ -21,7 +21,7 @@ from ...core.sessions import CALENDARS
 from ...core.settings import PathsCfg, Settings, load_settings
 from ...core.timeframes import Timeframe
 from ...core.timeutil import MS_PER_DAY, iso, now_ms
-from ...storage.gaps import KNOWN_GAPS, candle_gaps
+from ...storage.gaps import KNOWN_GAPS, candle_gaps, id_gaps
 from ...storage.parquet_store import ParquetColdStore, day_start_ms
 from ...storage.sqlite_store import SQLiteHotStore
 from ...storage.tablespec import spec_for, system_specs, table_specs
@@ -183,32 +183,44 @@ class BinanceBackfill:
         return (not f.monthly) and f.period[:7] in done
 
     async def _bridge_agg(self, inst: Instrument, hot: SQLiteHotStore, spec) -> None:
-        """REST-fill ids between the newest cold (Vision) id and the oldest hot (live) id."""
-        ck = await asyncio.to_thread(self.cold.last_key, inst, spec)
-        first_hot = hot.read_range(spec, columns=["agg_id", "ts"], limit=1)
-        if ck is None or not len(first_hot["agg_id"]):
-            return
-        cold_last_id, cold_last_ts = ck
-        hot_first_id = int(first_hot["agg_id"][0])
-        if hot_first_id <= cold_last_id + 1:
-            return
+        """REST-fill every aggTrade id hole in the recent window (newest cold day + hot store).
+
+        Holes appear between the last Vision day and live capture, or inside the hot store after an
+        interrupted bridge/outage. Holes outside the REST reach or larger than the per-market cap are
+        left for the next Vision daily file (next daily pass).
+        """
         m, rest = MARKETS[inst.venue], self.rest[inst.venue]
-        hole = hot_first_id - cold_last_id - 1
-        if m.agg_rest_window_ms is not None and rest.binance_now() - cold_last_ts > m.agg_rest_window_ms:
-            log.warning("%s: aggTrades hole %d..%d is outside the REST window — waiting for Vision", inst.key,
-                        cold_last_id + 1, hot_first_id - 1)
+        ids, times = [], []
+        days = self.cold.days(inst, spec)
+        if days:
+            t = await asyncio.to_thread(self.cold.read_range, inst, spec, day_start_ms(days[-1]), None, ["agg_id", "ts"])
+            ids.append(t["agg_id"].to_numpy())
+            times.append(t["ts"].to_numpy())
+        h = await asyncio.to_thread(hot.read_range, spec, None, None, ["agg_id", "ts"])
+        ids.append(h["agg_id"])
+        times.append(h["ts"])
+        all_ids = np.concatenate(ids) if ids else np.empty(0, dtype=np.int64)
+        all_ts = np.concatenate(times) if times else np.empty(0, dtype=np.int64)
+        if len(all_ids) < 2:
             return
-        if hole > MAX_REST_BRIDGE[inst.venue]:
-            # cheaper to wait for tomorrow's Vision daily file than to drain the REST weight budget
-            self.progress[spec.name] = f"hole of {hole:,} ids left for the next Vision daily file"
-            log.info("%s: %s", inst.key, self.progress[spec.name])
-            return
-        n = 0
-        async for rows in fetch.agg_trades_from_id(rest, m, inst.symbol, cold_last_id + 1, hot_first_id,
-                                                  max_requests=20_000):
-            n += hot.upsert(spec, rows)
-            self.progress[spec.name] = f"bridging: {n:,} rows"
-            self.status()
+        order = np.argsort(all_ids)
+        all_ids, all_ts = all_ids[order], all_ts[order]
+        for g in id_gaps(all_ids):
+            before_ts = int(all_ts[np.searchsorted(all_ids, g.start) - 1])
+            if m.agg_rest_window_ms is not None and rest.binance_now() - before_ts > m.agg_rest_window_ms:
+                log.warning("%s: aggTrades hole %d..%d (%s) outside the REST window — left for Vision",
+                            inst.key, g.start, g.end, iso(before_ts))
+                continue
+            if g.count > MAX_REST_BRIDGE[inst.venue]:
+                self.progress[spec.name] = f"hole of {g.count:,} ids left for the next Vision daily file"
+                log.info("%s: %s", inst.key, self.progress[spec.name])
+                continue
+            n = 0
+            async for rows in fetch.agg_trades_from_id(rest, m, inst.symbol, g.start, g.end + 1, max_requests=20_000):
+                n += await asyncio.to_thread(hot.upsert, spec, rows)
+                self.progress[spec.name] = f"bridging {g.start}..{g.end}: {n:,}/{g.count:,}"
+                self.status()
+            log.info("%s: bridged %d aggTrades (%d..%d)", inst.key, n, g.start, g.end)
 
     # ------------------------------------------------------------------ run
     async def run(self) -> None:

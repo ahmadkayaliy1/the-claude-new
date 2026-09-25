@@ -5,25 +5,25 @@
 > Spec: `AI_Trading_System_Spec_EN.md`. Approved plan (Arabic): see Decision Log D-001.
 
 ## Overview
-- **Started:** 2026-09-25. **Approx. completion:** 20%.
-- **Current milestone:** M3 (Binance ingestion) — P3.1 REST client next
-- **Summary:** M0 + M2 complete (hybrid storage decided by benchmark D-020, hot/cold stores, reader, validators, gap detection; 46 unit tests). M1 mostly done (P1.6/P1.9 wait for H1; P1.11 after backfill; P1.12 recorder running since 2026-09-25 08:15 UTC). Next: Binance ingestion (M3).
+- **Started:** 2026-09-25. **Approx. completion:** 26%.
+- **Current milestone:** M3 (Binance ingestion) — implementation done; production run + 24 h soak (P3.9) next; M4 (MT5 ingestion) next
+- **Summary:** M0, M2 complete; M1 complete except P1.6 (running) and P1.11 (after backfill); M3 implemented and tested in a scratch dir (live WS + gap-fill + Vision backfill + bridging; integrity 0 gaps / 0 duplicates). Recorder P1.12 running. 46 unit tests.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
 ## Human actions pending (in the order they will be needed)
 | # | Action | Needed by | Status |
 |---|---|---|---|
-| H1 | MT5 terminal → Tools → Options → Charts → **Max bars in chart = Unlimited**, then restart terminal | P1.6 | ⏳ |
+| H1 | MT5 terminal → Tools → Options → Charts → **Max bars in chart = Unlimited**, then restart terminal | P1.6 | ✅ done by the agent at the user's request (common.ini MaxBars → terminal now reports 100,000,000; backup `common.ini.bak-20260925`) |
 | H2 | Keep the PC awake (no sleep) during the 3–7 day price-matching recording (must include a weekend) | P1.12 | ⏳ |
-| H3 | Allow one close/reopen of the MT5 terminal during the multi-client probe | P1.9 | ⏳ |
+| H3 | Allow one close/reopen of the MT5 terminal during the multi-client probe | P1.9 | ✅ |
 | H4 | Put `GOOGLE_API_KEY` in `.env` and copy the actual free-tier RPM/RPD limits from AI Studio into config | P8.2 | ⏳ |
 | H5 | Review the price-matching decision (Binance vs Windsor execution for BTC/ETH) | P7.2 | ⏳ |
 | H6 | Approve demo-account test orders (0.01 lot) | P9.5 | ⏳ |
 | H7 | Ops settings (sleep off, autostart, time sync) per `docs/ops_windows.md` | P5.3 | ⏳ |
 | H8 | Confirm/adjust default risk parameters (0.5%/trade, 2% daily loss, RR ≥ 1.5, max 3 open) | P9.1 | ⏳ |
 | H9 | Any switch to LIVE trading is the user's decision only | P9.7 / P11.4 | ⏳ |
-| H10 | Demo account has ≈$158 free margin — open/reset a Windsor demo with a balance close to the intended live capital (risk sizing needs it) | P9.5 | ⏳ |
+| H10 | Demo balance vs intended live capital | P9.5 | ✅ user's intended live capital ≈ $100 (all 3 pairs); the current demo (≈$158) is close enough for realistic tests |
 
 ## Environment facts (observed 2026-09-25, read-only probes)
 - Windows 11 Pro; CPU i3-1005G1 (2C/4T); RAM 7.7 GB; ~59 GB free on C:. Local TZ **"Middle East Standard Time"** (UTC+3 now).
@@ -59,6 +59,9 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - [2026-09-25] **D-018** Order-book depth for analysis = periodic REST snapshots (spot 1000–5000 levels, futures 1000) every 60 s, reduced to cumulative liquidity within ±% bands (Vision `bookDepth` style); futures history from Vision `bookDepth`. depth20 streams rejected (span ≈0.007 % of price = microstructure noise for a 15m decision). bookTicker kept for spread/microprice.
 - [2026-09-25] **D-019** MT5 access must live in its own OS process: MT5 Python calls hold the GIL, and a slow terminal (another client pulling history) froze a whole process for >30 s (both WS feeds of the recorder timed out at 08:28:30 UTC). Recorder fixed to poll MT5 in a subprocess.
 - [2026-09-25] **D-020** Storage (confirms D-006 with numbers, docs/benchmarks/storage.md): SQLite WAL rowid tables as the hot store (live 20-row commit p50 0.18 ms, concurrent reader 0 errors); daily zstd Parquet cold archive (8.8 B/row vs 71 B/row); DuckDB for analytics over Parquet. Hot windows: aggTrades 2 d, ticks 3 d, book_ticker 2 d, liquidations/depth 30 d; candles and small derivatives tables stay hot permanently. Rejected: DuckDB file (second process cannot open while writer holds it; 8 ms commits), WITHOUT ROWID for integer keys (slower), scaled-integer prices (−13 % size only).
+- [2026-09-25] **D-021** User's intended live capital ≈ **$100** across BTC/ETH/XAU. Measured consequence (Windsor contract specs, not advice): at the 0.01-lot minimum a typical 15m-structure SL risks ≈5–15 % (XAU), 3–6 % (BTC), 1.5–3 % (ETH) of $100. The risk gate will compute and display the *actual* risk % at the executable lot size and reject anything above `max_risk_per_trade_pct` — the user must choose that limit knowingly (asked at P9.1).
+- [2026-09-25] **D-022** Git: local commits after each phase (user approved); nothing is pushed; `.env` and `data/` are ignored.
+- [2026-09-25] **D-023** MT5 terminal `MaxBars` raised from 100,000 to unlimited (terminal reports 100,000,000) by editing `common.ini` while the terminal was closed (user asked the agent to do H1). `mt5.initialize(path)` relaunches a closed terminal and auto-logs into the saved account.
 
 ## Phases
 
@@ -202,13 +205,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P1.9: MT5 multi-client probe 👤
-- Status: 🔄 In Progress
+- Status: ✅ Completed
 - Description: several processes on one terminal; shutdown isolation; terminal restart recovery (H3); login stability.
 - Affected files: `research/probes/probe_mt5_multiclient.py`, `docs/exploration/mt5_multiclient.md`
-- What was done: automatic part done — 3 processes attach without credentials; one calling `shutdown()` does not affect the others; the login never changes (and the recorder ran concurrently all along).
+- What was done: 3 processes attach without credentials; one `shutdown()` does not affect the others; login never changes. Restart test (2026-09-25 09:55 UTC): with the terminal closed, `initialize(path=…)` from a worker **launched the terminal itself and it auto-logged into the saved demo account**; all 3 watch workers then read 1739+ ticks with 0 failures.
 - Why this way: ingestion + executor + recorder all attach to MT5.
-- Notes/open issues: manual part pending: terminal close/reopen while workers run (coincides with H1).
-- The exact next step: when the user restarts the terminal for H1, run `probe mt5_multiclient --watch 180` during the restart (or inspect the recorder `events` stream for the reconnect).
+- Notes/open issues: recovery path for a terminal closed mid-session = re-`initialize(path)` (auto-relaunch) — implemented in the terminal manager (P4.1) and exercised in the P4.6 soak.
+- The exact next step: —
 
 ### Phase P1.10: Session calendars
 - Status: ✅ Completed
@@ -323,76 +326,76 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 ### M3 — Binance ingestion
 
 ### Phase P3.1: REST client
-- Status: ⏳ Not Started
+- Status: ✅ Completed
 - Description: keep-alive, weight budget, 429/418 backoff, serverTime offset.
-- Affected files: `src/tradingsystem/ingest/binance/rest.py`
-- What was done: —
-- Why this way: avoid IP bans.
-- Notes/open issues: —
-- The exact next step: after M2.
+- Affected files: `src/tradingsystem/ingest/binance/{rest,markets}.py`
+- What was done: async `BinanceRest` (per-minute weight budget synced from `X-MBX-USED-WEIGHT-1M`, 429/418 honour `Retry-After`, exponential backoff for network/5xx, NTP-style clock offset). `markets.py` holds measured per-market facts (limits, weights, Vision layout, REST aggTrades reach).
+- Why this way: avoid IP bans; the live service and backfill worker get separate budgets (spot 2000 + live; futures 1200 + live; IP limits 6000/2400).
+- Notes/open issues: futures aggTrades cost weight 20/request → large futures holes wait for Vision.
+- The exact next step: —
 
 ### Phase P3.2: Vision backfiller
-- Status: ⏳ Not Started
-- Description: listing, resumable downloads, checksum, streaming CSV→Arrow, µs→ms; klines → hot, aggTrades → cold. Defaults: klines since listing; aggTrades 12 months; XAUUSDT since 2025-12-11.
-- Affected files: `src/tradingsystem/ingest/binance/vision.py`
-- What was done: —
-- Why this way: spec §2.1-a fastest backfill.
-- Notes/open issues: —
-- The exact next step: after P3.1.
+- Status: ✅ Completed
+- Description: listing, checksum-verified downloads, streaming parse, µs→ms; klines → hot, aggTrades → cold; resumable; daily re-run.
+- Affected files: `src/tradingsystem/ingest/binance/{vision,backfill}.py`
+- What was done: `VisionClient.plan` (monthly files for whole months, daily otherwise; strict filename regex), SHA-256 check, header auto-detect, per-value µs→ms, bounded-block CSV parsing; `VisionIngestor` (klines validated → hot; aggTrades split per UTC day → merged cold Parquet; metrics → hot; progress in `vision_done`). `BinanceBackfill` worker (own process): candles gap-driven (REST for small spans, Vision for large), funding (REST), metrics (Vision daily), aggTrades newest→oldest, then REST bridging of **every** id hole in the recent window (spot ≤ 2 M ids, futures ≤ 300 k and within the 2-day REST reach; larger holes wait for the next Vision file). Re-runs daily at 03:00 UTC. Source-confirmed gaps → `known_gaps`. Disk guard stops backfill below `min_free_disk_gb`. Test (3 days × 5 instruments, scratch dir): 15 cold day files, bridge filled 287,099 ids, **integrity check: 0 gaps, 0 duplicates in every table**.
+- Why this way: spec §2.1-a fastest path + D-009/D-020; CPU isolation from the WS loop (D-019 lesson).
+- Notes/open issues: full production backfill ≈ 16 GB of zips at ≈1 MB/s → several hours in the background.
+- The exact next step: —
 
 ### Phase P3.3: REST gap-fill
-- Status: ⏳ Not Started
-- Description: klines via startTime, aggTrades via fromId; closed candles only.
-- Affected files: `src/tradingsystem/ingest/binance/spot.py`, `usdm.py`
-- What was done: —
-- Why this way: spec §2.2.
+- Status: ✅ Completed
+- Description: klines via startTime, aggTrades via fromId, metrics/funding; closed candles only.
+- Affected files: `src/tradingsystem/ingest/binance/fetch.py`, `service.py`
+- What was done: async paginators (`klines`, `agg_trades_from_id`, `funding`, `metrics_5m` from the 5 ratio endpoints). Live service gap-fill starts from **pre-live marks** (last stored row captured before the WebSockets connect) — fixes a real bug where early live rows made tables look up to date — and, after a reconnect, from the outage start; aggTrades from the last seen id to the first live id.
+- Why this way: spec §2.2 — fetch exactly what is missing, idempotently.
 - Notes/open issues: —
-- The exact next step: after P3.2.
+- The exact next step: —
 
 ### Phase P3.4: Resume state machine + ingestion events
-- Status: ⏳ Not Started
-- Description: per-table FSM (live-first, D-009); `ingestion_events` with outage durations.
-- Affected files: `src/tradingsystem/ingest/common/{resume_fsm,events}.py`
-- What was done: —
-- Why this way: spec §2.2.
-- Notes/open issues: —
-- The exact next step: after P3.3.
+- Status: ✅ Completed
+- Description: per-table resume (live-first, D-009); `ingestion_events` with outage durations.
+- Affected files: `src/tradingsystem/ingest/common/appdb.py`, `ingest/binance/service.py`, `tools/check_integrity.py`
+- What was done: `app.db` (`collector_status`, `latest_quote`, `ingestion_events`); connect/disconnect/gap-fill events with durations. Restart test: run 100 s → stop 40 s → run 110 s → integrity: **0 candle gaps, 0 aggTrade id gaps, 0 duplicates** across all 5 instruments.
+- Why this way: spec §2.2 steps 1–5.
+- Notes/open issues: the resume "FSM" is realised as pre-live marks + outage-start gap-fill + the backfill worker's gap-driven passes rather than a separate class.
+- The exact next step: —
 
 ### Phase P3.5: WebSocket live ingestion
-- Status: ⏳ Not Started
-- Description: combined streams; closed-kline upsert + forming row; batched aggTrades; bookTicker conflation; stall watchdog; 23 h reconnect; gap-fill after reconnect.
-- Affected files: `src/tradingsystem/ingest/binance/{ws,service}.py`
-- What was done: —
-- Why this way: spec §2.1-b.
+- Status: ✅ Completed
+- Description: combined streams; closed-kline upsert + forming candle; batched writes; conflation; stall watchdog; 23 h rotation; gap-fill after reconnect.
+- Affected files: `src/tradingsystem/ingest/binance/{ws,service,parsers}.py`
+- What was done: `StreamConnection` (reconnect with backoff, stall timeout 30–60 s, planned rotation < 24 h); routing per D-016 (spot combined; USDⓈ-M `/market` + `/public`); handlers for kline (closed → candles, all → `forming_candles`), aggTrade, bookTicker (price-change conflation), markPrice (last per minute), forceOrder. Buffers flushed every 0.5 s in a worker thread, validated first, one transaction per instrument. 150 s live test: 200 k messages, 48 k rows, 0 rejected, 0 reconnects.
+- Why this way: spec §2.1-b; never block the WS loop.
 - Notes/open issues: —
-- The exact next step: after P3.4.
+- The exact next step: —
 
 ### Phase P3.6: Depth ingestion
-- Status: ⏳ Not Started
-- Description: strategy chosen in P1.2 (e.g. REST snapshots binned to ±% buckets).
-- Affected files: `src/tradingsystem/ingest/binance/depth.py`
-- What was done: —
-- Why this way: —
-- Notes/open issues: —
-- The exact next step: after P3.5.
+- Status: ✅ Completed
+- Description: D-018 — REST snapshots every 60 s reduced to ±% liquidity bands.
+- Affected files: `src/tradingsystem/ingest/binance/parsers.py` (`depth_bands`), `service.py`
+- What was done: spot 5000-level snapshots (weight 250) every 60 s → cumulative qty/notional within ±0.1/0.25/0.5/1/2/5 % bands (bands beyond the snapshot's reach are omitted, never extrapolated).
+- Why this way: D-018.
+- Notes/open issues: futures depth history available from Vision `bookDepth` if P6.10 needs it.
+- The exact next step: —
 
 ### Phase P3.7: Futures context ingestion
-- Status: ⏳ Not Started
-- Description: funding, mark/premium, OI 5 m, Vision `metrics`, liquidations (partial), XAUUSDT if P1.11 approves.
-- Affected files: `src/tradingsystem/ingest/binance/usdm.py`
-- What was done: —
-- Why this way: derivatives context raises accuracy for BTC/ETH.
-- Notes/open issues: —
-- The exact next step: after P3.5.
+- Status: ✅ Completed
+- Description: funding, mark price, OI, metrics, liquidations.
+- Affected files: `src/tradingsystem/ingest/binance/{service,fetch,parsers}.py`
+- What was done: funding (REST, history + 30-min poll), mark/index/funding per minute (markPrice@1s), open interest (60 s poll), metrics (5 ratio endpoints every 5 min + Vision daily history), liquidations (forceOrder, flagged partial by nature).
+- Why this way: derivatives context for BTC/ETH and the gold proxy.
+- Notes/open issues: XAUUSDT flow use still subject to P1.11.
+- The exact next step: —
 
 ### Phase P3.8: Collector status and latest quote
-- Status: ⏳ Not Started
+- Status: ✅ Completed
 - Description: `collector_status`, `latest_quote` tables updated by ingesters.
-- Affected files: `src/tradingsystem/ingest/common/health.py`
-- What was done: —
+- Affected files: `src/tradingsystem/ingest/common/appdb.py`
+- What was done: status every 5 s per venue (state, last data time, messages, reconnects, rows written/rejected, REST requests/errors, clock offset); latest bid/ask per instrument every 0.5 s; backfill progress under `binance_backfill`.
 - Why this way: spec §8.1/§8.5.
 - Notes/open issues: —
-- The exact next step: after P3.5.
+- The exact next step: —
 
 ### Phase P3.9: Binance 24 h soak 👤
 - Status: ⏳ Not Started
