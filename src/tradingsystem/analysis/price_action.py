@@ -43,5 +43,5 @@ def range_state(high: F, low: F, close: F, atr_values: F, lookback: int = 30) ->
         return None
     hi, lo = float(high[-lookback:].max()), float(low[-lookback:].min())
     width_atr = (hi - lo) / atr_values[-1]
-    return {"high": hi, "low": lo, "width_atr": round(width_atr, 2), "is_range": width_atr < 6,
+    return {"high": hi, "low": lo, "width_atr": round(float(width_atr), 2), "is_range": bool(width_atr < 6),
             "position": round((close[-1] - lo) / (hi - lo), 3) if hi > lo else None}

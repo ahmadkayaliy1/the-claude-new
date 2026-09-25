@@ -5,9 +5,9 @@
 > Spec: `AI_Trading_System_Spec_EN.md`. Approved plan (Arabic): see Decision Log D-001.
 
 ## Overview
-- **Started:** 2026-09-25. **Approx. completion:** 38%.
-- **Current milestone:** M6 (quant analysis) — order flow/footprint/profiles/context/snapshot next
-- **Summary:** M0–M4 complete: Binance live + backfill and MT5 live + backfill running in production since 2026-09-25 (10:00 / 10:33 UTC); integrity verified (0 gaps, 0 duplicates; MT5 ticks identical to re-fetch). M8 contract, providers, cost governor, prompts done (live AI call waits for H4). M6 indicators + structure/SMC done with causality tests. 101 unit tests. Recorder P1.12 running.
+- **Started:** 2026-09-25. **Approx. completion:** 48%.
+- **Current milestone:** M8 (AI orchestration) next: P8.5 orchestrator, P8.6 triggers, P8.7 decision store; then M9 execution
+- **Summary:** M0–M4 complete and running in production (Binance + MT5 live & backfill since 2026-09-25 ~10:40 UTC, self-healing audit). M6 complete (indicators, SMC, order flow, footprint verified vs klines, context, capability matrix, snapshot builder ≈2 s for 3 pairs). M8: contract, providers, cost governor, prompts done — live AI call waits for H4 (GOOGLE_API_KEY). 105 unit + 5 integration tests.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
@@ -62,6 +62,10 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - [2026-09-25] **D-021** User's intended live capital ≈ **$100** across BTC/ETH/XAU. Measured consequence (Windsor contract specs, not advice): at the 0.01-lot minimum a typical 15m-structure SL risks ≈5–15 % (XAU), 3–6 % (BTC), 1.5–3 % (ETH) of $100. The risk gate will compute and display the *actual* risk % at the executable lot size and reject anything above `max_risk_per_trade_pct` — the user must choose that limit knowingly (asked at P9.1).
 - [2026-09-25] **D-022** Git: local commits after each phase (user approved); nothing is pushed; `.env` and `data/` are ignored.
 - [2026-09-25] **D-023** MT5 terminal `MaxBars` raised from 100,000 to unlimited (terminal reports 100,000,000) by editing `common.ini` while the terminal was closed (user asked the agent to do H1). `mt5.initialize(path)` relaunches a closed terminal and auto-logs into the saved account.
+- [2026-09-25] **D-024** MT5 terminal serves API clients one at a time and a history download can block it for minutes → the MT5 backfill requests hour-sized tick / week-sized M1 chunks and yields while the live poller's heartbeat is > 5 s old. Tick completeness is unaffected by such delays (cursor catches up), only latency.
+- [2026-09-25] **D-025** Self-healing ingestion: the Binance live service snapshots the last live aggTrade id at disconnect (outage gap-fill) and audits the last 2 h every 5 min, re-fetching aggTrade id holes and missing ≤1h candles from REST. Found and fixed a real 479-trade hole after a network flap (verified: footprint == kline volume per minute).
+- [2026-09-25] **D-026** Futures bookTicker dropped from live ingestion (≈850 msg/s starved the event loop → keepalive timeouts); the research recorder still captures it for price matching. WebSocket pings relaxed to 60 s / 90 s.
+- [2026-09-25] **D-027** AI levels are expressed in the *analysis* instrument's price space (`meta.price_reference`); the execution layer translates them to the execution instrument by the live basis (P7.3). Gold analyses and executes on the same instrument.
 
 ## Phases
 
@@ -494,11 +498,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 ### M6 — Quantitative analysis
 
 ### Phase P6.1: As-of frame loader
-- Status: ⏳ Not Started
-- Description: closed candles + flagged forming candle; refuses stale/gapped windows.
+- Status: ✅ Completed
+- Description: closed candles + flagged forming candle; stale/gap flags.
 - Affected files: `src/tradingsystem/analysis/frames.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after M3/M4.
+- What was done: `load_frame(reader, inst, tf, bars, as_of, calendar)` → only bars closed by `as_of`; forming bar from `forming_candles`; quality flags (`stale` when the session is open and the last bar ended > max(2 TF, 3 min) ago; recent gaps for Binance ≤1h TFs).
+- Why this way: spec §9 — never analyse silently broken data; as-of semantics make replay possible.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P6.2: Indicators
 - Status: ✅ Completed
@@ -546,60 +552,76 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P6.7: Bar delta / CVD
-- Status: ⏳ Not Started
-- Description: delta = 2×taker_buy − volume (exact from klines), CVD, divergences.
-- Affected files: `src/tradingsystem/analysis/orderflow/delta.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P6.1.
+- Status: ✅ Completed
+- Description: exact bar delta, CVD, divergences.
+- Affected files: `src/tradingsystem/analysis/orderflow.py`, `tests/unit/test_orderflow.py`
+- What was done: delta = 2·taker_buy − volume; CVD; price-vs-CVD divergence on the last two confirmed pivots.
+- Why this way: spec §3.1 order flow (real for Binance).
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P6.8: Footprint
-- Status: ⏳ Not Started
-- Description: aggTrades → `footprint_1m` → higher TFs; POC, stacked imbalances, absorption; volume equals kline volume.
-- Affected files: `src/tradingsystem/analysis/orderflow/footprint.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P6.7.
+- Status: ✅ Completed
+- Description: aggTrades → per-bar volume at price; POC, stacked imbalances, absorption.
+- Affected files: `src/tradingsystem/analysis/orderflow.py`, `tests/unit/test_orderflow.py`
+- What was done: footprint per 1m merged to the decision TF; diagonal imbalances (3:1, stacks ≥3), absorption heuristic. **Verified on live data: per-minute footprint volume == Binance kline volume and buy volume == taker-buy** (after the audit fix). Computed on the fly for the last 8 decision bars (fast enough; no derived table needed).
+- Why this way: spec §3.1 footprint.
+- Notes/open issues: the verification test first exposed a real 479-trade hole after a network flap → fixed (D-025).
+- The exact next step: —
 
 ### Phase P6.9: Profiles
-- Status: ⏳ Not Started
-- Description: real volume profile BTC/ETH; XAU TPO (real) + tick-volume profile flagged APPROX.
-- Affected files: `src/tradingsystem/analysis/orderflow/profile.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P6.8.
+- Status: ✅ Completed
+- Description: volume profile BTC/ETH; XAU TPO (real) + tick-volume profile (approx).
+- Affected files: `src/tradingsystem/analysis/orderflow.py`
+- What was done: value area (70 %), footprint-based profile (real), TPO from real 1m bars, tick-volume profile labelled `approx`.
+- Why this way: spec §3.2 — no stand-in data without disclosure.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P6.10: Depth and derivatives features
-- Status: ⏳ Not Started
-- Description: funding, OI vs price, basis, % depth imbalance.
-- Affected files: `src/tradingsystem/analysis/orderflow/{depth,derivatives}.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P3.6/P3.7.
+- Status: ✅ Completed
+- Description: funding, OI change, positioning ratios, liquidations, mark/index.
+- Affected files: `src/tradingsystem/analysis/snapshot.py` (`_derivatives`)
+- What was done: funding (last 3), OI change 1h/4h/24h, top-trader/global long-short and taker ratios, mark vs index, liquidations last hour (flagged partial); gold receives XAUUSDT derivatives flagged `proxy`.
+- Why this way: derivatives context raises accuracy for crypto (spec §3.1 "anything valuable").
+- Notes/open issues: depth-band features collected (P3.6) but not yet summarised in the payload — add if prompts/analysis show value.
+- The exact next step: —
 
 ### Phase P6.11: Context features
-- Status: ⏳ Not Started
-- Description: DST-aware sessions/killzones, regime, MTF confluence, anchored VWAP (APPROX for XAU).
-- Affected files: `src/tradingsystem/analysis/context/*`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P6.2.
+- Status: ✅ Completed
+- Description: sessions/killzones, reference levels, regime, MTF confluence, VWAP.
+- Affected files: `src/tradingsystem/analysis/context.py`, `indicators.py`
+- What was done: Tokyo/London/New York sessions and ICT killzones in their own time zones (DST-correct); PDH/PDL/PDC, day/week open, Asia range (UTC day for crypto, 17:00-NY trading day for gold); ADX/DI regime + ATR percentile; EMA 20/50/200 stack; weighted multi-timeframe confluence score; session VWAP (approx for tick volume).
+- Why this way: spec §3.1 / §3.3.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P6.12: Capability registry
-- Status: ⏳ Not Started
-- Description: analyses declare required data types; outputs carry `data_quality` (real/approx/proxy/unavailable); `docs/capability_matrix.md`.
-- Affected files: `src/tradingsystem/analysis/registry.py`
-- What was done: — · Why this way: spec §3.2. · Notes/open issues: —
-- The exact next step: after P6.2–P6.11.
+- Status: ✅ Completed
+- Description: per pair × analysis: real / approx / proxy / unavailable + reason.
+- Affected files: `src/tradingsystem/analysis/registry.py`, `docs/capability_matrix.md`
+- What was done: derived from configured instruments (venue, datatypes, `flow_proxy_approved`). Gold: delta/footprint unavailable (proxy pending P1.11), volume-weighted/volume profile approx, TPO real, derivatives proxy, depth unavailable. Matrix document generated.
+- Why this way: spec §3.2 decision table, grounded in measured data.
+- Notes/open issues: flipping `flow_proxy_approved` after P1.11 switches gold order flow to `proxy`.
+- The exact next step: —
 
 ### Phase P6.13: Snapshot builder
-- Status: ⏳ Not Started
-- Description: per pair / TF slice, token budget, deterministic, hashed.
-- Affected files: `src/tradingsystem/analysis/snapshot.py`
-- What was done: — · Why this way: spec §4.3. · Notes/open issues: —
-- The exact next step: after P6.12.
+- Status: ✅ Completed
+- Description: per-pair deterministic payload with data-quality flags; hashed.
+- Affected files: `src/tradingsystem/analysis/snapshot.py`, `tests/unit/test_snapshot.py`
+- What was done: `SnapshotBuilder.build(pair, as_of, account, history)` → meta (price_reference = analysis instrument, execution instrument, config hash, data warnings, payload hash), account, market (causal quotes at as_of from stored bookTicker/ticks, execution spread, basis), capabilities, reference levels, 7 timeframes (recent candles, structure/events, premium/discount, nearest active FVGs/OBs, liquidity pools, indicators, patterns, range, regime), confluence, order flow (delta/CVD/divergence, footprint of the last 8 decision bars, TPO / tick-volume profile), derivatives, history. ≈4–7 k tokens per pair. Integration tests: identical hash on rebuild, **no timestamp after as_of**, flags per capability.
+- Why this way: spec §4.3 — everything the trader needs, nothing fabricated.
+- Notes/open issues: `history` filled by the decision store (P8.7).
+- The exact next step: —
 
 ### Phase P6.14: Speed budget
-- Status: ⏳ Not Started
-- Description: full 3-pair cycle < 10 s on low profile (excluding AI).
-- Affected files: `docs/benchmarks/analysis_speed.md`
-- What was done: — · Why this way: spec §3.3/§9. · Notes/open issues: —
-- The exact next step: after P6.13.
+- Status: ✅ Completed
+- Description: full 3-pair cycle well inside the decision TF.
+- Affected files: `docs/benchmarks/analysis_speed.md` (numbers below)
+- What was done: measured on the i3-1005G1 while both ingesters + backfills ran: BTCUSDT 1.45 s (cold, incl. imports), ETHUSDT 0.39 s, XAUUSD 0.22 s → ≈2 s for all pairs vs a 15-minute decision timeframe.
+- Why this way: spec §3.3/§9.
+- Notes/open issues: re-measure on the `low` profile in P5.2.
+- The exact next step: —
 
 ### Phase P6.15: Replay + trade-rate study
 - Status: ⏳ Not Started
