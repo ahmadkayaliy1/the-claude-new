@@ -167,6 +167,8 @@ ai:
                                        # multi_provider_consensus
   trigger_policy: hybrid               # every_close | on_setup_event | hybrid
   output_language: en
+  min_minutes_between_calls: 15        # per pair
+  max_idle_minutes: 120                # hybrid: at least one review per pair every 2 h while the market is open
   max_parallel_calls: 2
   consensus_providers: []
   budget:                              # D-004 Cost Governor

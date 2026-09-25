@@ -257,6 +257,8 @@ class AICfg(_Model):
     agent_mode: AgentMode = "agent_per_pair"
     trigger_policy: TriggerPolicy = "hybrid"
     output_language: str = "en"
+    min_minutes_between_calls: int = 15     # per pair (protects free-tier quotas)
+    max_idle_minutes: int = 120             # hybrid policy: review a pair at least this often (market open)
     max_parallel_calls: int = 2
     consensus_providers: list[str] = Field(default_factory=list)
     providers: dict[str, AIProviderCfg]

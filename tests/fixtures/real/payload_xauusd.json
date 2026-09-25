@@ -1,0 +1,1383 @@
+{
+ "meta": {
+  "pair": "XAUUSD",
+  "as_of": "2026-09-25T10:48:42.421Z",
+  "decision_timeframe": "15m",
+  "price_reference": "mt5:XAUUSD@",
+  "execution_instrument": "mt5:XAUUSD@",
+  "payload_version": "1",
+  "config_hash": "bdb793d8fe98910c",
+  "data_warnings": [],
+  "payload_hash": "731f0da04c9f31c4"
+ },
+ "account": {
+  "equity": 100,
+  "currency": "USD"
+ },
+ "market": {
+  "session": {
+   "active": [
+    "london"
+   ],
+   "killzone": null,
+   "ny_time": "Fri 06:48",
+   "weekday_utc": "Fri"
+  },
+  "execution_market_open": true,
+  "analysis_price": {
+   "bid": 4305.76,
+   "ask": 4305.96,
+   "age_s": 1.2
+  },
+  "execution": {
+   "instrument": "mt5:XAUUSD@",
+   "bid": 4305.76,
+   "ask": 4305.96,
+   "spread": 0.2,
+   "age_s": 1.2
+  }
+ },
+ "capabilities": {
+  "price_indicators": {
+   "quality": "real",
+   "reason": "real OHLC of mt5:XAUUSD@"
+  },
+  "market_structure_smc": {
+   "quality": "real",
+   "reason": "real OHLC of mt5:XAUUSD@"
+  },
+  "price_action": {
+   "quality": "real",
+   "reason": "real OHLC of mt5:XAUUSD@"
+  },
+  "liquidity": {
+   "quality": "real",
+   "reason": "real OHLC of mt5:XAUUSD@"
+  },
+  "time_profile_tpo": {
+   "quality": "real",
+   "reason": "time-at-price from real 1m bars"
+  },
+  "volume_weighted": {
+   "quality": "approx",
+   "reason": "tick volume only \u2014 broker reports no traded volume"
+  },
+  "volume_profile": {
+   "quality": "approx",
+   "reason": "tick-volume distribution \u2014 not traded volume"
+  },
+  "bar_delta_cvd": {
+   "quality": "unavailable",
+   "reason": "no trades / real volume on the broker feed; proxy binance_usdm:XAUUSDT pending validation (P1.11)"
+  },
+  "footprint": {
+   "quality": "unavailable",
+   "reason": "no trades / real volume on the broker feed; proxy binance_usdm:XAUUSDT pending validation (P1.11)"
+  },
+  "order_book_depth": {
+   "quality": "unavailable",
+   "reason": "broker DOM is empty (P1.5)"
+  },
+  "derivatives": {
+   "quality": "proxy",
+   "reason": "binance_usdm:XAUUSDT perpetual (different instrument)"
+  }
+ },
+ "levels": {
+  "pdh": 4303.15,
+  "pdl": 4244.22,
+  "pdc": 4274.49,
+  "day_open": 4268.24,
+  "week_open": 4336.62,
+  "asia_high": 4295.76,
+  "asia_low": 4256.33
+ },
+ "timeframes": {
+  "1w": {
+   "bars": 2,
+   "quality": {
+    "bars": 2,
+    "last_bar_end_lag_s": 481722.4,
+    "stale": false,
+    "status": "ok"
+   },
+   "structure": {
+    "trend": null
+   },
+   "indicators": {
+    "ema_alignment": null
+   },
+   "note": "insufficient history"
+  },
+  "1d": {
+   "bars": 3,
+   "quality": {
+    "bars": 3,
+    "last_bar_end_lag_s": 49722.4,
+    "stale": false,
+    "status": "ok"
+   },
+   "structure": {
+    "trend": null
+   },
+   "indicators": {
+    "ema_alignment": null
+   },
+   "note": "insufficient history"
+  },
+  "4h": {
+   "bars": 18,
+   "quality": {
+    "bars": 18,
+    "last_bar_end_lag_s": 6522.4,
+    "stale": false,
+    "status": "ok"
+   },
+   "structure": {
+    "trend": null
+   },
+   "indicators": {
+    "ema_alignment": null
+   },
+   "note": "insufficient history"
+  },
+  "1h": {
+   "bars": 69,
+   "quality": {
+    "bars": 69,
+    "last_bar_end_lag_s": 2922.4,
+    "stale": false,
+    "status": "ok"
+   },
+   "recent": [
+    [
+     "2026-09-24T22:00:00.000Z",
+     4268.24,
+     4276.38,
+     4267.79,
+     4272.44,
+     4182.0
+    ],
+    [
+     "2026-09-24T23:00:00.000Z",
+     4272.46,
+     4275.77,
+     4264.82,
+     4264.88,
+     4510.0
+    ],
+    [
+     "2026-09-25T00:00:00.000Z",
+     4264.87,
+     4280.96,
+     4264.27,
+     4278.45,
+     7099.0
+    ],
+    [
+     "2026-09-25T01:00:00.000Z",
+     4278.53,
+     4295.76,
+     4276.96,
+     4287.88,
+     7728.0
+    ],
+    [
+     "2026-09-25T02:00:00.000Z",
+     4287.85,
+     4295.22,
+     4277.62,
+     4283.77,
+     6986.0
+    ],
+    [
+     "2026-09-25T03:00:00.000Z",
+     4283.79,
+     4286.24,
+     4269.62,
+     4270.02,
+     6498.0
+    ],
+    [
+     "2026-09-25T04:00:00.000Z",
+     4269.98,
+     4273.53,
+     4262.63,
+     4262.87,
+     5895.0
+    ],
+    [
+     "2026-09-25T05:00:00.000Z",
+     4262.82,
+     4275.77,
+     4256.33,
+     4266.7,
+     7500.0
+    ],
+    [
+     "2026-09-25T06:00:00.000Z",
+     4266.73,
+     4281.55,
+     4266.23,
+     4276.13,
+     8028.0
+    ],
+    [
+     "2026-09-25T07:00:00.000Z",
+     4276.12,
+     4281.82,
+     4271.14,
+     4279.7,
+     9319.0
+    ],
+    [
+     "2026-09-25T08:00:00.000Z",
+     4279.66,
+     4297.39,
+     4274.98,
+     4293.47,
+     8756.0
+    ],
+    [
+     "2026-09-25T09:00:00.000Z",
+     4293.46,
+     4297.88,
+     4289.68,
+     4295.08,
+     8912.0
+    ]
+   ],
+   "recent_columns": [
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "tick_volume"
+   ],
+   "structure": {
+    "trend": "bearish",
+    "last_swing_high": {
+     "price": 4295.76,
+     "time": "2026-09-25T01:00:00.000Z"
+    },
+    "last_swing_low": {
+     "price": 4256.33,
+     "time": "2026-09-25T05:00:00.000Z"
+    },
+    "events": [
+     {
+      "time": "2026-09-24T08:00:00.000Z",
+      "kind": "CHoCH",
+      "dir": "bearish",
+      "level": 4273.64
+     },
+     {
+      "time": "2026-09-25T01:00:00.000Z",
+      "kind": "sweep",
+      "dir": "bearish",
+      "level": 4288.38
+     },
+     {
+      "time": "2026-09-25T02:00:00.000Z",
+      "kind": "sweep",
+      "dir": "bearish",
+      "level": 4288.38
+     },
+     {
+      "time": "2026-09-25T04:00:00.000Z",
+      "kind": "BOS",
+      "dir": "bearish",
+      "level": 4264.27
+     },
+     {
+      "time": "2026-09-25T08:00:00.000Z",
+      "kind": "sweep",
+      "dir": "bearish",
+      "level": 4295.76
+     },
+     {
+      "time": "2026-09-25T09:00:00.000Z",
+      "kind": "sweep",
+      "dir": "bearish",
+      "level": 4295.76
+     }
+    ]
+   },
+   "premium_discount": {
+    "range_high": 4297.88,
+    "range_low": 4256.33,
+    "equilibrium": 4277.105,
+    "position": 0.933,
+    "zone": "premium",
+    "in_ote": false
+   },
+   "zones": {
+    "fvg": [
+     {
+      "dir": "bullish",
+      "top": 4289.68,
+      "bottom": 4281.82,
+      "formed": "2026-09-25T08:00:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 0.49,
+      "age_bars": 0
+     },
+     {
+      "dir": "bearish",
+      "top": 4326.11,
+      "bottom": 4322.69,
+      "formed": "2026-09-23T07:00:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 0.25,
+      "age_bars": 47
+     },
+     {
+      "dir": "bearish",
+      "top": 4342.43,
+      "bottom": 4336.89,
+      "formed": "2026-09-23T05:00:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 0.39,
+      "age_bars": 49
+     }
+    ],
+    "order_blocks": []
+   },
+   "liquidity": {
+    "buy_side_above": [
+     {
+      "level": 4303.15,
+      "touches": 1
+     },
+     {
+      "level": 4369.2,
+      "touches": 1
+     },
+     {
+      "level": 4371.08,
+      "touches": 1
+     }
+    ],
+    "sell_side_below": [
+     {
+      "level": 4256.33,
+      "touches": 1
+     },
+     {
+      "level": 4244.22,
+      "touches": 2
+     }
+    ]
+   },
+   "indicators": {
+    "close": 4295.08,
+    "atr14": 15.88,
+    "rsi14": 58.6,
+    "macd_hist": 3.6,
+    "adx14": 14.6,
+    "plus_di": 22.1,
+    "minus_di": 15.0,
+    "bb_width_pct": 1.004,
+    "bb_pct_b": 1.006,
+    "ema20": 4277.89,
+    "ema50": 4291.24,
+    "ema200": null,
+    "ema_alignment": null,
+    "session_vwap": 4279.68,
+    "vwap_quality": "approx"
+   },
+   "patterns": {
+    "last_bar": [],
+    "prev_bar": []
+   },
+   "range": {
+    "high": 4297.88,
+    "low": 4244.22,
+    "width_atr": 3.38,
+    "is_range": true,
+    "position": 0.948
+   },
+   "regime": {
+    "adx": 14.59,
+    "trend_strength": "range",
+    "di_direction": "up",
+    "atr_percentile": 0.62,
+    "volatility": "normal"
+   }
+  },
+  "15m": {
+   "bars": 277,
+   "quality": {
+    "bars": 277,
+    "last_bar_end_lag_s": 222.4,
+    "stale": false,
+    "status": "ok"
+   },
+   "recent": [
+    [
+     "2026-09-25T06:45:00.000Z",
+     4276.99,
+     4278.15,
+     4274.5,
+     4276.13,
+     1913.0
+    ],
+    [
+     "2026-09-25T07:00:00.000Z",
+     4276.12,
+     4280.62,
+     4273.98,
+     4275.44,
+     2425.0
+    ],
+    [
+     "2026-09-25T07:15:00.000Z",
+     4275.38,
+     4277.27,
+     4272.21,
+     4273.77,
+     2316.0
+    ],
+    [
+     "2026-09-25T07:30:00.000Z",
+     4273.79,
+     4279.7,
+     4271.14,
+     4276.67,
+     2405.0
+    ],
+    [
+     "2026-09-25T07:45:00.000Z",
+     4276.79,
+     4281.82,
+     4276.79,
+     4279.7,
+     2173.0
+    ],
+    [
+     "2026-09-25T08:00:00.000Z",
+     4279.66,
+     4282.3,
+     4274.98,
+     4281.77,
+     2267.0
+    ],
+    [
+     "2026-09-25T08:15:00.000Z",
+     4281.76,
+     4285.01,
+     4279.69,
+     4284.2,
+     2140.0
+    ],
+    [
+     "2026-09-25T08:30:00.000Z",
+     4284.19,
+     4292.48,
+     4283.77,
+     4292.23,
+     2104.0
+    ],
+    [
+     "2026-09-25T08:45:00.000Z",
+     4292.26,
+     4297.39,
+     4290.16,
+     4293.47,
+     2245.0
+    ],
+    [
+     "2026-09-25T09:00:00.000Z",
+     4293.46,
+     4297.88,
+     4292.98,
+     4293.96,
+     2235.0
+    ],
+    [
+     "2026-09-25T09:15:00.000Z",
+     4293.99,
+     4296.87,
+     4289.68,
+     4290.52,
+     2235.0
+    ],
+    [
+     "2026-09-25T09:30:00.000Z",
+     4290.68,
+     4297.54,
+     4290.19,
+     4294.6,
+     2230.0
+    ],
+    [
+     "2026-09-25T09:45:00.000Z",
+     4294.61,
+     4295.08,
+     4291.0,
+     4295.08,
+     2212.0
+    ],
+    [
+     "2026-09-25T10:00:00.000Z",
+     4295.05,
+     4308.11,
+     4293.98,
+     4307.25,
+     2165.0
+    ],
+    [
+     "2026-09-25T10:15:00.000Z",
+     4307.22,
+     4309.52,
+     4303.59,
+     4308.32,
+     2025.0
+    ],
+    [
+     "2026-09-25T10:30:00.000Z",
+     4308.34,
+     4308.87,
+     4302.27,
+     4305.36,
+     1859.0
+    ]
+   ],
+   "recent_columns": [
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "tick_volume"
+   ],
+   "structure": {
+    "trend": "bullish",
+    "last_swing_high": {
+     "price": 4297.88,
+     "time": "2026-09-25T09:00:00.000Z"
+    },
+    "last_swing_low": {
+     "price": 4271.14,
+     "time": "2026-09-25T07:30:00.000Z"
+    },
+    "events": [
+     {
+      "time": "2026-09-25T00:00:00.000Z",
+      "kind": "sweep",
+      "dir": "bullish",
+      "level": 4264.39
+     },
+     {
+      "time": "2026-09-25T00:45:00.000Z",
+      "kind": "CHoCH",
+      "dir": "bullish",
+      "level": 4275.77
+     },
+     {
+      "time": "2026-09-25T04:45:00.000Z",
+      "kind": "CHoCH",
+      "dir": "bearish",
+      "level": 4264.27
+     },
+     {
+      "time": "2026-09-25T07:45:00.000Z",
+      "kind": "sweep",
+      "dir": "bearish",
+      "level": 4281.55
+     },
+     {
+      "time": "2026-09-25T08:00:00.000Z",
+      "kind": "CHoCH",
+      "dir": "bullish",
+      "level": 4281.55
+     },
+     {
+      "time": "2026-09-25T10:00:00.000Z",
+      "kind": "BOS",
+      "dir": "bullish",
+      "level": 4297.88
+     }
+    ]
+   },
+   "premium_discount": {
+    "range_high": 4309.52,
+    "range_low": 4271.14,
+    "equilibrium": 4290.33,
+    "position": 0.892,
+    "zone": "premium",
+    "in_ote": false
+   },
+   "zones": {
+    "fvg": [
+     {
+      "dir": "bullish",
+      "top": 4303.59,
+      "bottom": 4295.08,
+      "formed": "2026-09-25T10:00:00.000Z",
+      "fill_pct": 16,
+      "touched": true,
+      "strength_atr": 1.22,
+      "age_bars": 1
+     },
+     {
+      "dir": "bullish",
+      "top": 4290.16,
+      "bottom": 4285.01,
+      "formed": "2026-09-25T08:30:00.000Z",
+      "fill_pct": 9,
+      "touched": true,
+      "strength_atr": 0.76,
+      "age_bars": 7
+     },
+     {
+      "dir": "bullish",
+      "top": 4283.77,
+      "bottom": 4282.3,
+      "formed": "2026-09-25T08:15:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 0.22,
+      "age_bars": 8
+     }
+    ],
+    "order_blocks": [
+     {
+      "dir": "bearish",
+      "top": 4318.75,
+      "bottom": 4308.88,
+      "formed": "2026-09-23T12:00:00.000Z",
+      "fill_pct": 6,
+      "touched": true,
+      "strength_atr": 2.96,
+      "age_bars": 172
+     },
+     {
+      "dir": "bullish",
+      "top": 4296.87,
+      "bottom": 4289.68,
+      "formed": "2026-09-25T09:15:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 2.48,
+      "age_bars": 2
+     },
+     {
+      "dir": "bullish",
+      "top": 4277.27,
+      "bottom": 4272.21,
+      "formed": "2026-09-25T07:15:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 1.59,
+      "age_bars": 10
+     }
+    ]
+   },
+   "liquidity": {
+    "buy_side_above": [
+     {
+      "level": 4313.44,
+      "touches": 1
+     },
+     {
+      "level": 4318.89,
+      "touches": 2
+     },
+     {
+      "level": 4336.89,
+      "touches": 1
+     }
+    ],
+    "sell_side_below": [
+     {
+      "level": 4271.14,
+      "touches": 1
+     },
+     {
+      "level": 4256.25,
+      "touches": 2
+     },
+     {
+      "level": 4244.22,
+      "touches": 2
+     }
+    ]
+   },
+   "indicators": {
+    "close": 4305.36,
+    "atr14": 6.97,
+    "rsi14": 69.6,
+    "macd_hist": 2.53,
+    "adx14": 26.6,
+    "plus_di": 32.6,
+    "minus_di": 12.1,
+    "bb_width_pct": 1.118,
+    "bb_pct_b": 0.902,
+    "ema20": 4289.86,
+    "ema50": 4281.85,
+    "ema200": 4291.89,
+    "ema_alignment": "mixed",
+    "session_vwap": 4281.65,
+    "vwap_quality": "approx"
+   },
+   "patterns": {
+    "last_bar": [
+     "bearish_engulfing"
+    ],
+    "prev_bar": [
+     "bullish_pin_bar"
+    ]
+   },
+   "range": {
+    "high": 4309.52,
+    "low": 4256.33,
+    "width_atr": 7.63,
+    "is_range": false,
+    "position": 0.922
+   },
+   "regime": {
+    "adx": 26.61,
+    "trend_strength": "trend",
+    "di_direction": "up",
+    "atr_percentile": 0.36,
+    "volatility": "normal"
+   }
+  },
+  "5m": {
+   "bars": 300,
+   "quality": {
+    "bars": 300,
+    "last_bar_end_lag_s": 222.4,
+    "stale": false,
+    "status": "ok"
+   },
+   "recent": [
+    [
+     "2026-09-25T09:45:00.000Z",
+     4294.61,
+     4294.83,
+     4291.52,
+     4292.6,
+     727.0
+    ],
+    [
+     "2026-09-25T09:50:00.000Z",
+     4292.61,
+     4293.78,
+     4291.41,
+     4292.95,
+     728.0
+    ],
+    [
+     "2026-09-25T09:55:00.000Z",
+     4292.95,
+     4295.08,
+     4291.0,
+     4295.08,
+     757.0
+    ],
+    [
+     "2026-09-25T10:00:00.000Z",
+     4295.05,
+     4296.29,
+     4293.98,
+     4295.2,
+     656.0
+    ],
+    [
+     "2026-09-25T10:05:00.000Z",
+     4295.17,
+     4303.28,
+     4295.08,
+     4301.45,
+     759.0
+    ],
+    [
+     "2026-09-25T10:10:00.000Z",
+     4301.52,
+     4308.11,
+     4299.19,
+     4307.25,
+     750.0
+    ],
+    [
+     "2026-09-25T10:15:00.000Z",
+     4307.22,
+     4307.4,
+     4303.59,
+     4305.14,
+     688.0
+    ],
+    [
+     "2026-09-25T10:20:00.000Z",
+     4305.15,
+     4308.95,
+     4304.68,
+     4306.28,
+     710.0
+    ],
+    [
+     "2026-09-25T10:25:00.000Z",
+     4306.12,
+     4309.52,
+     4305.99,
+     4308.32,
+     627.0
+    ],
+    [
+     "2026-09-25T10:30:00.000Z",
+     4308.34,
+     4308.87,
+     4305.21,
+     4305.66,
+     636.0
+    ],
+    [
+     "2026-09-25T10:35:00.000Z",
+     4305.7,
+     4307.09,
+     4303.23,
+     4303.67,
+     616.0
+    ],
+    [
+     "2026-09-25T10:40:00.000Z",
+     4303.73,
+     4305.97,
+     4302.27,
+     4305.36,
+     607.0
+    ]
+   ],
+   "recent_columns": [
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "tick_volume"
+   ],
+   "structure": {
+    "trend": "bullish",
+    "last_swing_high": {
+     "price": 4309.52,
+     "time": "2026-09-25T10:25:00.000Z"
+    },
+    "last_swing_low": {
+     "price": 4291.0,
+     "time": "2026-09-25T09:55:00.000Z"
+    },
+    "events": [
+     {
+      "time": "2026-09-25T05:40:00.000Z",
+      "kind": "CHoCH",
+      "dir": "bullish",
+      "level": 4273.53
+     },
+     {
+      "time": "2026-09-25T06:15:00.000Z",
+      "kind": "BOS",
+      "dir": "bullish",
+      "level": 4275.77
+     },
+     {
+      "time": "2026-09-25T07:55:00.000Z",
+      "kind": "sweep",
+      "dir": "bearish",
+      "level": 4280.62
+     },
+     {
+      "time": "2026-09-25T08:00:00.000Z",
+      "kind": "sweep",
+      "dir": "bearish",
+      "level": 4280.62
+     },
+     {
+      "time": "2026-09-25T08:10:00.000Z",
+      "kind": "BOS",
+      "dir": "bullish",
+      "level": 4280.62
+     },
+     {
+      "time": "2026-09-25T10:05:00.000Z",
+      "kind": "BOS",
+      "dir": "bullish",
+      "level": 4297.54
+     }
+    ]
+   },
+   "premium_discount": {
+    "range_high": 4309.52,
+    "range_low": 4291.0,
+    "equilibrium": 4300.26,
+    "position": 0.775,
+    "zone": "premium",
+    "in_ote": false
+   },
+   "zones": {
+    "fvg": [
+     {
+      "dir": "bullish",
+      "top": 4299.19,
+      "bottom": 4296.29,
+      "formed": "2026-09-25T10:05:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 0.61,
+      "age_bars": 6
+     },
+     {
+      "dir": "bullish",
+      "top": 4290.16,
+      "bottom": 4289.24,
+      "formed": "2026-09-25T08:40:00.000Z",
+      "fill_pct": 52,
+      "touched": true,
+      "strength_atr": 0.2,
+      "age_bars": 23
+     },
+     {
+      "dir": "bullish",
+      "top": 4285.44,
+      "bottom": 4285.01,
+      "formed": "2026-09-25T08:30:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 0.1,
+      "age_bars": 25
+     }
+    ],
+    "order_blocks": [
+     {
+      "dir": "bullish",
+      "top": 4296.34,
+      "bottom": 4289.68,
+      "formed": "2026-09-25T09:25:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 2.55,
+      "age_bars": 7
+     },
+     {
+      "dir": "bullish",
+      "top": 4275.68,
+      "bottom": 4272.21,
+      "formed": "2026-09-25T07:25:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 2.56,
+      "age_bars": 30
+     },
+     {
+      "dir": "bullish",
+      "top": 4268.51,
+      "bottom": 4265.63,
+      "formed": "2026-09-25T05:55:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 2.65,
+      "age_bars": 53
+     }
+    ]
+   },
+   "liquidity": {
+    "buy_side_above": [
+     {
+      "level": 4309.52,
+      "touches": 1
+     }
+    ],
+    "sell_side_below": [
+     {
+      "level": 4291.0,
+      "touches": 1
+     },
+     {
+      "level": 4289.68,
+      "touches": 1
+     },
+     {
+      "level": 4274.98,
+      "touches": 1
+     }
+    ]
+   },
+   "indicators": {
+    "close": 4305.36,
+    "atr14": 4.4,
+    "rsi14": 64.0,
+    "macd_hist": 0.21,
+    "adx14": 50.8,
+    "plus_di": 26.5,
+    "minus_di": 10.5,
+    "bb_width_pct": 0.534,
+    "bb_pct_b": 0.788,
+    "ema20": 4299.18,
+    "ema50": 4290.79,
+    "ema200": 4277.63,
+    "ema_alignment": "bullish",
+    "session_vwap": 4281.47,
+    "vwap_quality": "approx"
+   },
+   "patterns": {
+    "last_bar": [],
+    "prev_bar": []
+   },
+   "range": {
+    "high": 4309.52,
+    "low": 4279.69,
+    "width_atr": 6.78,
+    "is_range": false,
+    "position": 0.861
+   }
+  },
+  "1m": {
+   "bars": 240,
+   "quality": {
+    "bars": 240,
+    "last_bar_end_lag_s": 42.4,
+    "stale": false,
+    "status": "ok"
+   },
+   "recent": [
+    [
+     "2026-09-25T10:38:00.000Z",
+     4305.53,
+     4305.82,
+     4303.34,
+     4303.47,
+     124.0
+    ],
+    [
+     "2026-09-25T10:39:00.000Z",
+     4303.46,
+     4303.79,
+     4303.23,
+     4303.67,
+     129.0
+    ],
+    [
+     "2026-09-25T10:40:00.000Z",
+     4303.73,
+     4303.73,
+     4302.27,
+     4303.04,
+     123.0
+    ],
+    [
+     "2026-09-25T10:41:00.000Z",
+     4303.05,
+     4303.15,
+     4302.34,
+     4303.15,
+     127.0
+    ],
+    [
+     "2026-09-25T10:42:00.000Z",
+     4303.19,
+     4303.78,
+     4303.08,
+     4303.35,
+     99.0
+    ],
+    [
+     "2026-09-25T10:43:00.000Z",
+     4303.5,
+     4304.93,
+     4303.18,
+     4304.93,
+     123.0
+    ],
+    [
+     "2026-09-25T10:44:00.000Z",
+     4304.96,
+     4305.97,
+     4304.55,
+     4305.36,
+     135.0
+    ],
+    [
+     "2026-09-25T10:45:00.000Z",
+     4305.41,
+     4306.07,
+     4305.2,
+     4305.2,
+     124.0
+    ],
+    [
+     "2026-09-25T10:46:00.000Z",
+     4305.24,
+     4305.49,
+     4303.92,
+     4304.73,
+     133.0
+    ],
+    [
+     "2026-09-25T10:47:00.000Z",
+     4304.76,
+     4305.9,
+     4304.76,
+     4305.82,
+     110.0
+    ]
+   ],
+   "recent_columns": [
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "tick_volume"
+   ],
+   "structure": {
+    "trend": "bearish",
+    "last_swing_high": {
+     "price": 4308.87,
+     "time": "2026-09-25T10:31:00.000Z"
+    },
+    "last_swing_low": {
+     "price": 4302.27,
+     "time": "2026-09-25T10:40:00.000Z"
+    },
+    "events": [
+     {
+      "time": "2026-09-25T10:24:00.000Z",
+      "kind": "sweep",
+      "dir": "bearish",
+      "level": 4308.11
+     },
+     {
+      "time": "2026-09-25T10:25:00.000Z",
+      "kind": "sweep",
+      "dir": "bearish",
+      "level": 4308.11
+     },
+     {
+      "time": "2026-09-25T10:26:00.000Z",
+      "kind": "BOS",
+      "dir": "bullish",
+      "level": 4308.11
+     },
+     {
+      "time": "2026-09-25T10:33:00.000Z",
+      "kind": "sweep",
+      "dir": "bullish",
+      "level": 4305.99
+     },
+     {
+      "time": "2026-09-25T10:34:00.000Z",
+      "kind": "CHoCH",
+      "dir": "bearish",
+      "level": 4305.99
+     },
+     {
+      "time": "2026-09-25T10:38:00.000Z",
+      "kind": "BOS",
+      "dir": "bearish",
+      "level": 4305.21
+     }
+    ]
+   },
+   "premium_discount": {
+    "range_high": 4308.87,
+    "range_low": 4302.27,
+    "equilibrium": 4305.57,
+    "position": 0.538,
+    "zone": "premium",
+    "in_ote": false
+   },
+   "zones": {
+    "fvg": [
+     {
+      "dir": "bullish",
+      "top": 4305.48,
+      "bottom": 4302.11,
+      "formed": "2026-09-25T10:13:00.000Z",
+      "fill_pct": 95,
+      "touched": true,
+      "strength_atr": 1.56,
+      "age_bars": 33
+     },
+     {
+      "dir": "bearish",
+      "top": 4307.9,
+      "bottom": 4306.59,
+      "formed": "2026-09-25T10:32:00.000Z",
+      "fill_pct": 38,
+      "touched": true,
+      "strength_atr": 0.81,
+      "age_bars": 14
+     },
+     {
+      "dir": "bullish",
+      "top": 4304.55,
+      "bottom": 4303.78,
+      "formed": "2026-09-25T10:43:00.000Z",
+      "fill_pct": 82,
+      "touched": true,
+      "strength_atr": 0.53,
+      "age_bars": 3
+     }
+    ],
+    "order_blocks": [
+     {
+      "dir": "bearish",
+      "top": 4307.09,
+      "bottom": 4305.65,
+      "formed": "2026-09-25T10:35:00.000Z",
+      "fill_pct": 29,
+      "touched": true,
+      "strength_atr": 2.24,
+      "age_bars": 9
+     },
+     {
+      "dir": "bearish",
+      "top": 4309.52,
+      "bottom": 4307.5,
+      "formed": "2026-09-25T10:26:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 2.37,
+      "age_bars": 13
+     },
+     {
+      "dir": "bullish",
+      "top": 4301.57,
+      "bottom": 4299.82,
+      "formed": "2026-09-25T10:10:00.000Z",
+      "fill_pct": 0,
+      "touched": false,
+      "strength_atr": 3.1,
+      "age_bars": 34
+     }
+    ]
+   },
+   "liquidity": {
+    "buy_side_above": [
+     {
+      "level": 4308.87,
+      "touches": 1
+     },
+     {
+      "level": 4309.52,
+      "touches": 1
+     }
+    ],
+    "sell_side_below": [
+     {
+      "level": 4302.27,
+      "touches": 1
+     },
+     {
+      "level": 4293.98,
+      "touches": 1
+     },
+     {
+      "level": 4291.0,
+      "touches": 1
+     }
+    ]
+   },
+   "indicators": {
+    "close": 4305.82,
+    "atr14": 1.4,
+    "rsi14": 55.2,
+    "macd_hist": -0.18,
+    "adx14": 21.2,
+    "plus_di": 25.1,
+    "minus_di": 24.4,
+    "bb_width_pct": 0.158,
+    "bb_pct_b": 0.532,
+    "ema20": 4305.05,
+    "ema50": 4303.12,
+    "ema200": 4291.87,
+    "ema_alignment": "bullish",
+    "session_vwap": 4288.18,
+    "vwap_quality": "approx"
+   },
+   "patterns": {
+    "last_bar": [
+     "bullish_marubozu"
+    ],
+    "prev_bar": []
+   },
+   "range": {
+    "high": 4309.52,
+    "low": 4302.27,
+    "width_atr": 5.18,
+    "is_range": true,
+    "position": 0.49
+   }
+  }
+ },
+ "confluence": {
+  "score": 0.044,
+  "bias": "mixed"
+ },
+ "orderflow": {
+  "bar_delta": {
+   "data_quality": "unavailable",
+   "reason": "no trades / real volume on the broker feed; proxy binance_usdm:XAUUSDT pending validation (P1.11)"
+  },
+  "footprint": {
+   "data_quality": "unavailable",
+   "reason": "no trades / real volume on the broker feed; proxy binance_usdm:XAUUSDT pending validation (P1.11)"
+  },
+  "tpo_today": {
+   "data_quality": "real",
+   "poc": 4275.5,
+   "vah": 4294.5,
+   "val": 4272.0,
+   "coverage": 0.725
+  },
+  "tick_volume_profile_today": {
+   "poc": 4275.5,
+   "vah": 4294.0,
+   "val": 4272.0,
+   "coverage": 0.71,
+   "data_quality": "approx"
+  }
+ },
+ "derivatives": {
+  "data_quality": "proxy",
+  "source": "binance_usdm:XAUUSDT",
+  "reason": "binance_usdm:XAUUSDT perpetual (different instrument)",
+  "funding": [
+   {
+    "time": "2026-09-25T00:00:00.002Z",
+    "rate": 3.7e-05
+   },
+   {
+    "time": "2026-09-25T04:00:00.001Z",
+    "rate": 9e-06
+   },
+   {
+    "time": "2026-09-25T08:00:00.001Z",
+    "rate": 6.7e-05
+   }
+  ],
+  "open_interest": {
+   "last": 114813.858,
+   "change_pct_1h": null,
+   "change_pct_4h": null,
+   "change_pct_24h": null
+  },
+  "positioning": {
+   "time": "2026-09-25T10:40:00.000Z",
+   "top_trader_account_ls": 5.649,
+   "top_trader_position_ls": 2.985,
+   "global_account_ls": 4.691,
+   "taker_buy_sell_vol_ratio": null
+  },
+  "mark": {
+   "mark": 4308.81,
+   "index": 4306.78
+  }
+ },
+ "history": []
+}

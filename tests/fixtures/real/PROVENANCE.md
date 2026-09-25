@@ -9,3 +9,4 @@ All files are unmodified slices of real market data (spec §0: no synthetic data
 | `xauusd_ticks_3000.csv` | MetaTrader 5, WindsorBrokers1-Demo, `XAUUSD@` `copy_ticks_range` (server→UTC via ServerTimeModel, key = time_msc*1000+seq) | 3000 consecutive ticks from 2026-09-21T10:40:35.664Z |
 
 Produced by `research/bench/bench_prepare.py` (cached Parquet) and sliced with pyarrow.
+| `payload_xauusd.json` | `SnapshotBuilder.build("XAUUSD", as_of)` on the production database (MT5 WindsorBrokers1-Demo + Binance USDⓈ-M XAUUSDT), 2026-09-25 ≈10:50 UTC | one complete real snapshot payload |

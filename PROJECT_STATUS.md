@@ -5,9 +5,9 @@
 > Spec: `AI_Trading_System_Spec_EN.md`. Approved plan (Arabic): see Decision Log D-001.
 
 ## Overview
-- **Started:** 2026-09-25. **Approx. completion:** 48%.
-- **Current milestone:** M8 (AI orchestration) next: P8.5 orchestrator, P8.6 triggers, P8.7 decision store; then M9 execution
-- **Summary:** M0–M4 complete and running in production (Binance + MT5 live & backfill since 2026-09-25 ~10:40 UTC, self-healing audit). M6 complete (indicators, SMC, order flow, footprint verified vs klines, context, capability matrix, snapshot builder ≈2 s for 3 pairs). M8: contract, providers, cost governor, prompts done — live AI call waits for H4 (GOOGLE_API_KEY). 105 unit + 5 integration tests.
+- **Started:** 2026-09-25. **Approx. completion:** 55%.
+- **Current milestone:** M9 (risk gate, sizing, paper/MT5 execution, executor) next
+- **Summary:** M0–M4 running in production; M6 complete; M8 complete except live AI runs (P8.2 live call / P8.8 need H4 = GOOGLE_API_KEY). Engine service ready (`python -m tradingsystem engine`, triggers verified on live data). 111 unit + 5 integration tests.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
@@ -699,25 +699,31 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P8.5: Orchestrator and modes
-- Status: ⏳ Not Started
-- Description: 4 required modes + `agent_per_pair_with_risk_reviewer` + `multi_provider_consensus`; parallelism cap; sub-agent failure policy.
-- Affected files: `src/tradingsystem/ai/{orchestrator.py,modes/*}`
-- What was done: — · Why this way: spec §4.2. · Notes/open issues: —
-- The exact next step: after P6.13 + P8.4.
+- Status: ✅ Completed
+- Description: 4 required modes + risk-reviewer + multi-provider consensus; parallelism cap; failure policy.
+- Affected files: `src/tradingsystem/ai/orchestrator.py`, `tests/unit/test_orchestrator.py`, `tests/fixtures/real/payload_xauusd.json`
+- What was done: `Orchestrator.run_cycle` builds + stores payloads (with recent-decision history), then dispatches: single_agent_global (RecommendationSet; a missing pair → invalid), agent_per_pair, agent_per_timeframe (6 analysts over all pairs → per-pair coordinator), agent_per_pair_and_timeframe (6 analysts per pair → coordinator), agent_per_pair_with_risk_reviewer (reviewer can approve/modify/reject; an unreviewable trade is withheld), multi_provider_consensus (deterministic strict-majority aggregation, lowest confidence). Cost Governor degrades the mode (level ≥1 → agent_per_pair, 3 → paused). Semaphore = `max_parallel_calls`. 6 tests with a scripted provider and a real payload.
+- Why this way: spec §4.2 — all architectures ready, one active via `AGENT_MODE`.
+- Notes/open issues: live run pending H4.
+- The exact next step: —
 
 ### Phase P8.6: Trigger policies + next-review scheduler
-- Status: ⏳ Not Started
-- Description: every_close / on_setup_event / hybrid; time & price conditions on live data.
-- Affected files: `src/tradingsystem/ai/{triggers,review_scheduler}.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P8.5.
+- Status: ✅ Completed
+- Description: every_close / on_setup_event / hybrid; next_review time & price conditions.
+- Affected files: `src/tradingsystem/ai/triggers.py`, `src/tradingsystem/analysis/engine.py`
+- What was done: setup detection on closed bars (strong: BOS/CHoCH or liquidity sweep on the decision TF/1h at the last bar; weak: price inside a bias-aligned OB/FVG, within 0.3 ATR of unswept liquidity, reversal candle in a zone, stacked footprint imbalances, absorption, price/CVD divergence) → fire on ≥1 strong or ≥2 weak; next_review (minutes, price above/below, candle close above/below); hybrid idle timeout (120 min); per-pair spacing 15 min; market-closed pairs skipped. `engine --triggers` on live data fired for ETH (1h CHoCH + stacked imbalances + divergence) and XAU (1h liquidity sweep).
+- Why this way: quality over quantity (spec §6) and free-tier quotas (D-003).
+- Notes/open issues: thresholds to be calibrated by the P6.15 replay study.
+- The exact next step: —
 
 ### Phase P8.7: Decision persistence
-- Status: ⏳ Not Started
+- Status: ✅ Completed
 - Description: snapshot, prompt hash, raw/parsed output, usage, latency, config hash, git SHA — linked.
 - Affected files: `src/tradingsystem/ai/store.py`
-- What was done: — · Why this way: spec §8.3. · Notes/open issues: —
-- The exact next step: after P8.5.
+- What was done: `app.db` tables `ai_payloads` (zlib JSON by payload hash), `ai_decisions` (status, decision, levels, RR, validity, raw text, errors, cost, tokens, latency, execution_state, outcome & virtual-outcome fields), `ai_sub_outputs` (analysts / reviewer / consensus members). `recent()` feeds the snapshot `history` block.
+- Why this way: spec §8.3.
+- Notes/open issues: outcomes are written by the execution layer (M9).
+- The exact next step: —
 
 ### Phase P8.8: Live run of all modes (Gemini free)
 - Status: ⏳ Not Started
