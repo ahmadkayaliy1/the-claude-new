@@ -44,8 +44,10 @@ def run_binance(data_dir: str | None = None, backfill: bool = True) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, svc.stop.set)
-            except NotImplementedError:    # Windows: fall back to KeyboardInterrupt
+            except NotImplementedError:    # Windows: use plain signal handlers below
                 pass
+        if hasattr(signal, "SIGBREAK"):    # supervisor's graceful stop on Windows (CTRL_BREAK_EVENT)
+            signal.signal(signal.SIGBREAK, lambda *_: loop.call_soon_threadsafe(svc.stop.set))
         await svc.run()
 
     try:

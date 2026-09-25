@@ -263,7 +263,7 @@ def main(data_dir: str | None = None, backfill: bool = True) -> None:
     def _stop(*_: object) -> None:
         svc.stop = True
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", signal.SIGTERM)):
         try:
             signal.signal(sig, _stop)
         except (ValueError, OSError):

@@ -5,9 +5,9 @@
 > Spec: `AI_Trading_System_Spec_EN.md`. Approved plan (Arabic): see Decision Log D-001.
 
 ## Overview
-- **Started:** 2026-09-25. **Approx. completion:** 64%.
-- **Current milestone:** M10 (API + dashboard) and M5 (supervisor) next; P9.6 MT5 position manager pending
-- **Summary:** M0–M4 in production; M6 and M8 complete (live AI waits for H4); M9: gate, sizing, paper backend, MT5 backend (order_check verified on demo), executor (paper) and virtual outcomes done. 134 unit + 5 integration tests.
+- **Started:** 2026-09-25. **Approx. completion:** 72%.
+- **Current milestone:** Waiting on H4 (Gemini key) for live AI; meanwhile soak (P3.9/P4.6), recorder (P1.12), backfills run
+- **Summary:** M0–M4, M6, M8, M10 essentially complete; M9 paper execution complete (MT5 demo sends await H6); supervisor runs every service in production since 2026-09-25 11:13 UTC (dashboard http://127.0.0.1:8765). Next: H4 → first live AI decisions (P8.2/P8.8) → paper run; P1.11 gold-proxy study and P7.1 price matching once enough data (≥72 h); P6.15 replay study; P9.6 MT5 position manager; P5.3 ops/autostart.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
@@ -66,6 +66,8 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - [2026-09-25] **D-025** Self-healing ingestion: the Binance live service snapshots the last live aggTrade id at disconnect (outage gap-fill) and audits the last 2 h every 5 min, re-fetching aggTrade id holes and missing ≤1h candles from REST. Found and fixed a real 479-trade hole after a network flap (verified: footprint == kline volume per minute).
 - [2026-09-25] **D-026** Futures bookTicker dropped from live ingestion (≈850 msg/s starved the event loop → keepalive timeouts); the research recorder still captures it for price matching. WebSocket pings relaxed to 60 s / 90 s.
 - [2026-09-25] **D-027** AI levels are expressed in the *analysis* instrument's price space (`meta.price_reference`); the execution layer translates them to the execution instrument by the live basis (P7.3). Gold analyses and executes on the same instrument.
+- [2026-09-25] **D-028** Dashboard = FastAPI + vanilla JS (no build step) + locally vendored TradingView lightweight-charts 4.2.3 — lighter than React/Vite on 4 GB machines and editable without a toolchain.
+- [2026-09-25] **D-029** Production runs under the supervisor (`run all`, Windows Job Object, process-tree kills). The research recorder (P1.12) runs separately until its 3–7 day window ends.
 
 ## Phases
 
@@ -469,22 +471,22 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 ### M5 — Operations
 
 ### Phase P5.1: Supervisor
-- Status: ⏳ Not Started
-- Description: spawn, heartbeats, backoff restarts, graceful Windows stop.
-- Affected files: `src/tradingsystem/supervisor/*`
-- What was done: —
-- Why this way: spec §11.7 single run command.
-- Notes/open issues: —
-- The exact next step: after P3.5/P4.4.
+- Status: ✅ Completed
+- Description: one command runs every layer; restarts; graceful Windows stop; no orphans.
+- Affected files: `src/tradingsystem/supervisor/supervisor.py`, `src/tradingsystem/ingest/main.py`, `ingest/mt5/service.py`
+- What was done: `python -m tradingsystem run all` (or a comma list / `--without`) spawns ingest-binance, ingest-mt5, engine, executor, api; Windows Job Object (kill-on-close); exit → restart with backoff; stale heartbeat (> 90–120 s) → kill the whole process tree (the venv launcher starts the real interpreter as a child) and restart; `data/STOP_ALL` or Ctrl+C → CTRL_BREAK then tree kill; SIGBREAK handlers flush the ingesters. Verified: graceful stop left no orphans; killing the engine's interpreter → restarted 9 s later. Production runs under the supervisor since 2026-09-25 11:13 UTC.
+- Why this way: spec §11.7; D-019 (hung MT5 calls can only be handled from outside).
+- Notes/open issues: the supervisor itself is not yet auto-started at boot (P5.3).
+- The exact next step: —
 
 ### Phase P5.2: Resource profiles
-- Status: ⏳ Not Started
-- Description: `low` / `standard` profiles; measured RSS within budget (<≈1 GB on low).
-- Affected files: `config/config.example.yaml`, `docs/benchmarks/resources.md`
-- What was done: —
-- Why this way: spec §11.8 (4 GB RAM minimum).
-- Notes/open issues: —
-- The exact next step: after P5.1.
+- Status: 🔄 In Progress
+- Description: `low` / `standard` profiles; measured RSS.
+- Affected files: `config/config.yaml` (`resources`), dashboard Health tab
+- What was done: measured on the dev PC (2026-09-25 11:14 UTC, all services + both backfills + research recorder): executor 154 MB, binance backfill worker 126 MB, ingest-binance 85, engine 82, api 78, mt5 backfill worker 74, ingest-mt5 63, supervisor 35 MB → core services ≈ 500 MB, ≈ 700 MB while backfilling; MT5 terminal 392 MB. The PC itself was at 97.8 % RAM because of other apps (Claude desktop 1.4 GB, MicrosoftHost 1.4 GB, ChatGPT, Edge…).
+- Why this way: spec §11.8 (must run on 4 GB).
+- Notes/open issues: on a 4 GB PC the budget is ≈ Windows 2–2.5 GB + MT5 0.4 GB + our ≈0.5–0.7 GB → workable only with other apps closed; `low` profile knobs (DuckDB limits, smaller SQLite cache, engine-in-subprocess) not yet wired into every service.
+- The exact next step: wire `resources.<profile>` into engine/backfill (DuckDB memory, cache sizes) and re-measure with `RESOURCE_PROFILE=low`.
 
 ### Phase P5.3: Ops runbook 👤
 - Status: ⏳ Not Started
@@ -814,53 +816,67 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 ### M10 — API and dashboard
 
 ### Phase P10.1: FastAPI read API + WS publisher
-- Status: ⏳ Not Started
-- Description: read endpoints; WS push driven by DB polling; localhost bind; token auth.
-- Affected files: `src/tradingsystem/api/*`
-- What was done: — · Why this way: spec §8. · Notes/open issues: —
-- The exact next step: after M3/M4.
+- Status: ✅ Completed
+- Description: read endpoints; WebSocket push; localhost bind; token.
+- Affected files: `src/tradingsystem/api/app.py`
+- What was done: `/api/pairs|status|candles|decisions|decisions/{id}|performance|events`, `/ws` (1 s push of quotes, collector/engine/executor state, new decisions — server-side DB polling), stale-heartbeat flag, cached process scan; bound to 127.0.0.1.
+- Why this way: spec §8, D-007.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P10.2: Web build pipeline
-- Status: ⏳ Not Started
-- Description: Vite + React + TS + lightweight-charts; `web/dist` served by API.
-- Affected files: `web/*`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P10.1.
+- Status: ✅ Completed
+- Description: front-end delivery.
+- Affected files: `web/index.html`, `web/static/{app.js,style.css}`, `web/static/vendor/lightweight-charts*`
+- What was done: D-028 — no build step: vanilla JS + TradingView lightweight-charts 4.2.3 vendored locally (Apache-2.0 licence file included), served by FastAPI.
+- Why this way: lighter on 4 GB machines, no Node toolchain at runtime, easier for any agent to modify.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P10.3: Live panel
-- Status: ⏳ Not Started
-- Description: prices, latest candle, collector status + last update.
-- Affected files: `web/src/*`
-- What was done: — · Why this way: spec §8.1. · Notes/open issues: —
-- The exact next step: after P10.2.
+- Status: ✅ Completed
+- Description: prices, latest decision, collector status.
+- Affected files: `web/static/app.js`
+- What was done: per-pair cards (analysis price, execution bid/ask/spread, basis, quote ages, latest recommendation with levels) and the collector table (state, last data, heartbeat, counters, last error). Verified in the browser with live data.
+- Why this way: spec §8.1.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P10.4: Historical browser
-- Status: ⏳ Not Started
-- Description: pair/TF/range browsing with lazy loading and overlays.
-- Affected files: `web/src/*`
-- What was done: — · Why this way: spec §8.2. · Notes/open issues: —
-- The exact next step: after P10.3.
+- Status: ✅ Completed
+- Description: instrument/TF/range browsing with overlays.
+- Affected files: `web/static/app.js`, `/api/candles`
+- What was done: any instrument × timeframe × date range (hot + cold), candlestick chart, latest recommendation's entry/SL/TP lines when the instrument matches its price reference. Verified with real BTCUSDT 15m history.
+- Why this way: spec §8.2.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P10.5: Recommendation log
-- Status: ⏳ Not Started
-- Description: snapshot → AI output → outcome chain.
-- Affected files: `web/src/*`
-- What was done: — · Why this way: spec §8.3. · Notes/open issues: —
-- The exact next step: after P8.7.
+- Status: ✅ Completed
+- Description: snapshot → AI output → gate → outcome chain.
+- Affected files: `web/static/app.js`, `/api/decisions/{id}`
+- What was done: decisions table (status, decision, RR, execution state, outcome, virtual outcome, cost) and a detail view: summary, reasoning, instructions, data-quality notes, capability flags, gate checks, recommendation JSON, sub-agent outputs, paper legs, full payload, raw model output.
+- Why this way: spec §8.3.
+- Notes/open issues: to be exercised with real decisions once H4 is done.
+- The exact next step: —
 
 ### Phase P10.6: Execute Now
-- Status: ⏳ Not Started
-- Description: confirm dialog, idempotency key, gate result shown.
-- Affected files: `web/src/*`, `src/tradingsystem/api/routes/*`
-- What was done: — · Why this way: spec §8.4. · Notes/open issues: —
-- The exact next step: after P9.6.
+- Status: 🔄 In Progress
+- Description: confirm dialog, idempotency, gate result shown.
+- Affected files: `web/static/app.js`, `src/tradingsystem/api/app.py`
+- What was done: button per recommendation (enabled only for valid, unexpired, not-yet-executed trades) → confirm → `POST /api/decisions/{id}/execute` with `X-Dashboard-Token` header (CSRF-safe) and Origin check → `execution_state='queued'` → executor re-validates with live prices; repeated clicks are idempotent.
+- Why this way: spec §8.4 / §7.1 manual mode.
+- Notes/open issues: end-to-end click test needs a real decision (after H4).
+- The exact next step: after the first real recommendation, click Execute Now in paper mode and verify the gate result and paper legs in the detail view.
 
 ### Phase P10.7: Health page
-- Status: ⏳ Not Started
-- Description: ingestion latency, last error, connection status, RSS, WAL sizes, AI spend vs PnL.
-- Affected files: `web/src/*`
-- What was done: — · Why this way: spec §8.5. · Notes/open issues: —
-- The exact next step: after P10.3.
+- Status: ✅ Completed
+- Description: latency, errors, RSS, disk, AI spend.
+- Affected files: `web/static/app.js`
+- What was done: processes RSS, free disk, healthy-collector count, AI usage today per provider, ingestion events (disconnects with outage duration, audit fills, gate rejections, supervisor restarts).
+- Why this way: spec §8.5.
+- Notes/open issues: —
+- The exact next step: —
 
 ### M11 — Integration and go-live
 

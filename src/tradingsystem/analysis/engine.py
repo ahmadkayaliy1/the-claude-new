@@ -52,6 +52,18 @@ class Engine:
         self.last_call: dict[str, int] = {}
         self.stop = False
 
+    _ai_problem: str = ""
+
+    def ai_ready(self) -> bool:
+        """True when the active provider can be constructed (e.g. its API key is set — H4)."""
+        try:
+            self.orch.provider()
+            self._ai_problem = ""
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._ai_problem = str(exc)
+            return False
+
     def _data_ready(self, pair: str, bar_open: int) -> bool:
         inst = self.reg.primary(pair)
         tf = self.s.pairs[pair].decision_timeframe
@@ -98,6 +110,12 @@ class Engine:
             if fire:
                 queue.append(CycleRequest(pair, "; ".join(reasons)[:600]))
                 self.last_call[pair] = now
+        if queue and not self.ai_ready():
+            log.warning("AI provider not ready (%s) — %d triggered pair(s) not analysed", self._ai_problem,
+                        len(queue))
+            self.appdb.add_event("engine", "ai_not_ready", f"{self._ai_problem}; skipped: "
+                                 + ", ".join(q.pair for q in queue))
+            return
         if queue:
             try:
                 await self.orch.run_cycle(queue, as_of=now)
@@ -119,6 +137,7 @@ class Engine:
                 self.appdb.set_status("engine", "live", last_data_ms=now_ms(), detail={
                     "mode": self.s.ai.agent_mode, "policy": self._policy(), "provider": self.s.ai.active_provider,
                     "governor_level": st.level, "governor_reason": st.reason, "ai_spend_today_usd": round(st.spend_today, 4),
+                    "ai_ready": self.ai_ready(), "ai_problem": self._ai_problem or None,
                     "processed": {p: iso(b) for p, b in self.processed.items()}})
             except Exception as exc:  # noqa: BLE001
                 log.exception("engine tick failed")
