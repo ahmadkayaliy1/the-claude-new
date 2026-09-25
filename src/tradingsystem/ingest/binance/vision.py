@@ -60,6 +60,7 @@ AGG_COLS_FUT = ["agg_id", "price", "qty", "first_id", "last_id", "ts", "is_buyer
 VISION_RETRY_DEADLINE_S = 900.0   # consecutive-failure budget per request (post-wake recovery took ≈ 5.5 min)
 RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 DOWNLOAD_CHUNK = 1 << 20
+BEAT_S = 30.0                     # collector heartbeat interval while one request/download is in progress
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 T = TypeVar("T")
 
@@ -134,9 +135,21 @@ class VisionClient:
                                  follow_redirects=True, transport=transport)
         self.bytes_downloaded = 0
         self._listings: dict[str, list[str]] = {}     # per pass (one client per pass)
+        self.beat: Callable[[str], None] | None = None  # heartbeat hook during long transfers / retry waits
+        self._last_beat = 0.0
 
     def close(self) -> None:
         self.http.close()
+
+    def _beat(self, msg: str, force: bool = False) -> None:
+        now = self._clock()
+        if self.beat is None or (not force and now - self._last_beat < BEAT_S):
+            return
+        self._last_beat = now
+        try:
+            self.beat(msg)
+        except Exception:  # noqa: BLE001 — bookkeeping never fails a download
+            log.exception("vision heartbeat failed")
 
     # ------------------------------------------------------------------ retry
     @staticmethod
@@ -167,6 +180,7 @@ class VisionClient:
                 if self._clock() + wait > deadline:
                     raise VisionTransientError(f"{what}: {exc!r}") from exc
                 log.warning("vision %s failed (%r) — retry %d in %.0fs", what, exc, i + 1, wait)
+                self._beat(f"retrying {what}: {exc!r}", force=True)
                 self._sleep(wait)
                 i += 1
 
@@ -270,11 +284,13 @@ class VisionClient:
         raise VisionTransientError(f"CHECKSUM mismatch for {f.key} twice")
 
     def _stream_to(self, url: str, part: Path, what: str) -> None:
-        """GET ``url`` into ``part`` in 1 MiB chunks, resuming with Range after errors (budget resets on progress)."""
+        """GET ``url`` into ``part`` as bytes arrive; resumes with Range after errors (budget resets on progress)."""
         deadline, i, etag = self._clock() + self.retry_deadline_s, 0, None
         while True:
             have = part.stat().st_size if part.exists() else 0
-            headers = {"Range": f"bytes={have}-"} if have else {}
+            headers = {"Accept-Encoding": "identity"}             # byte offsets = file offsets
+            if have:
+                headers["Range"] = f"bytes={have}-"
             if have and etag:
                 headers["If-Range"] = etag
             try:
@@ -289,9 +305,10 @@ class VisionClient:
                         raise httpx.RemoteProtocolError(f"unexpected Content-Range {r.headers.get('content-range')}")
                     self._check_disk(int(r.headers.get("content-length") or 0))
                     with open(part, "ab" if resumed else "wb") as fh:
-                        for chunk in r.iter_bytes(DOWNLOAD_CHUNK):
+                        for chunk in r.iter_bytes():         # as they arrive: a drop loses nothing written
                             fh.write(chunk)
                             self.bytes_downloaded += len(chunk)
+                            self._beat(f"downloading {what}: {fh.tell() / 2**20:.0f} MB")
                 return
             except (httpx.TransportError, _RetryableStatus) as exc:
                 if part.exists() and part.stat().st_size > have:
@@ -301,13 +318,17 @@ class VisionClient:
                     raise VisionTransientError(f"download {what}: {exc!r}") from exc
                 log.warning("vision download %s interrupted at %d bytes (%r) — resume in %.0fs",
                             what, part.stat().st_size if part.exists() else 0, exc, wait)
+                self._beat(f"resuming {what}: {exc!r}", force=True)
                 self._sleep(wait)
                 i += 1
 
     def release(self, f: VisionFile) -> None:
-        """Drop the local zip once its period is recorded as done."""
+        """Drop the local zip once its period is recorded as done (a locked file is left for later)."""
         if not self.keep_zips:
-            (self.cache / f.key).unlink(missing_ok=True)
+            try:
+                (self.cache / f.key).unlink(missing_ok=True)
+            except OSError as exc:
+                log.warning("cannot delete %s: %r", f.key, exc)
 
 
 # ---------------------------------------------------------------------- parsing

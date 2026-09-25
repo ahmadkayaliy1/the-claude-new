@@ -8,9 +8,10 @@ through the GIL, the calling process; the live poller must not share it).
 * Gaps the broker cannot fill (holidays) → ``known_gaps``. Re-runs daily.
 
 Failure handling (BF-06/BF-07/OPS-02): connecting is retried with backoff (an IPC timeout right after a resume is
-normal); a ``None`` from a ``copy_*`` call is an error, never "no data" — link failures abort the step (the pass is
-retried within minutes) and other ``None`` results leave the range unverified: no ``known_gaps`` row, no cached
-earliest bar, no tick day marked done.
+normal) and repeated before a step whenever the link dropped; a ``None`` from a ``copy_*`` call is an error, never
+"no data" — link failures abort the step (the pass is retried within minutes) and other ``None`` results leave the
+range unverified: no ``known_gaps`` row, no cached earliest bar, no tick day marked done. A gap is recorded as
+``source_no_data`` only after its own range request came back verified-empty.
 """
 from __future__ import annotations
 
@@ -53,10 +54,15 @@ LIVE_WAIT_PER_CHUNK_S = 120
 CONNECT_RETRY_S = 600        # keep retrying initialize() this long before failing the pass (retried later)
 CONNECT_DELAYS_S = (2, 4, 8, 16, 32, 60)
 IPC_ERRORS = frozenset(range(-10005, -9999))   # -10000..-10005: IPC / terminal-link failures
+MAX_GAP_VERIFY = 200         # per TF and pass; further candidate source gaps wait for the next pass
 
 
 class MT5CallError(RuntimeError):
     """A ``copy_*`` call failed on the IPC/terminal link — transient, never treated as absence of data."""
+
+
+class _Unverified(RuntimeError):
+    """A probe came back ``None`` with a non-link error: the answer proves nothing either way."""
 
 
 def is_transient(exc: BaseException) -> bool:
@@ -165,18 +171,15 @@ class MT5Backfill:
         mt5 = self.term.mt5
         r = None
         for i in range(retries):
+            if i:
+                time.sleep(1.0 * i)         # the terminal may still be downloading history
             r = self._call("copy_rates_range", mt5.copy_rates_range, sym, tf_const, int(lo_srv_ms // 1000),
                            int(hi_srv_ms // 1000))
             if r is not None and len(r):
                 return r
-            time.sleep(1.0 * (i + 1))       # the terminal may still be downloading history
         if r is not None and not self.term.healthy():
             raise MT5CallError("copy_rates_range: empty while the terminal is disconnected from the broker")
         return r
-
-    @staticmethod
-    def _has(r: np.ndarray | None) -> bool:
-        return r is not None and len(r) > 0
 
     # ------------------------------------------------------------------ rates
     def candles(self, inst: Instrument, hot: SQLiteHotStore) -> None:
@@ -205,9 +208,16 @@ class MT5Backfill:
         have = hot.read_range(spec, columns=["srv_time"])["srv_time"]
         first = self._earliest_cached(hot, spec.name)
         if first is None:
-            first = self._earliest_bar(inst.symbol, tfc, max(start, 0), now_srv)     # link errors raise: no cache
-            if first is not None and self.term.healthy():
-                hot.replace(VISION_DONE, [(spec.name, "earliest_srv_ms", first, now_ms())])
+            try:
+                first = self._earliest_bar(inst.symbol, tfc, max(start, 0), now_srv)  # link errors raise: no cache
+            except _Unverified as exc:
+                log.warning("%s: earliest bar unverified (%s) — not cached", spec.name, exc)
+                if len(have) == 0:
+                    self.progress[spec.name] = "earliest bar unverified (retried next pass)"
+                    return
+            else:
+                if first is not None and self.term.healthy():
+                    hot.replace(VISION_DONE, [(spec.name, "earliest_srv_ms", first, now_ms())])
         if first is None and len(have) == 0:
             self.progress[spec.name] = "no history on server"
             return
@@ -238,32 +248,58 @@ class MT5Backfill:
                 hot.upsert(spec, res.good)
         have = hot.read_range(spec, columns=["srv_time"])["srv_time"]
         left = [g for g in mt5_candle_gaps(have, tf, lo, end, cal, self.model) if g.start not in known]
-        # only a verified-empty answer proves absence (BF-07): never record ranges whose request failed
-        confirmed = [g for g in left if not any(a <= g.end and g.start < b for a, b in unverified)]
+        # only a verified-empty answer proves absence (BF-07): never record ranges whose request failed, and ask
+        # once more for exactly the gap (a chunk answered while history was still downloading may be partial)
+        candidates = [g for g in left if not any(a <= g.end and g.start < b for a, b in unverified)]
+        confirmed = []
+        for g in candidates[:MAX_GAP_VERIFY]:
+            self._yield_to_live()
+            r = self._rates(inst.symbol, tfc, g.start, g.end, retries=2)     # copy_rates_range: both ends inclusive
+            if r is None:
+                unverified.append((g.start, g.end + tf.ms))
+                continue
+            t = r["time"].astype(np.int64) * 1000
+            inside = r[(t >= g.start) & (t <= g.end)]
+            if len(inside):
+                rows = validate_rows(spec, rates_to_rows(inside, self.model), venue="mt5").good
+                hot.upsert(spec, rows)          # late history: filled now, any rest is re-checked next pass
+            else:
+                confirmed.append(g)
         if confirmed:
             hot.upsert(KNOWN_GAPS, [(spec.name, g.start, g.end, "source_no_data", now_ms(),
                                       f"{g.count} bars absent on {self.term.profile.server} (server-time keys)")
                                      for g in confirmed])
-        note = f", {len(unverified)} chunk(s) unverified" if unverified else ""
+        note = f", {len(unverified)} range(s) unverified" if unverified else ""
+        if len(candidates) > MAX_GAP_VERIFY:
+            note += f", {len(candidates) - MAX_GAP_VERIFY} gap(s) left for the next pass"
         self.progress[spec.name] = f"done ({len(have):,} bars, {len(confirmed)} source gaps{note})"
         self.status()
 
+    def _probe(self, sym: str, tfc: int, lo: int, hi: int, retries: int = 3) -> np.ndarray:
+        """Bars in [lo, hi] as proof (possibly empty); raises ``_Unverified`` on a non-link ``None``."""
+        r = self._rates(sym, tfc, lo, hi, retries)
+        if r is None:
+            raise _Unverified(f"copy_rates_range {sym} {lo}..{hi}")
+        return r
+
     def _earliest_bar(self, sym: str, tfc: int, start_ms: int, now_srv: int) -> int | None:
+        """Earliest bar the broker serves (month binary search). Every probe must be verified, else the search
+        would land on a later month and cache a wrong floor (BF-07)."""
         lo = max(start_ms, self.model.utc_to_server(1_546_300_800_000) if start_ms == 0 else start_ms)  # ≥ 2019
         months = list(range(lo, now_srv, MONTH_MS))
         if not months:
             return None
         a, b = 0, len(months) - 1
-        if not self._has(self._rates(sym, tfc, months[b], now_srv)):
+        if not len(self._probe(sym, tfc, months[b], now_srv)):
             return None
         while a < b:
             mid = (a + b) // 2
-            if self._has(self._rates(sym, tfc, months[mid], months[mid] + MONTH_MS, retries=2)):
+            if len(self._probe(sym, tfc, months[mid], months[mid] + MONTH_MS, retries=2)):
                 b = mid
             else:
                 a = mid + 1
-        r = self._rates(sym, tfc, months[a], months[a] + MONTH_MS)
-        return int(r["time"][0]) * 1000 if self._has(r) else None
+        r = self._probe(sym, tfc, months[a], months[a] + MONTH_MS)
+        return int(r["time"][0]) * 1000 if len(r) else None
 
     @staticmethod
     def _known(hot: SQLiteHotStore, table: str) -> set[int]:
@@ -271,7 +307,7 @@ class MT5Backfill:
         return {int(s) for t, s in zip(g["table_name"], g["start"]) if t == table}
 
     # ------------------------------------------------------------------ ticks
-    def ticks(self, inst: Instrument, hot: SQLiteHotStore) -> None:
+    def ticks(self, inst: Instrument, hot: SQLiteHotStore, today: dt.date | None = None) -> None:
         start = inst.start_ms("ticks")
         if start is None or "ticks" not in inst.datatypes:
             return
@@ -280,7 +316,7 @@ class MT5Backfill:
         mt5 = self.term.mt5
         done_rows = hot.read_range(VISION_DONE, columns=["table_name", "period"])
         done = {p for t, p in zip(done_rows["table_name"], done_rows["period"]) if t == spec.name}
-        today = dt.datetime.now(dt.timezone.utc).date()
+        today = today or dt.datetime.now(dt.timezone.utc).date()
         first_day = dt.date(2019, 1, 1) if start == 0 else dt.datetime.fromtimestamp(start / 1000, dt.timezone.utc).date()
         cal = calendar_for(inst.venue, inst.symbol, self.s.pairs[inst.pair].asset_class)
         day = today - dt.timedelta(days=1)
@@ -354,21 +390,23 @@ class MT5Backfill:
                 hot = SQLiteHotStore(inst.hot_db_path(self.data), cache_mb=self.s.resource.sqlite_cache_mb)
                 hots[inst.key] = hot
                 hot.ensure_tables([*table_specs(inst), *system_specs()])
-            for step in (self.candles, self.ticks):
-                for inst in self.instruments:
-                    unit = f"{step.__name__} {inst.key}"
-                    try:
-                        self.term.ensure()          # reconnect (and re-check the account) after a link failure
-                        step(inst, hots[inst.key])
-                    except AccountMismatch as exc:
-                        log.error("%s: %s", unit, exc)
-                        res.add(unit, exc, transient=False)
-                        finish_pass(self.appdb, COLLECTOR, res)
-                        return res
-                    except Exception as exc:  # noqa: BLE001
-                        log.exception("mt5 backfill %s failed for %s", step.__name__, inst.key)
-                        self.appdb.add_event(COLLECTOR, "error", f"{unit}: {exc!r}"[:300])
-                        res.add(unit, exc, is_transient(exc))
+            for unit, step, inst in [(f"{st.__name__} {i.key}", st, i) for st in (self.candles, self.ticks)
+                                     for i in self.instruments]:
+                # the link dropped (previous unit failed, terminal re-syncing): reconnect with backoff, or end the
+                # pass (retried within minutes) instead of failing every remaining unit on a dead link
+                if not (self.term.connected and self.term.healthy()) and not self._connect(res):
+                    break
+                self.status()
+                try:
+                    step(inst, hots[inst.key])
+                except AccountMismatch as exc:
+                    log.error("%s: %s", unit, exc)
+                    res.add(unit, exc, transient=False)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("mt5 backfill %s failed for %s", step.__name__, inst.key)
+                    self.appdb.add_event(COLLECTOR, "error", f"{unit}: {exc!r}"[:300])
+                    res.add(unit, exc, is_transient(exc))
             finish_pass(self.appdb, COLLECTOR, res)
             return res
         finally:

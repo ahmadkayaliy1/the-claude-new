@@ -2,9 +2,12 @@
 
 Loop (every ``mt5.poll_interval_ms``, measured 50 ms, D-015):
   ticks: ``copy_ticks_from(cursor)`` → cursor de-dup → UTC rows (keys identical to the backfill's)
-  rates: once per second per TF, ``copy_rates_from_pos(0, 3)`` → closed bars upserted, forming bar replaced
+  rates: once per second per TF, ``copy_rates_from_pos(0, 3)`` → closed bars upserted, forming bar replaced; when
+         bars closed since the newest stored one fell out of that window (outage, stall, session break) the poll
+         fetches the range from that bar — a failed fetch is retried on the next poll (F6)
   flush: every 0.5 s, validated, one transaction per instrument
   status/heartbeat: every 2 s (``collector_status.updated_ms``) — the supervisor restarts a silent process
+  audit: every 5 min, closed intraday bars missing from the recent window (session-aware grid) are re-fetched
 Start-up: pre-live marks → gap-fill rates/ticks from the marks (short gaps; long ones → backfill worker).
 Market-closed periods (session calendar) are reported as ``market_closed``, not as errors or gaps.
 """
@@ -29,13 +32,16 @@ from ...storage.sqlite_store import SQLiteHotStore
 from ...storage.tablespec import FORMING, TableSpec, spec_for, system_specs, table_specs
 from ...storage.validators import validate_rows
 from ..common.appdb import AppDB
-from .convert import TickCursor, rates_to_rows, ticks_to_rows
+from .convert import TickCursor, mt5_candle_gaps, rates_to_rows, ticks_to_rows
 from .servertime import MonotonicServerClock, ServerTimeModel
 from .terminal import AccountMismatch, MT5Terminal
 
 log = logging.getLogger("ingest-mt5")
 COLLECTOR = "mt5"
 LIVE_GAPFILL_MAX_MS = 3 * MS_PER_DAY
+AUDIT_EVERY_S = 300
+AUDIT_WINDOW_MS = 2 * 3_600_000          # at least; 3 bars for H4
+RATES_FAIL_EVENT_AFTER = 30              # consecutive failed rate polls (≈ 30 s) while open → one event
 
 
 class MT5Sink:
@@ -48,6 +54,8 @@ class MT5Sink:
         self.cursor: TickCursor | None = None
         self.buf: dict[TableSpec, list[tuple]] = defaultdict(list)
         self.forming: dict[str, tuple] = {}
+        self.last_closed: dict[str, int] = {}      # TF → srv_time of the newest closed bar stored/buffered
+        self.rates_fail: dict[str, int] = defaultdict(int)
         self.last_tick_srv: int | None = None
         self.quote: tuple[int, float, float] | None = None
         self.rows_written = self.rows_rejected = 0
@@ -82,6 +90,7 @@ class MT5LiveService:
         self.stop = False
         self.errors = 0
         self.reconnects = 0
+        self._clear_error = False            # first status after a (re)connect clears the old error (BF-14)
 
     # ------------------------------------------------------------------ helpers
     def _tfc(self, tf: Timeframe) -> int:
@@ -107,16 +116,24 @@ class MT5LiveService:
         sink.cursor = TickCursor(sink.inst.symbol, srv, seen)
 
     def _gapfill_rates(self, sink: MT5Sink) -> None:
+        """Bars closed while disconnected. Seeds ``last_closed`` so a failed fetch here is retried by the poll."""
         mt5 = self.term.mt5
         now_srv = int(mt5.symbol_info_tick(sink.inst.symbol).time_msc)
         for tf in sink.inst.timeframes:
             spec = spec_for(sink.inst, "candles", tf)
             last = sink.hot.read_last(spec, 1, columns=["srv_time"])["srv_time"]
+            if len(last):
+                sink.last_closed[tf.value] = max(sink.last_closed.get(tf.value, 0), int(last[0]))
             lo = int(last[0]) if len(last) else now_srv - 1000 * tf.ms
             lo = max(lo, now_srv - LIVE_GAPFILL_MAX_MS - tf.ms)
             r = mt5.copy_rates_range(sink.inst.symbol, self._tfc(tf), lo // 1000, now_srv // 1000 + 1)
             if r is not None and len(r) > 1:
-                sink.buf[spec].extend(rates_to_rows(r[:-1], self.model))     # last bar is still forming
+                rows = rates_to_rows(r[:-1], self.model)                      # last bar is still forming
+                sink.buf[spec].extend(rows)
+                sink.last_closed[tf.value] = max(sink.last_closed.get(tf.value, 0), rows[-1][1])
+            elif r is None:
+                log.warning("%s %s: rates gap-fill failed (%s) — retried by the poll", sink.inst.key, tf.value,
+                            mt5.last_error())
 
     def _poll_ticks(self, sink: MT5Sink) -> None:
         mt5, cur = self.term.mt5, sink.cursor
@@ -136,15 +153,67 @@ class MT5LiveService:
         sink.quote = (last[1], last[3], last[4])
 
     def _poll_rates(self, sink: MT5Sink) -> None:
-        mt5 = self.term.mt5
+        mt5, sym = self.term.mt5, sink.inst.symbol
         for tf in sink.inst.timeframes:
-            r = mt5.copy_rates_from_pos(sink.inst.symbol, self._tfc(tf), 0, 3)
+            tfc = self._tfc(tf)
+            r = mt5.copy_rates_from_pos(sym, tfc, 0, 3)
             if r is None or len(r) == 0:
+                self._rates_failed(sink, tf, "copy_rates_from_pos")
                 continue
+            last = sink.last_closed.get(tf.value)
+            caught_up = True
+            if last is not None and len(r) > 1 and int(r[0]["time"]) * 1000 > last + tf.ms:
+                # bars closed after the newest stored one are outside the 3-bar window (outage, terminal re-sync,
+                # session break): fetch from that bar; on failure keep the mark → retried next poll (F6)
+                hi = int(r[-1]["time"])
+                rr = mt5.copy_rates_range(sym, tfc, max(last, hi * 1000 - LIVE_GAPFILL_MAX_MS) // 1000, hi)
+                if rr is not None and len(rr) and int(rr[-1]["time"]) == hi:
+                    r = rr
+                else:
+                    caught_up = False
+                    self._rates_failed(sink, tf, "copy_rates_range")
             rows = rates_to_rows(r, self.model)
-            sink.buf[spec_for(sink.inst, "candles", tf)].extend(rows[:-1])
+            closed = rows[:-1]
+            sink.buf[spec_for(sink.inst, "candles", tf)].extend(closed)
+            if caught_up:
+                sink.rates_fail[tf.value] = 0
+                if closed:
+                    sink.last_closed[tf.value] = max(last or 0, closed[-1][1])
             f = rows[-1]
             sink.forming[tf.value] = (tf.value, f[0], f[2], f[3], f[4], f[5], float(f[6]), now_ms())
+
+    def _rates_failed(self, sink: MT5Sink, tf: Timeframe, what: str) -> None:
+        n = sink.rates_fail[tf.value] = sink.rates_fail[tf.value] + 1
+        if n == RATES_FAIL_EVENT_AFTER and sink.cal.is_open(now_ms()):
+            err = self.term.mt5.last_error()
+            log.warning("%s %s: %s failing for %d polls (%s)", sink.inst.key, tf.value, what, n, err)
+            self.appdb.add_event(COLLECTOR, "rates_poll_failed", f"{sink.inst.key} {tf.value} {what}: {err}"[:300])
+
+    def _audit_rates(self) -> None:
+        """Re-fetch closed intraday bars missing from the recent window (session-aware server grid) — heals holes
+        left when the terminal's history lagged after a reconnect (F6). Bars the broker lacks are just re-asked."""
+        mt5 = self.term.mt5
+        for sink in self.sinks.values():
+            now_srv = sink.last_tick_srv
+            if now_srv is None or not sink.cal.is_open(now_ms()):
+                continue
+            for tf in sink.inst.timeframes:
+                if tf.ms >= MS_PER_DAY:
+                    continue
+                spec = spec_for(sink.inst, "candles", tf)
+                end = (now_srv // tf.ms) * tf.ms - tf.ms                     # last closed bar (server grid)
+                lo = end - max(AUDIT_WINDOW_MS, 3 * tf.ms)
+                have = sink.hot.read_last(spec, (end - lo) // tf.ms + 5, columns=["srv_time"])["srv_time"]
+                for g in mt5_candle_gaps(have, tf, lo, end, sink.cal, self.model)[:10]:
+                    r = mt5.copy_rates_range(sink.inst.symbol, self._tfc(tf), g.start // 1000, g.end // 1000)
+                    if r is None or not len(r):
+                        continue
+                    t = r["time"].astype(np.int64) * 1000
+                    rows = rates_to_rows(r[(t >= g.start) & (t <= g.end)], self.model)
+                    if rows:
+                        sink.buf[spec].extend(rows)
+                        self.appdb.add_event(COLLECTOR, "audit_fill", f"{spec.name}: {len(rows)} bars from "
+                                                                      f"srv {iso(g.start)}"[:300])
 
     # ------------------------------------------------------------------ lifecycle
     def connect(self) -> None:
@@ -159,6 +228,7 @@ class MT5LiveService:
             self._init_cursor(sink)
             self._gapfill_rates(sink)
         self.appdb.add_event(COLLECTOR, "connect", acc.server)
+        self._clear_error = True
 
     def run(self) -> None:
         interval = self.s.mt5.poll_interval_ms / 1000
@@ -203,6 +273,7 @@ class MT5LiveService:
     def _loop(self, interval: float) -> None:
         last_rates = last_flush = last_status = 0.0
         last_rollover = time.time()
+        last_audit = time.time() - AUDIT_EVERY_S + 30        # first audit shortly after every (re)connect
         while not self.stop:
             t0 = time.time()
             for sink in self.sinks.values():
@@ -226,6 +297,12 @@ class MT5LiveService:
             if t0 - last_rollover >= 1800:
                 self._rollover()
                 last_rollover = t0
+            if t0 - last_audit >= AUDIT_EVERY_S:
+                try:
+                    self._audit_rates()
+                except Exception:  # noqa: BLE001 — a failed audit must not look like a lost terminal
+                    log.exception("rates audit failed")
+                last_audit = t0
             spent = time.time() - t0
             if spent < interval:
                 time.sleep(interval - spent)
@@ -240,7 +317,8 @@ class MT5LiveService:
                   "reconnects": self.reconnects,
                   "symbols": {s.inst.symbol: {"open": s.cal.is_open(now), "last_tick": iso(s.quote[0]) if s.quote else None}
                               for s in self.sinks.values()}}
-        self.appdb.set_status(COLLECTOR, state, last_data_ms=last, detail=detail)
+        self.appdb.set_status(COLLECTOR, state, last_data_ms=last, detail=detail, clear_error=self._clear_error)
+        self._clear_error = False
 
     def _rollover(self) -> None:
         for sink in self.sinks.values():
@@ -268,14 +346,17 @@ def main(data_dir: str | None = None, backfill: bool = True) -> None:
             signal.signal(sig, _stop)
         except (ValueError, OSError):
             pass
-    worker = None
-    if backfill:
-        from .backfill import start_worker
-        worker = start_worker(data_dir)
+    keeper = keeper_done = None
+    if backfill:                  # restarted with backoff if it ever dies (BF-03)
+        from ..common.backfill_loop import WorkerKeeper
+        from .backfill import COLLECTOR as BACKFILL_COLLECTOR, start_worker
+        keeper = WorkerKeeper(lambda: start_worker(data_dir), svc.appdb, BACKFILL_COLLECTOR)
+        keeper_done = keeper.monitor()
     try:
         svc.run()
     except KeyboardInterrupt:
         svc.stop = True
     finally:
-        if worker is not None and worker.is_alive():
-            worker.terminate()
+        if keeper is not None:
+            keeper_done.set()
+            keeper.stop()

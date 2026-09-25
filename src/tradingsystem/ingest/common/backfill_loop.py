@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import multiprocessing as mp
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -124,7 +125,11 @@ def worker_loop(run_pass: Callable[[], PassResult], *, collector: str, appdb: Ap
 
 
 class WorkerKeeper:
-    """Keeps a backfill worker process alive: restarts it after an unexpected exit (30 s → 30 min backoff)."""
+    """Keeps a backfill worker process alive: restarts it after an unexpected exit (30 s → 30 min backoff).
+
+    The owning ingester calls :meth:`check` periodically — or :meth:`monitor` for a daemon thread doing it — and
+    :meth:`stop` on shutdown (after which nothing is restarted).
+    """
 
     def __init__(self, start: Callable[[], mp.Process], appdb: AppDB, collector: str, *, min_backoff_s: float = 30,
                  max_backoff_s: float = 1800, healthy_s: float = 600, clock: Callable[[], float] = time.time) -> None:
@@ -132,34 +137,60 @@ class WorkerKeeper:
         self.min_backoff_s, self.max_backoff_s, self.healthy_s, self._clock = min_backoff_s, max_backoff_s, healthy_s, clock
         self.backoff = min_backoff_s
         self.restarts = 0
-        self.proc = start()
+        self._lock = threading.Lock()
+        self._stopped = False
+        self.proc: mp.Process | None = start()
         self.started = clock()
         self.next_try: float | None = None
 
     def check(self) -> bool:
         """True while the worker runs; a dead worker is reported once and restarted after the backoff."""
-        now = self._clock()
-        if self.proc is not None and self.proc.is_alive():
-            if now - self.started > self.healthy_s:
-                self.backoff = self.min_backoff_s
-            return True
-        if self.next_try is None:
-            code = self.proc.exitcode if self.proc is not None else None
-            log.error("%s worker exited (code %s) — restart in %.0fs", self.collector, code, self.backoff)
-            _safe(self.appdb.add_event, self.collector, "worker_exit", f"exitcode={code}")
-            _safe(self.appdb.set_status, self.collector, "error", error=f"worker exited (code {code})")
-            self.next_try = now + self.backoff
-            return False
-        if now >= self.next_try:
-            self.proc = self._start()
-            self.started, self.next_try = now, None
+        with self._lock:
+            if self._stopped:
+                return False
+            now = self._clock()
+            if self.proc is not None and self.proc.is_alive():
+                if now - self.started > self.healthy_s:
+                    self.backoff = self.min_backoff_s
+                return True
+            if self.next_try is None:
+                code = self.proc.exitcode if self.proc is not None else None
+                log.error("%s worker exited (code %s) — restart in %.0fs", self.collector, code, self.backoff)
+                _safe(self.appdb.add_event, self.collector, "worker_exit", f"exitcode={code}")
+                _safe(self.appdb.set_status, self.collector, "error", error=f"worker exited (code {code})")
+                self.next_try = now + self.backoff
+                return False
+            if now < self.next_try:
+                return False
             self.restarts += 1
             self.backoff = min(self.backoff * 2, self.max_backoff_s)
+            try:
+                self.proc = self._start()
+            except Exception:  # noqa: BLE001 — try again after the (grown) backoff
+                log.exception("%s worker restart failed", self.collector)
+                self.proc, self.next_try = None, now + self.backoff
+                return False
+            self.started, self.next_try = now, None
             _safe(self.appdb.add_event, self.collector, "backfill_restart", f"restart #{self.restarts}")
             log.warning("%s worker restarted (#%d)", self.collector, self.restarts)
             return True
-        return False
+
+    def monitor(self, interval_s: float = 60.0) -> threading.Event:
+        """Run :meth:`check` every ``interval_s`` in a daemon thread; set the returned event to end it."""
+        done = threading.Event()
+
+        def loop() -> None:
+            while not done.wait(interval_s):
+                try:
+                    self.check()
+                except Exception:  # noqa: BLE001
+                    log.exception("%s keeper check failed", self.collector)
+
+        threading.Thread(target=loop, name=f"{self.collector}-keeper", daemon=True).start()
+        return done
 
     def stop(self) -> None:
-        if self.proc is not None and self.proc.is_alive():
-            self.proc.terminate()
+        with self._lock:
+            self._stopped = True
+            if self.proc is not None and self.proc.is_alive():
+                self.proc.terminate()

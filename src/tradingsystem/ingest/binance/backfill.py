@@ -7,7 +7,9 @@ Gaps the source cannot fill are recorded in ``known_gaps`` (never synthesised).
 
 Failure handling (BF-01..03, F4): every (step, instrument), timeframe and Vision file is isolated; a pass returns
 a :class:`PassResult` and the worker retries transient failures within minutes (5 → 60 min) instead of waiting
-for the next daily slot. ``done`` is recorded only after a clean pass.
+for the next daily slot. ``done`` is recorded only after a clean pass. When a unit fails on a network error and
+neither Binance REST nor Vision answers, the pass is aborted at once (``NetworkDown``) instead of spending every
+remaining unit's retry budget.
 """
 from __future__ import annotations
 
@@ -35,21 +37,26 @@ from ..common.backfill_loop import PassResult, StepIncomplete, finish_pass, work
 from . import fetch
 from .markets import MARKETS
 from .rest import BinanceHTTPError, BinanceRest, RetriesExhausted
-from .vision import (DiskFullError, VisionClient, VisionIngestor, VisionMissing, VisionTransientError,
-                     choose_kline_source)
+from .vision import DiskFullError, VisionClient, VisionIngestor, VisionTransientError, choose_kline_source
 
 log = logging.getLogger("backfill")
 COLLECTOR = "binance_backfill"
 MAX_REST_BRIDGE = {"binance_spot": 2_000_000, "binance_usdm": 300_000}   # ids; spot weight 4/req, futures 20/req
 DAILY_RUN_UTC_HOUR = 3        # Vision publishes the previous day's files overnight (lag ≈ 1 day, P1.4)
 CSV_BYTES_PER_ROW = 70        # block size = resources.parse_chunk_rows × this
+REST_RETRY_DEADLINE_S = 900   # backfill REST calls ride out a post-wake outage (live keeps its short retries)
+
+
+class NetworkDown(RuntimeError):
+    """A unit failed on a network error and nothing at Binance answers — abort the pass, retry it soon."""
 
 
 def is_transient(exc: BaseException) -> bool:
     """Network / server / lock errors a later retry can fix (never request or data errors)."""
     if isinstance(exc, StepIncomplete):
         return any(is_transient(e) for e in exc.failures.values())
-    if isinstance(exc, (httpx.TransportError, VisionTransientError, RetriesExhausted, TimeoutError, PermissionError)):
+    if isinstance(exc, (httpx.TransportError, VisionTransientError, RetriesExhausted, NetworkDown, TimeoutError,
+                        PermissionError)):
         return True
     if isinstance(exc, BinanceHTTPError):
         return exc.status >= 500 or exc.status in (408, 418, 429)
@@ -76,14 +83,38 @@ class BinanceBackfill:
         b = s.binance
         # leave most of the weight budget to the live service
         # Binance IP limits: spot 6000/min, USDⓈ-M 2400/min — the live service keeps most of its own share
-        self.rest = {"binance_spot": BinanceRest(b.spot_rest, weight_budget_per_min=2000),
-                     "binance_usdm": BinanceRest(b.usdm_rest, weight_budget_per_min=1200)}
+        self.rest = {"binance_spot": BinanceRest(b.spot_rest, weight_budget_per_min=2000,
+                                                 retry_deadline_s=REST_RETRY_DEADLINE_S),
+                     "binance_usdm": BinanceRest(b.usdm_rest, weight_budget_per_min=1200,
+                                                 retry_deadline_s=REST_RETRY_DEADLINE_S)}
         self.progress: dict[str, str] = {}
         self._first_bar: dict[tuple[str, str], int] = {}
+        self.vision.beat = self._vision_beat
 
     def status(self, state: str = "backfilling", error: str | None = None) -> None:
         self.progress["downloaded_mb"] = f"{self.vision.bytes_downloaded / 2**20:.0f}"
         self.appdb.set_status(COLLECTOR, state, error=error, detail=self.progress)
+
+    def _vision_beat(self, msg: str) -> None:
+        """Heartbeat while one Vision download / retry wait runs for minutes (worker thread; AppDB is locked)."""
+        self.progress["vision"] = msg[:120]
+        self.status()
+
+    async def _network_up(self) -> bool:
+        """Any HTTP answer from Binance REST or Vision means the network works (a failed unit is then its own
+        problem, not an outage)."""
+        for url in (self.rest["binance_spot"].base + "/api/v3/ping", self.vision.base + "/"):
+            try:
+                await asyncio.to_thread(self.vision.http.head, url, timeout=10)
+                return True
+            except httpx.HTTPError:
+                continue
+        return False
+
+    async def _unit_failed(self, what: str, exc: BaseException) -> None:
+        """After one TF/file failed: a network outage aborts the pass instead of trying every remaining unit."""
+        if is_transient(exc) and not isinstance(exc, NetworkDown) and not await self._network_up():
+            raise NetworkDown(f"network down ({what}: {exc!r})"[:300]) from exc
 
     @staticmethod
     def _pk(inst: Instrument, spec: TableSpec) -> str:
@@ -106,12 +137,13 @@ class BinanceBackfill:
             spec = spec_for(inst, "candles", tf)
             try:
                 await self._candles_tf(inst, hot, ingestor, spec, tf, start)
-            except DiskFullError:
+            except (DiskFullError, NetworkDown):
                 raise
             except Exception as exc:  # noqa: BLE001
                 log.exception("candles %s failed", self._pk(inst, spec))
                 failed[tf.value] = exc
                 self.progress[self._pk(inst, spec)] = f"failed: {exc!r}"[:120]
+                await self._unit_failed(self._pk(inst, spec), exc)
         if failed:
             raise StepIncomplete(f"candles {inst.key}", failed)
 
@@ -222,6 +254,7 @@ class BinanceBackfill:
             except Exception as exc:  # noqa: BLE001 — next file (BF-02)
                 log.warning("%s %s failed: %r", key, f.period, exc)
                 failed[f.period] = exc
+                await self._unit_failed(f"{key} {f.period}", exc)
             if i % 20 == 0:
                 self.progress[key] = f"{i + 1}/{len(files)} days"
                 self.status()
@@ -256,12 +289,13 @@ class BinanceBackfill:
                 except Exception as exc:  # noqa: BLE001 — next file (BF-02)
                     log.warning("%s %s failed: %r", key, f.period, exc)
                     failed[f.period] = exc
+                    await self._unit_failed(f"{key} {f.period}", exc)
                     continue
                 self.progress[key] = f"{i + 1}/{len(todo)} files (last {f.period}: {n:,} rows)"
                 self.status()
                 if i == 0 and not f.monthly:     # bridge newest Vision day → live before the long backlog (BF-11)
                     await self._try_bridge(inst, hot, spec, failed)
-        except DiskFullError:
+        except (DiskFullError, NetworkDown):
             raise
         except Exception as exc:  # noqa: BLE001 — listing failed: still bridge what REST can reach
             log.warning("%s: Vision planning failed: %r", key, exc)
@@ -356,21 +390,30 @@ class BinanceBackfill:
                 res.add("prepare", exc, is_transient(exc))
                 finish_pass(self.appdb, COLLECTOR, res)
                 return res
-            for step in (self.candles, self.funding, self.metrics, self.agg_trades):
-                for inst in self.instruments:
-                    unit = f"{step.__name__} {inst.key}"
-                    try:
-                        await step(inst, hots[inst.key])
-                    except DiskFullError as exc:
-                        log.error("%s", exc)
-                        res.disk_full = True
-                        res.add(unit, exc, transient=False)
-                        finish_pass(self.appdb, COLLECTOR, res)
-                        return res
-                    except Exception as exc:  # noqa: BLE001 — continue with the next instrument
-                        log.exception("backfill step %s failed for %s", step.__name__, inst.key)
-                        self.appdb.add_event(COLLECTOR, "error", f"{unit}: {exc!r}"[:300])
-                        res.add(unit, exc, is_transient(exc))
+            units = [(f"{st.__name__} {i.key}", st, i) for st in (self.candles, self.funding, self.metrics,
+                                                                   self.agg_trades) for i in self.instruments]
+            for unit, step, inst in units:
+                try:
+                    await step(inst, hots[inst.key])
+                except DiskFullError as exc:
+                    log.error("%s", exc)
+                    res.disk_full = True
+                    res.add(unit, exc, transient=False)
+                    break
+                except Exception as exc:  # noqa: BLE001 — continue with the next instrument
+                    log.exception("backfill step %s failed for %s", step.__name__, inst.key)
+                    self.appdb.add_event(COLLECTOR, "error", f"{unit}: {exc!r}"[:300])
+                    res.add(unit, exc, is_transient(exc))
+                    if not isinstance(exc, NetworkDown):
+                        try:
+                            await self._unit_failed(unit, exc)
+                        except NetworkDown as down:
+                            exc = down
+                    if isinstance(exc, NetworkDown):
+                        log.warning("network down — backfill pass aborted, retried soon")
+                        res.add("network", exc, transient=True)
+                        break
+            self.progress.pop("vision", None)
             self.progress["downloaded_mb"] = f"{self.vision.bytes_downloaded / 2**20:.0f}"
             finish_pass(self.appdb, COLLECTOR, res)
             return res
