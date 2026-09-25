@@ -158,9 +158,15 @@ def test_no_fallback_raises_reason(tmp_path, monkeypatch):
         o.provider()
 
 
-def test_config_rejects_bad_fallback():
+def test_config_rejects_unknown_fallback_and_tolerates_same_as_active():
     with pytest.raises(Exception, match="fallback_provider"):
         load_settings(env_path=Path("nope.env"), extra_env={"AI_FALLBACK_PROVIDER": "nosuch"})
-    with pytest.raises(Exception, match="must differ"):
-        load_settings(env_path=Path("nope.env"), extra_env={"ACTIVE_AI_PROVIDER": "gemini",
-                                                            "AI_FALLBACK_PROVIDER": "gemini"})
+    # the user's .env still says ACTIVE_AI_PROVIDER=gemini while config.yaml has fallback gemini: must load
+    s = load_settings(env_path=Path("nope.env"), extra_env={"ACTIVE_AI_PROVIDER": "gemini"})
+    assert s.ai.active_provider == "gemini" and s.ai.fallback is None
+
+
+def test_same_as_active_fallback_is_not_used(tmp_path, monkeypatch):
+    o = orch_with(tmp_path, monkeypatch, {"claude_code": Stub("claude_code", why="usage limit")}, fallback="claude_code")
+    with pytest.raises(ProviderError, match="usage limit"):
+        o.provider()

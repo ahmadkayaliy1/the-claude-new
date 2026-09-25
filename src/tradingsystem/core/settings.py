@@ -277,12 +277,15 @@ class AICfg(_Model):
         missing = [p for p in self.consensus_providers if p not in self.providers]
         if missing:
             raise ValueError(f"ai.consensus_providers not configured: {missing}")
-        if self.fallback_provider is not None:
-            if self.fallback_provider not in self.providers:
-                raise ValueError(f"ai.fallback_provider {self.fallback_provider!r} not configured")
-            if self.fallback_provider == self.active_provider:
-                raise ValueError("ai.fallback_provider must differ from ai.active_provider")
+        if self.fallback_provider is not None and self.fallback_provider not in self.providers:
+            raise ValueError(f"ai.fallback_provider {self.fallback_provider!r} not configured")
         return self
+
+    @property
+    def fallback(self) -> str | None:
+        """The fallback provider, or None when it is unset or the same as the active one (e.g. after the
+        one-line ``ACTIVE_AI_PROVIDER`` switch in ``.env`` — that must never stop the services from starting)."""
+        return self.fallback_provider if self.fallback_provider != self.active_provider else None
 
 
 class ApiCfg(_Model):

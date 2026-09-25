@@ -56,7 +56,7 @@ class Orchestrator:
         provider is unavailable (not signed in, usage limit reached, missing key; D-030)."""
         if name is not None:
             return self._get(name)
-        active, fallback = self.s.ai.active_provider, self.s.ai.fallback_provider
+        active, fallback = self.s.ai.active_provider, self.s.ai.fallback
         try:
             prov = self._get(active)
             why = prov.unavailable_reason()
