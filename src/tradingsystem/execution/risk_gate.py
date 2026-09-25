@@ -27,8 +27,8 @@ class ExecContext:
     volume_step: float
     volume_max: float | None
     equity: float
-    open_positions: int = 0
-    open_risk_pct_by_pair: dict[str, float] = field(default_factory=dict)
+    open_positions: int = 0          # decisions holding an open position or a live pending order
+    open_risk_pct_by_pair: dict[str, float] = field(default_factory=dict)   # SL risk of positions + pending orders
     realized_pnl_today_usd: float = 0.0
     unrealized_pnl_usd: float = 0.0
     kill_switch: bool = False
@@ -57,6 +57,18 @@ def entry_price(rec: dict, bid: float, ask: float) -> float | None:
     if e.get("range_min") is not None:
         return e["range_max"] if buy else e["range_min"]
     return e["price"]
+
+
+def pending_price_check(order_type: str, price: float, bid: float, ask: float, stops_level: float) -> tuple[bool, str]:
+    """MT5 pending-order price rule: the order must sit on the correct side of the touch by ≥ stops_level
+    (BUY_LIMIT ask−p, BUY_STOP p−ask, SELL_LIMIT p−bid, SELL_STOP bid−p). A crossed order is refused by the broker
+    (invalid price), so paper must refuse it too instead of filling it at once."""
+    touch_name, touch = ("ask", ask) if order_type.startswith("BUY") else ("bid", bid)
+    gap = {"BUY_LIMIT": ask - price, "BUY_STOP": price - ask, "SELL_LIMIT": price - bid, "SELL_STOP": bid - price}[order_type]
+    ok = gap >= stops_level
+    return ok, (f"{order_type} {price} is {gap:.2f} from {touch_name} {touch} (≥ stops level {stops_level:.2f})" if ok else
+                f"{order_type} {price} vs {touch_name} {touch}: the market is already at/through the entry "
+                f"({gap:.2f} < stops level {stops_level:.2f}) — the broker would refuse it")
 
 
 def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_groups: list[list[str]],
@@ -90,6 +102,8 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
         lo, hi = rec["entry"]["range_min"], rec["entry"]["range_max"]
         px = ctx.ask if buy else ctx.bid
         add("market_in_zone", lo <= px <= hi, f"touch {px} vs zone {lo}-{hi}")
+    if rec["order_type"] != "MARKET":
+        add("pending_price_valid", *pending_price_check(rec["order_type"], entry, ctx.bid, ctx.ask, ctx.stops_level_price))
     tps = rec["take_profits"]
     risk_dist = (entry - sl) if buy else (sl - entry)
     add("sl_side", risk_dist > 0, f"entry {entry} vs SL {sl}")
@@ -118,11 +132,12 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
         lev = notional / ctx.equity
         add("effective_leverage", lev <= risk.max_effective_leverage, f"{lev:.1f}× ≤ {risk.max_effective_leverage}×")
     add("max_open_positions", ctx.open_positions < risk.max_open_positions,
-        f"{ctx.open_positions} open (< {risk.max_open_positions})")
+        f"{ctx.open_positions} open positions/pending orders (< {risk.max_open_positions})")
+    # a pair outside every correlated group is its own group: repeat positions on one pair are capped the same way
     group = next((g for g in correlated_groups if pair in g), [pair])
     corr = sum(v for p, v in ctx.open_risk_pct_by_pair.items() if p in group) + (size.risk_pct if size.ok else 0)
-    add("correlated_exposure", corr <= risk.max_correlated_risk_pct or len(group) == 1,
-        f"group {group}: {corr:.2f}% (≤ {risk.max_correlated_risk_pct}%)")
+    add("correlated_exposure", corr <= risk.max_correlated_risk_pct,
+        f"group {group}: {corr:.2f}% open+new SL risk (≤ {risk.max_correlated_risk_pct}%)")
     day = (ctx.realized_pnl_today_usd + ctx.unrealized_pnl_usd) / ctx.equity * 100
     add("daily_loss_limit", day > -risk.max_daily_loss_pct, f"today {day:.2f}% (limit −{risk.max_daily_loss_pct}%)")
     approved = all(ok for _, ok, _ in checks)
