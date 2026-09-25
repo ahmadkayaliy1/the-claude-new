@@ -5,9 +5,9 @@
 > Spec: `AI_Trading_System_Spec_EN.md`. Approved plan (Arabic): see Decision Log D-001.
 
 ## Overview
-- **Started:** 2026-09-25. **Approx. completion:** 55%.
-- **Current milestone:** M9 (risk gate, sizing, paper/MT5 execution, executor) next
-- **Summary:** M0–M4 running in production; M6 complete; M8 complete except live AI runs (P8.2 live call / P8.8 need H4 = GOOGLE_API_KEY). Engine service ready (`python -m tradingsystem engine`, triggers verified on live data). 111 unit + 5 integration tests.
+- **Started:** 2026-09-25. **Approx. completion:** 64%.
+- **Current milestone:** M10 (API + dashboard) and M5 (supervisor) next; P9.6 MT5 position manager pending
+- **Summary:** M0–M4 in production; M6 and M8 complete (live AI waits for H4); M9: gate, sizing, paper backend, MT5 backend (order_check verified on demo), executor (paper) and virtual outcomes done. 134 unit + 5 integration tests.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
@@ -647,11 +647,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: after P7.1.
 
 ### Phase P7.3: Price-space translation + basis check
-- Status: ⏳ Not Started
-- Description: translate levels between venues (preserve structural distances, live basis, correct bid/ask side), pre-trade basis check.
-- Affected files: `src/tradingsystem/execution/price_mapping.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P7.2.
+- Status: ✅ Completed
+- Description: translate levels analysis → execution instrument; pre-trade basis check.
+- Affected files: `src/tradingsystem/execution/price_mapping.py`, `tests/unit/test_risk_gate.py`
+- What was done: `translate(rec, basis, tick)` shifts entry/SL/TPs/review levels by the live basis (execution mid − analysis mid), preserving structural distances; `check_basis` rejects when the live basis deviates from its 60-min median (sampled per minute from stored bookTicker/ticks) by more than `execution.max_basis_deviation_pct`. Spread side handled by the gate (BUY fills at ask, SL on bid).
+- Why this way: spec §7.2, D-027.
+- Notes/open issues: threshold is provisional until P7.1 measures the basis distribution.
+- The exact next step: —
 
 ### Phase P7.4: Binance execution backend (only if Option B) 👤
 - Status: ⏳ Not Started
@@ -735,32 +737,40 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 ### M9 — Execution
 
 ### Phase P9.1: Risk gate
-- Status: ⏳ Not Started
-- Description: SL present & correct side, SL distance ≥ max(stops_level+spread, k·ATR), RR after costs, max risk %, effective leverage cap, max concurrent, daily loss kill switch, correlated exposure, spread vs SL, data freshness, recommendation age, market open, basis. Property test: nothing passes without SL.
-- Affected files: `src/tradingsystem/execution/risk_gate.py`
-- What was done: — · Why this way: spec §0/§7.3. · Notes/open issues: H8.
-- The exact next step: after P8.1.
+- Status: ✅ Completed
+- Description: deterministic, AI-independent pre-order checks.
+- Affected files: `src/tradingsystem/execution/risk_gate.py`, `tests/unit/test_risk_gate.py`
+- What was done: kill switch, SL present, market open, quote freshness, basis, validity window, recommendation age, confidence floor (55), SL side, SL ≥ max(stops_level+spread, 0.5 ATR) and ≤ 5 ATR, spread ≤ 20 % of SL, RR after costs from the executable fill ≥ min_rr, % risk sizing (rejects when even the minimum lot exceeds max risk), effective leverage cap, max open positions, correlated BTC/ETH exposure, daily loss limit. Every check is returned with detail. 16 table-driven tests incl. the $100-account case (0.01 lot gold, 12-point SL = 12 % → rejected).
+- Why this way: spec §0 / §7.3; D-021.
+- Notes/open issues: H8 — the user must choose `max_risk_per_trade_pct` knowingly for a $100 account.
+- The exact next step: —
 
 ### Phase P9.2: Position sizing
-- Status: ⏳ Not Started
-- Description: `order_calc_profit` → lots, round down to volume_step, reject < volume_min, margin check.
+- Status: ✅ Completed
+- Description: % risk → lots, rounded down; minimum-lot rule.
 - Affected files: `src/tradingsystem/execution/sizing.py`
-- What was done: — · Why this way: spec §7.3. · Notes/open issues: —
-- The exact next step: after P9.1.
+- What was done: lots = floor(risk_usd / (|entry−SL| × USD-per-unit-per-lot) / step)·step; below the minimum lot → use the minimum only if its real risk ≤ max, else reject; actual risk % always reported. USD-per-unit-per-lot confirmed with `order_calc_profit` on the demo (XAU 100, BTC 1).
+- Why this way: spec §7.3.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P9.3: Paper backend
-- Status: ⏳ Not Started
-- Description: fills on real bid/ask ticks, pending triggers, correct-side exits.
-- Affected files: `src/tradingsystem/execution/backends/paper.py`
-- What was done: — · Why this way: spec §9 dry-run. · Notes/open issues: —
-- The exact next step: after P9.2.
+- Status: ✅ Completed
+- Description: tick-accurate simulation on real bid/ask.
+- Affected files: `src/tradingsystem/execution/backends/paper.py`, `tests/unit/test_paper_backend.py`
+- What was done: legs per TP (split by close fraction on the volume step; single leg when too small), market fills at ask/bid, limit/stop triggers on the correct side, SL exits on the opposite quote (gap slippage), TP as limit, expiry of pending orders, breakeven after TP k, idempotent placement, account equity/unrealised/risk by pair, realised PnL for the Cost Governor. Tests on real XAU ticks.
+- Why this way: spec §9 dry-run mode.
+- Notes/open issues: trailing-ATR management rule not simulated yet (breakeven only).
+- The exact next step: —
 
 ### Phase P9.4: MT5 backend
-- Status: ⏳ Not Started
-- Description: request builder (FOK, expiration), order_check, retcode map, post-fill slippage, SL/TP attach/modify, idempotency (magic + comment with rec id), account assertion.
-- Affected files: `src/tradingsystem/execution/backends/mt5.py`, `retcodes.py`
-- What was done: — · Why this way: spec §7.3. · Notes/open issues: —
-- The exact next step: after P9.2.
+- Status: ✅ Completed
+- Description: request builder, order_check, retcodes, idempotency, account assertion.
+- Affected files: `src/tradingsystem/execution/backends/mt5_backend.py`, `src/tradingsystem/execution/retcodes.py`
+- What was done: FOK filling from symbol spec, SL/TP attached, pending expiration converted to server time, multi-TP legs, `order_check` before any send, duplicate detection by comment tag, bounded retries only for retryable codes (timeouts verified before resending), post-fill slippage, full TRADE_RETCODE map, SL modify / cancel helpers, account assertion (server + demo/real). **Dry run on the demo: both MARKET and BUY_LIMIT two-leg requests passed `order_check`** — no order sent.
+- Why this way: spec §7.3 — no silent failures.
+- Notes/open issues: real sends only after H6.
+- The exact next step: —
 
 ### Phase P9.5: Demo tests 👤
 - Status: ⏳ Not Started
@@ -770,11 +780,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: after P9.4.
 
 ### Phase P9.6: Executor service
-- Status: ⏳ Not Started
-- Description: auto + manual queues, re-validation, position manager, outcomes from `history_deals_get` (pips/USD/% incl. commission & swap).
-- Affected files: `src/tradingsystem/execution/{executor,position_manager,outcomes}.py`
-- What was done: — · Why this way: spec §7.1/§8.3. · Notes/open issues: —
-- The exact next step: after P9.5.
+- Status: 🔄 In Progress
+- Description: manual/auto queues, re-validation, paper simulation, outcomes.
+- Affected files: `src/tradingsystem/execution/executor.py`
+- What was done: `python -m tradingsystem executor` — candidates (manual: queued by the dashboard; auto: every new valid trade), live quotes, basis check + translation, gate, backend placement (paper / MT5), full gate detail stored on the decision, paper tick advancement from the stored execution ticks, outcome settlement (pips / USD / %), heartbeat. Smoke-tested live in paper mode ($100 paper account).
+- Why this way: spec §7.1.
+- Notes/open issues: MT5 position management (breakeven/trailing on live positions) and outcome settlement from `history_deals_get` for demo/live still to be written (needed before P9.5/P11.3).
+- The exact next step: implement MT5 position manager + deal-based outcomes, then run P9.5 with the user's approval.
 
 ### Phase P9.7: Mode guards + kill switch 👤
 - Status: ⏳ Not Started
@@ -784,11 +796,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: after P9.6.
 
 ### Phase P9.8: Virtual outcomes
-- Status: ⏳ Not Started
-- Description: outcomes of NO_TRADE / unexecuted recommendations from real subsequent prices.
-- Affected files: `src/tradingsystem/execution/virtual_outcomes.py`
-- What was done: — · Why this way: performance analysis + Cost Governor. · Notes/open issues: —
-- The exact next step: after P9.3.
+- Status: ✅ Completed
+- Description: outcome of every trade idea on real subsequent prices.
+- Affected files: `src/tradingsystem/execution/executor.py` (`evaluate_virtual`), `tests/unit/test_virtual_outcomes.py`
+- What was done: entry trigger within validity, then SL vs TP1 first touch on real 1m bars of the analysis instrument (same-bar ambiguity counted as SL), R multiple; stored in `ai_decisions.virtual_outcome/virtual_r`.
+- Why this way: measure AI quality independently of execution constraints (e.g. the small account).
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P9.9: Economic-calendar blackout (optional)
 - Status: ⏳ Not Started

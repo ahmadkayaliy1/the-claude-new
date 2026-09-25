@@ -1,0 +1,129 @@
+"""Deterministic risk gate (P9.1) — independent of the AI; every order must pass it (spec §0, §7.1, §7.3).
+
+The gate evaluates an already contract-valid recommendation, *translated into the execution instrument's
+prices*, against live execution state. It returns every check with pass/fail and detail (shown on the
+dashboard), the executable entry price, and the position size. One failed check ⇒ no order.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from ..core.settings import RiskCfg
+from ..core.timeutil import parse_date_spec
+from .sizing import SizeResult, size_position
+
+
+@dataclass
+class ExecContext:
+    now_ms: int
+    bid: float
+    ask: float
+    quote_age_s: float
+    market_open: bool
+    atr: float                       # ATR(14) of the decision timeframe on the execution instrument's scale
+    stops_level_price: float         # broker minimum stop distance in price units (stops_level × point)
+    contract_size: float
+    volume_min: float
+    volume_step: float
+    volume_max: float | None
+    equity: float
+    open_positions: int = 0
+    open_risk_pct_by_pair: dict[str, float] = field(default_factory=dict)
+    realized_pnl_today_usd: float = 0.0
+    unrealized_pnl_usd: float = 0.0
+    kill_switch: bool = False
+    basis_ok: bool = True
+    basis_reason: str = ""
+
+
+@dataclass
+class GateResult:
+    approved: bool
+    checks: list[tuple[str, bool, str]]
+    entry: float | None = None
+    size: SizeResult | None = None
+    rr_exec: float | None = None
+
+    def failures(self) -> list[str]:
+        return [f"{n}: {d}" for n, ok, d in self.checks if not ok]
+
+
+def entry_price(rec: dict, bid: float, ask: float) -> float | None:
+    """Executable entry: MARKET at the touch side; pending orders at the worst edge of their zone."""
+    buy = rec["decision"] == "BUY"
+    e = rec["entry"]
+    if rec["order_type"] == "MARKET":
+        return ask if buy else bid
+    if e.get("range_min") is not None:
+        return e["range_max"] if buy else e["range_min"]
+    return e["price"]
+
+
+def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_groups: list[list[str]],
+             min_confidence: int = 55) -> GateResult:
+    checks: list[tuple[str, bool, str]] = []
+
+    def add(name: str, ok: bool, detail: str) -> bool:
+        checks.append((name, bool(ok), detail))
+        return bool(ok)
+
+    if rec.get("decision") not in ("BUY", "SELL"):
+        add("is_trade", False, f"decision is {rec.get('decision')}")
+        return GateResult(False, checks)
+    buy = rec["decision"] == "BUY"
+    sl = rec.get("stop_loss")
+    add("kill_switch", not ctx.kill_switch, "kill switch engaged" if ctx.kill_switch else "off")
+    add("stop_loss_present", sl is not None, "SL present" if sl is not None else "no SL — invalid (spec §0)")
+    add("market_open", ctx.market_open, "open" if ctx.market_open else "execution market closed")
+    add("quote_fresh", ctx.quote_age_s <= 30, f"quote age {ctx.quote_age_s:.1f}s (≤30s)")
+    add("basis", ctx.basis_ok, ctx.basis_reason or "same instrument")
+    ts, vu = parse_date_spec(rec["timestamp"]), parse_date_spec(rec["valid_until"])
+    age = (ctx.now_ms - ts) / 1000
+    add("not_expired", ctx.now_ms < vu, f"valid until {rec['valid_until']}")
+    add("recommendation_age", age <= risk.max_recommendation_age_s, f"{age:.0f}s old (≤{risk.max_recommendation_age_s}s)")
+    add("confidence", rec.get("confidence", 0) >= min_confidence, f"{rec.get('confidence')} (≥{min_confidence})")
+    if sl is None:
+        return GateResult(False, checks)
+    spread = ctx.ask - ctx.bid
+    entry = entry_price(rec, ctx.bid, ctx.ask)
+    if rec["order_type"] == "MARKET" and rec["entry"].get("range_min") is not None:
+        lo, hi = rec["entry"]["range_min"], rec["entry"]["range_max"]
+        px = ctx.ask if buy else ctx.bid
+        add("market_in_zone", lo <= px <= hi, f"touch {px} vs zone {lo}-{hi}")
+    tps = rec["take_profits"]
+    risk_dist = (entry - sl) if buy else (sl - entry)
+    add("sl_side", risk_dist > 0, f"entry {entry} vs SL {sl}")
+    if risk_dist <= 0:
+        return GateResult(False, checks, entry)
+    min_dist = max(ctx.stops_level_price + spread, risk.sl_atr_min_mult * ctx.atr)
+    add("sl_min_distance", risk_dist >= min_dist,
+        f"{risk_dist:.2f} ≥ max(stops_level+spread {ctx.stops_level_price + spread:.2f}, {risk.sl_atr_min_mult}×ATR {risk.sl_atr_min_mult * ctx.atr:.2f})")
+    add("sl_max_distance", risk_dist <= risk.sl_atr_max_mult * ctx.atr,
+        f"{risk_dist:.2f} ≤ {risk.sl_atr_max_mult}×ATR {risk.sl_atr_max_mult * ctx.atr:.2f}")
+    add("spread_vs_sl", spread <= risk.max_spread_to_sl_ratio * risk_dist,
+        f"spread {spread:.2f} ≤ {risk.max_spread_to_sl_ratio:.0%} of SL distance {risk_dist:.2f}")
+    # reward measured to where a TP actually fills (a BUY's TP triggers on the bid, a SELL's on the ask)
+    frac = sum(tp["close_fraction"] for tp in tps)
+    reward = sum(((tp["price"] - entry) if buy else (entry - tp["price"])) * tp["close_fraction"] for tp in tps) / frac
+    rr = reward / risk_dist
+    add("rr_after_costs", rr >= risk.min_rr, f"{rr:.2f} ≥ {risk.min_rr}")
+    tgt = min(rec.get("risk_management", {}).get("risk_percent_suggested", risk.risk_per_trade_pct),
+              risk.risk_per_trade_pct)
+    size = size_position(equity=ctx.equity, target_risk_pct=tgt, max_risk_pct=risk.max_risk_per_trade_pct,
+                         entry=entry, stop=sl, contract_size=ctx.contract_size, volume_min=ctx.volume_min,
+                         volume_step=ctx.volume_step, volume_max=ctx.volume_max)
+    add("position_size", size.ok, f"{size.lots} lots, risk {size.risk_pct:.2f}% (${size.risk_usd:.2f}) — {size.reason}")
+    if size.ok:
+        notional = size.lots * ctx.contract_size * entry
+        lev = notional / ctx.equity
+        add("effective_leverage", lev <= risk.max_effective_leverage, f"{lev:.1f}× ≤ {risk.max_effective_leverage}×")
+    add("max_open_positions", ctx.open_positions < risk.max_open_positions,
+        f"{ctx.open_positions} open (< {risk.max_open_positions})")
+    group = next((g for g in correlated_groups if pair in g), [pair])
+    corr = sum(v for p, v in ctx.open_risk_pct_by_pair.items() if p in group) + (size.risk_pct if size.ok else 0)
+    add("correlated_exposure", corr <= risk.max_correlated_risk_pct or len(group) == 1,
+        f"group {group}: {corr:.2f}% (≤ {risk.max_correlated_risk_pct}%)")
+    day = (ctx.realized_pnl_today_usd + ctx.unrealized_pnl_usd) / ctx.equity * 100
+    add("daily_loss_limit", day > -risk.max_daily_loss_pct, f"today {day:.2f}% (limit −{risk.max_daily_loss_pct}%)")
+    approved = all(ok for _, ok, _ in checks)
+    return GateResult(approved, checks, entry, size, rr)
