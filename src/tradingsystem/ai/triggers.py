@@ -3,13 +3,15 @@
 every_close      every decision-timeframe close (market open)
 on_setup_event   only when the quant layer sees a candidate setup (≥1 strong or ≥2 weak reasons)
 hybrid           setup events, due ``next_review`` conditions of the last decision, or idle timeout
-A per-pair minimum spacing protects free-tier quotas; the Cost Governor can force ``on_setup_event``.
+A per-pair minimum spacing protects quotas; ``next_review`` triggers may come sooner but never before
+``review_floor_min`` (and the engine fires them at most once per decision), and a per-pair back-off after failed
+cycles overrides both (F1). The Cost Governor can force ``on_setup_event``.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..core.timeutil import iso, parse_date_spec
+from ..core.timeutil import iso
 
 STRONG_EVENTS = {"BOS", "CHoCH"}
 
@@ -76,16 +78,15 @@ def setup_reasons(payload: dict) -> tuple[list[str], list[str]]:
 
 
 def review_due(last: dict | None, now: int, quote_mid: float | None, closed_bars: dict[str, float]) -> list[str]:
-    """Reasons from the last valid decision's ``next_review`` (time elapsed or price conditions met)."""
+    """Reasons from the last valid decision's ``next_review`` (time elapsed or price conditions met). Times count
+    from the stored row (``last['ts']``), never from a model-written timestamp. ``quote_mid`` must be in the
+    recommendation's price space (the analysis instrument)."""
     if not last or not last.get("recommendation"):
         return []
     rec = last["recommendation"]
     nr = rec.get("next_review") or {}
     out = []
-    try:
-        base = parse_date_spec(rec["timestamp"])
-    except Exception:  # noqa: BLE001
-        base = last["ts"]
+    base = int(last["ts"])
     if nr.get("in_minutes") and now >= base + int(nr["in_minutes"]) * 60_000:
         out.append(f"next_review time reached ({nr['in_minutes']} min after {iso(base)})")
     for c in nr.get("conditions", []):
@@ -104,9 +105,14 @@ def review_due(last: dict | None, now: int, quote_mid: float | None, closed_bars
 
 
 def decide(policy: str, payload: dict | None, *, last_call_ms: int | None, now: int, min_spacing_min: int,
-           max_idle_min: int, review_reasons: list[str], at_close: bool) -> TriggerDecision:
-    if last_call_ms is not None and now - last_call_ms < min_spacing_min * 60_000 and not review_reasons:
-        return TriggerDecision(False, [f"spacing: last AI call {int((now - last_call_ms) / 60000)} min ago"], "none")
+           max_idle_min: int, review_reasons: list[str], at_close: bool, review_floor_min: int = 5,
+           backoff_ms: int = 0) -> TriggerDecision:
+    if last_call_ms is not None:
+        gap = now - last_call_ms
+        need = max(backoff_ms, (min(review_floor_min, min_spacing_min) if review_reasons else min_spacing_min) * 60_000)
+        if gap < need:
+            return TriggerDecision(False, [f"spacing: last AI call {int(gap / 60000)} min ago "
+                                           f"(next after {need // 60000} min)"], "none")
     if review_reasons:
         return TriggerDecision(True, review_reasons, "review")
     if not at_close or payload is None:

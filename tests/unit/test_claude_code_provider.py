@@ -1,5 +1,6 @@
 """Claude Code (subscription) provider: CLI arguments, environment isolation, output/error handling, and the
 orchestrator's fallback routing (D-030). The error envelopes are real CLI captures (fixtures/real/PROVENANCE.md)."""
+import asyncio
 import json
 from pathlib import Path
 
@@ -170,3 +171,80 @@ def test_same_as_active_fallback_is_not_used(tmp_path, monkeypatch):
     o = orch_with(tmp_path, monkeypatch, {"claude_code": Stub("claude_code", why="usage limit")}, fallback="claude_code")
     with pytest.raises(ProviderError, match="usage limit"):
         o.provider()
+
+
+# ------------------------------------------------------------------ call lifecycle (no real CLI is started)
+class FakeProc:
+    """Stands in for the CLI process: never answers until killed."""
+
+    def __init__(self):
+        self.returncode, self.killed = None, False
+        self._done = asyncio.Event()
+
+    async def communicate(self, data=None):
+        await self._done.wait()
+        return b"", b""
+
+    def kill(self):
+        self.killed, self.returncode = True, -9
+        self._done.set()
+
+    async def wait(self):
+        await self._done.wait()
+        return self.returncode
+
+
+@pytest.fixture
+def fake_cli(prov, monkeypatch):
+    procs = []
+
+    async def spawn(*a, **kw):
+        procs.append(FakeProc())
+        return procs[-1]
+    monkeypatch.setattr(cc.asyncio, "create_subprocess_exec", spawn)
+    prov.api_key = "token"                                   # auth trusted → no `claude auth status` process
+    return procs
+
+
+def test_cancelled_call_kills_the_cli(prov, fake_cli):
+    async def go():
+        t = asyncio.create_task(prov._call("sys", "user", None, "x", 100))
+        await asyncio.sleep(0.05)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+    asyncio.run(go())
+    assert fake_cli[0].killed and not list(prov.workdir.glob("system_*"))
+
+
+def test_timeout_kills_and_is_not_retried(prov, fake_cli):
+    prov.cfg = prov.cfg.model_copy(update={"timeout_s": 0.05})
+    with pytest.raises(ProviderError) as e:
+        asyncio.run(prov._call("sys", "user", None, "x", 100))
+    assert fake_cli[0].killed and not e.value.retryable
+
+
+def test_truncated_answer_is_not_resent(prov):
+    doc = {**real_envelope(), "is_error": False, "subtype": "success", "result": '{"pair": "XAU',
+           "stop_reason": "max_tokens"}
+    with pytest.raises(ProviderError) as e:
+        prov.parse(json.dumps(doc), "", 0)
+    assert not e.value.retryable and "truncated" in str(e.value)
+
+
+def test_token_added_to_env_file_is_picked_up(tmp_path, monkeypatch):
+    from tradingsystem.ai.providers import base
+    exe = tmp_path / "claude.exe"
+    exe.write_bytes(b"")
+    env = tmp_path / ".env"
+    env.write_text("CLAUDE_CODE_OAUTH_TOKEN=\n", encoding="utf-8")
+    monkeypatch.setattr(base, "ENV_FILE", env)
+    monkeypatch.setattr(base, "_dotenv", (float("-inf"), {}))
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(cc.tempfile, "gettempdir", lambda: str(tmp_path))
+    cfg = AIProviderCfg(kind="claude_code", model="sonnet", cli_path=str(exe), api_key_env="CLAUDE_CODE_OAUTH_TOKEN")
+    p = cc.ClaudeCodeProvider("claude_code", cfg, "sonnet", base.secret("CLAUDE_CODE_OAUTH_TOKEN"))
+    assert p.api_key is None
+    env.write_text("CLAUDE_CODE_OAUTH_TOKEN=oat-123\n", encoding="utf-8")     # the user adds it later (OPS-07)
+    monkeypatch.setattr(base, "_dotenv", (float("-inf"), {}))                   # the next re-read is due
+    assert p.check_auth() is None and p.api_key == "oat-123"

@@ -15,7 +15,8 @@ Each call spawns ``claude -p`` (print mode):
 Usage counts against the plan's shared 5-hour / weekly limits (the same pool as interactive Claude use). When
 the CLI reports a usage limit the provider cools down until the reset (or ``DEFAULT_COOLDOWN_MS``) and
 ``unavailable_reason()`` lets the orchestrator route to ``ai.fallback_provider``. Calls are serialized — one CLI
-process at a time (RAM on 4 GB machines).
+process at a time (RAM on 4 GB machines) — and a call that times out or is cancelled (cycle deadline, shutdown)
+kills its CLI process, so no orphan keeps spending the plan's limits.
 """
 from __future__ import annotations
 
@@ -30,8 +31,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ...core.timeutil import iso, now_ms
-from .base import LLMProvider, LLMResult, ProviderError, transport_schema
+from ...core.timeutil import now_ms
+from .base import LLMProvider, LLMResult, ProviderError, secret, transport_schema
 
 # environment passed to the CLI: what Windows and the CLI need to run and find its login — nothing else
 ENV_KEEP = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATH", "PATHEXT", "COMSPEC", "USERPROFILE", "HOMEDRIVE",
@@ -104,23 +105,24 @@ class ClaudeCodeProvider(LLMProvider):
             raise ProviderError(f"{self.name}: Claude Code CLI not found (install it or set cli_path)", retryable=False)
         self.workdir = Path(tempfile.gettempdir()) / "tradingsystem-claude-code"
         self.workdir.mkdir(parents=True, exist_ok=True)
-        self.cooldown_until_ms = 0
-        self.cooldown_reason = ""
         self._auth_checked = float("-inf")
         self._auth_problem: str | None = None
         self._lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------ availability
     def unavailable_reason(self) -> str | None:
-        if now_ms() < self.cooldown_until_ms:
-            return f"{self.cooldown_reason} — retry after {iso(self.cooldown_until_ms)}"
+        why = super().unavailable_reason()
+        if why:
+            return why
         if time.monotonic() - self._auth_checked > AUTH_CHECK_TTL_S:
             self._auth_problem = self.check_auth()
             self._auth_checked = time.monotonic()
         return self._auth_problem
 
     def check_auth(self) -> str | None:
-        """``claude auth status`` (no model call, no usage). A long-lived token is trusted until a call fails."""
+        """``claude auth status`` (no model call, no usage). A long-lived token is trusted until a call fails; one
+        added to ``.env`` later is picked up here (OPS-07)."""
+        self.api_key = self.api_key or secret(self.cfg.api_key_env)
         if self.api_key:
             return None
         try:
@@ -131,9 +133,6 @@ class ClaudeCodeProvider(LLMProvider):
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             return f"{self.name}: cannot read the Claude Code login status ({exc})"
         return auth_problem(self.name, st)
-
-    def _cool_down(self, until_ms: int, reason: str) -> None:
-        self.cooldown_until_ms, self.cooldown_reason = until_ms, reason
 
     # ------------------------------------------------------------------ call
     def build_args(self, system_file: str, schema: dict | None) -> list[str]:
@@ -170,9 +169,16 @@ class ClaudeCodeProvider(LLMProvider):
                 try:
                     out, err = await asyncio.wait_for(proc.communicate(user.encode("utf-8")), self.cfg.timeout_s)
                 except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                    raise ProviderError(f"{self.name}: no answer within {self.cfg.timeout_s:.0f}s", retryable=True) from None
+                    # not retried: the timed-out call has most likely used the plan's limits already
+                    raise ProviderError(f"{self.name}: no answer within {self.cfg.timeout_s:.0f}s",
+                                        retryable=False) from None
+                finally:
+                    if proc.returncode is None:        # timed out or cancelled: never leave a CLI running
+                        _kill(proc)
+                        try:
+                            await asyncio.wait_for(proc.wait(), 5)
+                        except (asyncio.TimeoutError, OSError):
+                            pass
             except OSError as exc:
                 raise ProviderError(f"{self.name}: cannot start the Claude Code CLI ({exc})", retryable=False) from exc
             finally:
@@ -198,6 +204,9 @@ class ClaudeCodeProvider(LLMProvider):
                               doc.get("api_error_status"))
         data = doc.get("structured_output")
         text = doc.get("result")
+        if data is None and doc.get("stop_reason") == "max_tokens":
+            # a truncated answer would be truncated again — never spend a repair call on it
+            raise ProviderError(f"{self.name}: answer truncated (max_tokens)", retryable=False)
         if not isinstance(text, str) or not text.strip():
             text = json.dumps(data, ensure_ascii=False) if data is not None else ""
         u = doc.get("usage") or {}
@@ -215,11 +224,18 @@ class ClaudeCodeProvider(LLMProvider):
     def _error(self, message: str, status: Any) -> ProviderError:
         now = now_ms()
         if _LOGIN_RE.search(message):
-            self._cool_down(now + LOGIN_COOLDOWN_MS, f"{self.name}: not signed in ({message[:120]})")
+            self.cool_down(now + LOGIN_COOLDOWN_MS, f"{self.name}: not signed in ({message[:120]})")
             self._auth_checked = float("-inf")
             return ProviderError(self.cooldown_reason, retryable=False)
         if status == 429 or _LIMIT_RE.search(message):
-            self._cool_down(limit_reset_ms(message, now), f"{self.name}: subscription usage limit ({message[:120]})")
+            self.cool_down(limit_reset_ms(message, now), f"{self.name}: subscription usage limit ({message[:120]})")
             return ProviderError(self.cooldown_reason, retryable=False, rate_limited=True)
         retryable = status in (500, 502, 503, 504, 529) or "overloaded" in message.lower()
         return ProviderError(f"{self.name}: {message}", retryable=retryable)
+
+
+def _kill(proc: asyncio.subprocess.Process) -> None:
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass

@@ -102,14 +102,20 @@ def ema_stack(close: F) -> dict:
 
 
 def confluence(per_tf: dict[str, dict]) -> dict:
-    """Weighted agreement of structure trend + EMA alignment across timeframes → score in [-1, 1]."""
+    """Weighted agreement of structure trend + EMA alignment across timeframes → score in [-1, 1]. Timeframes with
+    neither reading (too little history) are left out and listed in ``missing`` instead of counting as neutral."""
     weights = {"1w": 3, "1d": 3, "4h": 2.5, "1h": 2, "15m": 1.5, "5m": 1, "1m": 0.5}
     score = total = 0.0
+    missing = []
     for tf, d in per_tf.items():
+        if d.get("trend") is None and d.get("ema_alignment") is None:
+            missing.append(tf)
+            continue
         w = weights.get(tf, 1)
         s = {"bullish": 1, "bearish": -1}.get(d.get("trend"), 0) * 0.6
         s += {"bullish": 1, "bearish": -1}.get(d.get("ema_alignment"), 0) * 0.4
         score += w * s
         total += w
     val = round(score / total, 3) if total else 0.0
-    return {"score": val, "bias": "bullish" if val > 0.25 else "bearish" if val < -0.25 else "mixed"}
+    return {"score": val, "bias": "bullish" if val > 0.25 else "bearish" if val < -0.25 else "mixed",
+            "missing": missing}

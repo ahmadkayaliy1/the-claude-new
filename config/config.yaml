@@ -171,6 +171,9 @@ ai:
   min_minutes_between_calls: 15        # per pair
   max_idle_minutes: 120                # hybrid: at least one review per pair every 2 h while the market is open
   max_parallel_calls: 2
+  review_floor_minutes: 5              # next_review price/candle triggers: once per decision, >= this after the last call
+  max_backoff_minutes: 120             # spacing doubles after each failed cycle of a pair, up to this
+  cycle_deadline_s: 600                # an AI cycle is cut off after this (unfinished pairs stored as 'error')
   consensus_providers: []
   budget:                              # D-004 Cost Governor
     daily_usd_cap: 0.0                 # 0 = paid providers blocked (free tier only for now)
@@ -199,6 +202,10 @@ ai:
       free_tier: true                  # set false if you move to the paid tier - prices below then apply
       rpm: 5                           # set from your AI Studio rate-limit page (H4)
       rpd: 100
+      quota_reset_tz: America/Los_Angeles  # Google resets the daily quota at midnight Pacific time
+      effort: low                      # thinking level (low | medium | high)
+      max_output_tokens: 16384         # thinking tokens count against this budget
+      timeout_s: 90
       model_prices:                    # paid-tier USD/MTok (ai.google.dev/gemini-api/docs/pricing, 2026-09)
         gemini-3.8-flash: [1.50, 7.50] # upper bound of the published 3.x Flash range (conservative)
         gemini-3.5-flash-lite: [0.30, 2.50]

@@ -244,6 +244,8 @@ class AIProviderCfg(_Model):
     max_output_tokens: int = 4096
     free_tier: bool = False
     cli_path: str | None = None            # claude_code: the Claude Code executable (default: found on PATH)
+    temperature: float | None = None      # sampling temperature; None = the model default (Gemini 3.x wants that)
+    quota_reset_tz: str | None = None      # daily-quota reset time zone (Gemini: America/Los_Angeles); None = UTC
 
 
 class AIBudgetCfg(_Model):
@@ -263,6 +265,9 @@ class AICfg(_Model):
     min_minutes_between_calls: int = 15     # per pair (protects free-tier quotas)
     max_idle_minutes: int = 120             # hybrid policy: review a pair at least this often (market open)
     max_parallel_calls: int = 2
+    review_floor_minutes: int = 5           # next_review price/candle triggers: not sooner after the last call
+    max_backoff_minutes: int = 120          # per-pair back-off cap after failed cycles (spacing doubles per failure)
+    cycle_deadline_s: float = 600.0         # an AI cycle is cut off after this; unfinished pairs stored as 'error'
     consensus_providers: list[str] = Field(default_factory=list)
     providers: dict[str, AIProviderCfg]
     budget: AIBudgetCfg = AIBudgetCfg()

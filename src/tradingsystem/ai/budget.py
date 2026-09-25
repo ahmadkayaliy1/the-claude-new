@@ -2,7 +2,8 @@
 
 * Every call is recorded in ``app.db:ai_usage`` (tokens, cost, latency, outcome) — survives restarts, so the
   free-tier daily quota (RPD) and USD caps are enforced across process restarts.
-* ``RateLimiter``: requests-per-minute spacing + requests-per-day from the persisted log.
+* ``RateLimiter``: requests-per-minute spacing + requests-per-day from the persisted log (the day follows the
+  provider's own reset: ``quota_reset_tz``, e.g. midnight Pacific for Gemini).
 * ``CostGovernor``: blocks calls whose cost is unknown or would exceed the daily/monthly USD caps, and
   degrades the AI workload when AI cost exceeds ``max_ai_cost_to_profit_ratio`` of realised profit over the
   rolling window: level 0 configured mode → 1 ``agent_per_pair`` → 2 setup-event triggers only → 3 paused
@@ -23,7 +24,7 @@ from typing import Callable
 from ..core.settings import AIBudgetCfg, AIProviderCfg
 from ..core.timeutil import MS_PER_DAY, now_ms
 from ..storage.sqlite_store import connect
-from .providers.base import LLMProvider, LLMResult
+from .providers.base import LLMProvider, LLMResult, quota_day_start
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +94,8 @@ class RateLimiter:
     def remaining_today(self) -> int | None:
         if not self.cfg.rpd:
             return None
-        return max(self.cfg.rpd - self.usage.count_since(self.name, utc_midnight(now_ms())), 0)
+        return max(self.cfg.rpd - self.usage.count_since(self.name, quota_day_start(now_ms(), self.cfg.quota_reset_tz)),
+                   0)
 
     async def acquire(self) -> None:
         left = self.remaining_today()

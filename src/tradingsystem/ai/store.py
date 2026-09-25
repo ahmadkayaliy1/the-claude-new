@@ -138,11 +138,11 @@ class DecisionStore:
 
     def recent(self, pair: str, limit: int = 5) -> list[dict[str, Any]]:
         """Compact history for the snapshot (spec rule 10: consistency with recent decisions)."""
-        with self._lock:
+        with self._lock:     # 'skipped' rows never reached the model (data gate) — not part of its history
             rows = self._con.execute(
                 "SELECT ts, status, decision, order_type, confidence, recommendation, execution_state, outcome, "
-                "outcome_pnl_pct, virtual_outcome FROM ai_decisions WHERE pair=? ORDER BY ts DESC LIMIT ?",
-                (pair, limit)).fetchall()
+                "outcome_pnl_pct, virtual_outcome FROM ai_decisions WHERE pair=? AND status!='skipped' "
+                "ORDER BY ts DESC LIMIT ?", (pair, limit)).fetchall()
         out = []
         for ts, status, dec, ot, conf, rec, ex, outc, pnl, vo in rows:
             r = json.loads(rec) if rec else {}
@@ -160,6 +160,22 @@ class DecisionStore:
         if not r:
             return None
         return {"id": r[0], "ts": r[1], "recommendation": json.loads(r[2]) if r[2] else None}
+
+    def last_attempt_ts(self, pair: str) -> int | None:
+        """Time of the latest stored cycle for ``pair`` in any status (spacing / review bookkeeping survive restarts
+        and failed cycles count — F1)."""
+        with self._lock:
+            r = self._con.execute("SELECT max(ts) FROM ai_decisions WHERE pair=?", (pair,)).fetchone()
+        return int(r[0]) if r and r[0] is not None else None
+
+    def realised_since(self, since_ms: int) -> tuple[float, int]:
+        """(realised PnL USD, closed trades) since ``since_ms`` — the Cost Governor's ROI input (D-004, F13)."""
+        with self._lock:
+            r = self._con.execute(
+                "SELECT COALESCE(sum(outcome_pnl_usd),0), count(*) FROM ai_decisions "
+                "WHERE outcome IN ('closed_profit','closed_loss','closed_breakeven') AND outcome_ts>=?",
+                (since_ms,)).fetchone()
+        return float(r[0]), int(r[1])
 
     def close(self) -> None:
         with self._lock:
