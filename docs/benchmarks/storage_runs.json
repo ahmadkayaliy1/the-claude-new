@@ -1,0 +1,168 @@
+[
+ {
+  "time": "2026-09-25T08:56:09Z",
+  "results": [
+   {
+    "engine": "sqlite_rowid",
+    "rows": 6505174,
+    "bulk_s": 30.49338510000962,
+    "live_ms": [
+     0.1778000150807202,
+     0.7865080150077111
+    ],
+    "reinsert_1000_ms": 2.6646000042092055,
+    "count_ok": true,
+    "reads": {
+     "max_key_ms": 0.7063000230118632,
+     "last_1h_ms": 72.69010000163689,
+     "last_1h_rows": 17384,
+     "last_24h_ms": 4077.88040000014,
+     "last_24h_rows": 1063010,
+     "agg_1m_7d_ms": 8533.137999998871
+    },
+    "bytes_per_row": 70.6023211677351,
+    "concurrent": {
+     "writer_commits": 388,
+     "writer_ms_p50": 0.28495000151451677,
+     "writer_ms_p99": 2.2190990060335003,
+     "writer_errors": 0,
+     "wal_max_mb": 4.0784759521484375,
+     "reader_queries": 469,
+     "reader_ms_p50": 47.67959998571314,
+     "reader_ms_p99": 111.36720399954353,
+     "reader_errors": 0
+    },
+    "peak_rss_mb": 1000.953125,
+    "wall_s": 73.4999930858612
+   },
+   {
+    "engine": "sqlite_worowid",
+    "rows": 6505174,
+    "bulk_s": 48.043098199996166,
+    "live_ms": [
+     0.332050010911189,
+     3.030968992097761
+    ],
+    "reinsert_1000_ms": 3.4673999762162566,
+    "count_ok": true,
+    "reads": {
+     "max_key_ms": 0.6362000131048262,
+     "last_1h_ms": 44.204300007550046,
+     "last_1h_rows": 17384,
+     "last_24h_ms": 3348.4437000006437,
+     "last_24h_rows": 1063010,
+     "agg_1m_7d_ms": 8306.350500002736
+    },
+    "bytes_per_row": 77.99129492923633,
+    "concurrent": {
+     "writer_commits": 387,
+     "writer_ms_p50": 0.3299999807495624,
+     "writer_ms_p99": 12.006592000834607,
+     "writer_errors": 0,
+     "wal_max_mb": 4.522468566894531,
+     "reader_queries": 421,
+     "reader_ms_p50": 51.78079998586327,
+     "reader_ms_p99": 121.57774000079372,
+     "reader_errors": 0
+    },
+    "peak_rss_mb": 997.671875,
+    "wall_s": 89.34687876701355
+   },
+   {
+    "engine": "sqlite_int",
+    "rows": 6505174,
+    "bulk_s": 51.99445449997438,
+    "live_ms": [
+     0.19999999494757503,
+     0.894090988440431
+    ],
+    "reinsert_1000_ms": 1.8412999925203621,
+    "count_ok": true,
+    "reads": {
+     "max_key_ms": 0.11500000255182385,
+     "last_1h_ms": 57.67879998893477,
+     "last_1h_rows": 17384,
+     "last_24h_ms": 3621.7578999930993,
+     "last_24h_rows": 1063010,
+     "agg_1m_7d_ms": 9673.686800000723
+    },
+    "bytes_per_row": 61.11030757978188,
+    "concurrent": {
+     "writer_commits": 382,
+     "writer_ms_p50": 0.28744999144691974,
+     "writer_ms_p99": 2.745440011494793,
+     "writer_errors": 0,
+     "wal_max_mb": 4.4399566650390625,
+     "reader_queries": 492,
+     "reader_ms_p50": 46.97105000377633,
+     "reader_ms_p99": 98.53901598369684,
+     "reader_errors": 0
+    },
+    "peak_rss_mb": 1000.59375,
+    "wall_s": 95.21647548675537
+   },
+   {
+    "engine": "duckdb_file",
+    "rows": 6505174,
+    "bulk_s": 38.21183970000129,
+    "live_ms": [
+     7.935299989185296,
+     15.404877987748474
+    ],
+    "reinsert_1000_ms": 7.782100001350045,
+    "count_ok": true,
+    "reads": {
+     "max_key_ms": 19.103400001768023,
+     "last_1h_ms": 7.158299995353445,
+     "last_1h_rows": 17384,
+     "last_24h_ms": 116.51929997606203,
+     "last_24h_rows": 1063010,
+     "agg_1m_7d_ms": 188.2532000017818
+    },
+    "concurrent": {
+     "reader_open": "FAILED: IOException: IO Error: Cannot open file \"C:\\the_claude_new\\data\\research\\bench_work\\duckdb_file\\db.duckdb\": The process cannot access"
+    },
+    "bytes_per_row": 21.400004365755628,
+    "peak_rss_mb": 715.22265625,
+    "wall_s": 49.620083808898926
+   },
+   {
+    "engine": "parquet_hourly",
+    "rows": 6505174,
+    "bulk_s": 10.057999699987704,
+    "live_ms": [
+     3.8570000033359975,
+     9.63603400479769
+    ],
+    "reinsert_1000_ms": NaN,
+    "count_ok": "append-only (no key enforcement)",
+    "reads": {
+     "max_key_ms": 5265.751099999761,
+     "last_1h_ms": 433.93460000515915,
+     "last_1h_rows": 17384,
+     "last_24h_ms": 688.0140000139363,
+     "last_24h_rows": 1063010,
+     "agg_1m_7d_ms": 794.1557000158355
+    },
+    "files": 768,
+    "bytes_per_row": 15.077726744895678,
+    "concurrent": {
+     "note": "files are immutable once written \u2192 readers never block writers"
+    },
+    "peak_rss_mb": 612.17578125,
+    "wall_s": 22.32761573791504
+   }
+  ],
+  "secondary": {
+   "candles_bulk_rows_s": 215418.07315656828,
+   "candles_last5000_ms": 17.884900007629767,
+   "candles_full_year_ms": 3300.0579999934416,
+   "candles_bytes_per_row": 84.71768645357686,
+   "ticks_bulk_rows_s": 320109.20987658005,
+   "ticks_bytes_per_row": 41.2798793558464,
+   "parquet_aggtrades_bytes_per_row": 8.8356034750185,
+   "parquet_ticks_bytes_per_row": 9.05367264501535,
+   "parquet_candles_bytes_per_row": 51.68863203957382
+  }
+ }
+]

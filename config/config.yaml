@@ -1,0 +1,228 @@
+# Automated Trading System — main configuration (no secrets here; secrets go in .env).
+# Local overrides: config/config.local.yaml (git-ignored, deep-merged over this file).
+# One-line switches via .env: ACTIVE_AI_PROVIDER, AGENT_MODE, TRIGGER_POLICY,
+# EXECUTION_MODE, EXECUTION_TRIGGER, RESOURCE_PROFILE, <PROVIDER>_MODEL.
+
+profile: standard            # low (4 GB RAM PCs) | standard
+
+timeframes: [1m, 5m, 15m, 1h, 4h, 1d, 1w]   # D-010, confirmed/adjusted in P6.15
+
+paths:
+  data_dir: data
+  logs_dir: logs
+
+storage:                             # D-020: SQLite hot window, then daily Parquet (zstd) cold archive
+  hot_days: {agg_trades: 2, ticks: 3, book_ticker: 2, liquidations: 30, depth: 30}
+  rollover_grace_hours: 2
+  min_free_disk_gb: 10
+
+logging:
+  level: INFO
+  max_bytes: 20971520
+  backups: 10
+  console: true
+
+resources:
+  low:
+    duckdb_memory_mb: 256
+    duckdb_threads: 1
+    sqlite_cache_mb: 8
+    engine_cycle_in_subprocess: true
+    vision_download_concurrency: 1
+    parse_chunk_rows: 200000
+  standard:
+    duckdb_memory_mb: 512
+    duckdb_threads: 2
+    sqlite_cache_mb: 16
+    engine_cycle_in_subprocess: false
+    vision_download_concurrency: 2
+    parse_chunk_rows: 500000
+
+mt5:
+  data_profile: demo                 # terminal/account feeding MT5 ingestion
+  execution_profile_by_mode: {demo: demo, live: live}
+  poll_interval_ms: 100              # provisional; measured in P1.8
+  call_timeout_s: 10
+  profiles:
+    demo:
+      terminal_path: "C:/Program Files/MetaTrader 5/terminal64.exe"
+      server: WindsorBrokers1-Demo
+      account_type: demo
+      login_env: MT5_DEMO_LOGIN      # optional: empty = attach to the already logged-in terminal
+      password_env: MT5_DEMO_PASSWORD
+    live:
+      terminal_path: "C:/MT5_Live/terminal64.exe"   # separate portable terminal (plan item 7)
+      server: WindsorBrokers1-Real1
+      account_type: real
+      login_env: MT5_LIVE_LOGIN
+      password_env: MT5_LIVE_PASSWORD
+
+binance:
+  spot_rest: https://api.binance.com
+  spot_ws: wss://stream.binance.com:9443
+  usdm_rest: https://fapi.binance.com
+  usdm_ws: wss://fstream.binance.com
+  vision: https://data.binance.vision
+  api_key_env: BINANCE_API_KEY       # only needed if Binance execution is ever enabled (D-002)
+  api_secret_env: BINANCE_API_SECRET
+  rest_weight_budget_per_min: 3000
+
+# Logical pairs -> venue instruments with roles (D-008).
+# start: per datatype — ISO date (UTC), relative ("-365d"), or "earliest" (as far as the source allows).
+pairs:
+  BTCUSDT:
+    asset_class: crypto
+    decision_timeframe: 15m
+    pip_size: 1.0                    # reporting convention only
+    instruments:
+      - venue: binance_spot
+        symbol: BTCUSDT
+        roles: [analysis_primary]
+        datatypes: [candles, agg_trades, book_ticker, depth]
+        start: {candles: "2017-08-17", agg_trades: "-365d"}
+      - venue: binance_usdm
+        symbol: BTCUSDT
+        roles: [flow_context]
+        datatypes: [candles, agg_trades, book_ticker, mark_price, funding, open_interest, metrics, liquidations]
+        start: {candles: "2019-09-08", agg_trades: "-90d", funding: "2019-09-10", metrics: "-365d"}
+      - venue: mt5
+        symbol_by_profile: {demo: "BTCUSD@", live: "BTCUSD@"}   # validated against the server at startup
+        roles: [execution, quote_reference]
+        datatypes: [candles, ticks]
+        start: {candles: earliest, ticks: "-90d"}
+
+  ETHUSDT:
+    asset_class: crypto
+    decision_timeframe: 15m
+    pip_size: 0.1
+    instruments:
+      - venue: binance_spot
+        symbol: ETHUSDT
+        roles: [analysis_primary]
+        datatypes: [candles, agg_trades, book_ticker, depth]
+        start: {candles: "2017-08-17", agg_trades: "-365d"}
+      - venue: binance_usdm
+        symbol: ETHUSDT
+        roles: [flow_context]
+        datatypes: [candles, agg_trades, book_ticker, mark_price, funding, open_interest, metrics, liquidations]
+        start: {candles: "2019-11-27", agg_trades: "-90d", funding: "2019-11-27", metrics: "-365d"}
+      - venue: mt5
+        symbol_by_profile: {demo: "ETHUSD@", live: "ETHUSD@"}
+        roles: [execution, quote_reference]
+        datatypes: [candles, ticks]
+        start: {candles: earliest, ticks: "-90d"}
+
+  XAUUSD:
+    asset_class: metal
+    decision_timeframe: 15m
+    pip_size: 0.1
+    instruments:
+      - venue: mt5
+        symbol_by_profile: {demo: "XAUUSD@", live: "XAUUSD@"}
+        roles: [analysis_primary, execution]
+        datatypes: [candles, ticks]
+        start: {candles: earliest, ticks: earliest}
+      - venue: binance_usdm            # real trade flow proxy for gold — used only if P1.11 approves
+        symbol: XAUUSDT
+        roles: [flow_context]
+        datatypes: [candles, agg_trades, book_ticker, mark_price, funding, open_interest, metrics]
+        start: {candles: "2025-12-11", agg_trades: "2025-12-11", funding: "2025-12-11", metrics: "2025-12-11"}
+
+risk:                                  # proposed defaults — user to confirm (H8)
+  risk_per_trade_pct: 0.5
+  max_risk_per_trade_pct: 1.0
+  max_daily_loss_pct: 2.0
+  min_rr: 1.5
+  max_open_positions: 3
+  max_effective_leverage: 10
+  sl_atr_min_mult: 0.5
+  sl_atr_max_mult: 5.0
+  max_spread_to_sl_ratio: 0.2
+  max_recommendation_age_s: 300
+  max_data_staleness_s: 120
+  correlated_groups: [[BTCUSDT, ETHUSDT]]
+  max_correlated_risk_pct: 1.0
+  allow_high_risk_display: true
+
+execution:
+  mode: paper                          # paper | demo | live  (D-012)
+  trigger: manual                      # manual (dashboard button) | auto
+  venue_by_pair: {BTCUSDT: mt5, ETHUSDT: mt5, XAUUSD: mt5}   # D-002, revisited in P7.2
+  max_basis_deviation_pct: 0.15        # provisional; set from P7 measurements
+  magic: 26092501
+  live_confirmation: ""                # must equal the exact phrase in settings.py to allow live
+
+ai:
+  active_provider: gemini              # D-003 (override with ACTIVE_AI_PROVIDER in .env)
+  agent_mode: agent_per_pair           # single_agent_global | agent_per_pair | agent_per_timeframe |
+                                       # agent_per_pair_and_timeframe | agent_per_pair_with_risk_reviewer |
+                                       # multi_provider_consensus
+  trigger_policy: hybrid               # every_close | on_setup_event | hybrid
+  output_language: en
+  max_parallel_calls: 2
+  consensus_providers: []
+  budget:                              # D-004 Cost Governor
+    daily_usd_cap: 0.0                 # 0 = paid providers blocked (free tier only for now)
+    monthly_usd_cap: 0.0
+    max_ai_cost_to_profit_ratio: 0.2
+    rolling_window_days: 30
+    min_trades_for_ratio: 20
+  # Model ids and prices are re-verified against official docs in P8.2 before any paid use.
+  providers:
+    gemini:
+      kind: gemini
+      model: gemini-3.8-flash
+      model_env: GEMINI_MODEL
+      fallback_model: gemini-3.5-flash-lite
+      api_key_env: GOOGLE_API_KEY
+      free_tier: true
+      rpm: 5                           # set from your AI Studio rate-limit page (H4)
+      rpd: 100
+    anthropic:
+      kind: anthropic
+      model: claude-sonnet-5
+      model_env: ANTHROPIC_MODEL
+      fallback_model: claude-haiku-4-5
+      api_key_env: ANTHROPIC_API_KEY
+    openai:
+      kind: openai
+      model: gpt-5
+      model_env: OPENAI_MODEL
+      api_key_env: OPENAI_API_KEY
+    grok:
+      kind: openai_compat
+      model: grok-4
+      model_env: GROK_MODEL
+      api_key_env: XAI_API_KEY
+      base_url: https://api.x.ai/v1
+    groq:
+      kind: openai_compat
+      model: llama-3.3-70b-versatile
+      model_env: GROQ_MODEL
+      api_key_env: GROQ_API_KEY
+      base_url: https://api.groq.com/openai/v1
+      free_tier: true
+    openrouter:
+      kind: openai_compat
+      model: deepseek/deepseek-chat-v3.1:free
+      model_env: OPENROUTER_MODEL
+      api_key_env: OPENROUTER_API_KEY
+      base_url: https://openrouter.ai/api/v1
+      free_tier: true
+    deepseek:
+      kind: openai_compat
+      model: deepseek-chat
+      model_env: DEEPSEEK_MODEL
+      api_key_env: DEEPSEEK_API_KEY
+      base_url: https://api.deepseek.com/v1
+    ollama:                            # local fallback; weak on 4 GB RAM machines (connectivity fallback only)
+      kind: openai_compat
+      model: qwen2.5:3b
+      model_env: OLLAMA_MODEL
+      base_url: http://127.0.0.1:11434/v1
+      free_tier: true
+
+api:
+  host: 127.0.0.1
+  port: 8765
+  token_env: DASHBOARD_TOKEN

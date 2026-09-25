@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tradingsystem"
+version = "0.1.0"
+description = "AI-driven automated trading system (Binance + MetaTrader 5)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy",
+    "pydantic>=2.7",
+    "PyYAML",
+    "python-dotenv",
+    "httpx[http2]",
+    "websockets",
+    "orjson",
+    "psutil",
+    "tenacity",
+    "MetaTrader5; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+analysis = ["pandas", "pyarrow", "duckdb", "scipy"]
+ai = ["anthropic", "openai", "google-genai"]
+api = ["fastapi", "uvicorn[standard]"]
+dev = ["pytest", "ta"]
+
+[project.scripts]
+tradingsystem = "tradingsystem.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tradingsystem = ["ai/prompts/**/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs network and/or a running MT5 terminal (deselect with -m 'not integration')",
+]
+addopts = "-m 'not integration'"
