@@ -12,6 +12,7 @@ import logging.handlers
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Iterable
 
@@ -127,7 +128,32 @@ def setup_logging(
 
     for noisy in ("httpx", "httpcore", "websockets", "urllib3", "asyncio"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    logging.captureWarnings(True)        # warnings → redacting handlers, not raw stderr
+    _install_excepthooks()
     return logging.getLogger(process_name)
+
+
+def _install_excepthooks() -> None:
+    """Uncaught exceptions (main thread + threads) are logged through the redacting handlers (OPS-06/F8).
+
+    Raw stderr of supervised children goes to ``logs/<service>.stderr.log``, which is not redacted.
+    """
+    crash = logging.getLogger("uncaught")
+
+    def hook(t, v, tb) -> None:  # noqa: ANN001
+        if issubclass(t, KeyboardInterrupt):
+            sys.__excepthook__(t, v, tb)
+            return
+        crash.critical("uncaught %s", t.__name__, exc_info=(t, v, tb))
+
+    def thread_hook(a: threading.ExceptHookArgs) -> None:
+        if a.exc_type is SystemExit:
+            return
+        crash.critical("uncaught %s in thread %s", a.exc_type.__name__, getattr(a.thread, "name", "?"),
+                       exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
+
+    sys.excepthook = hook
+    threading.excepthook = thread_hook
 
 
 def setup_from_settings(process_name: str, settings) -> logging.Logger:  # noqa: ANN001 (avoid import cycle)
@@ -138,6 +164,7 @@ def setup_from_settings(process_name: str, settings) -> logging.Logger:  # noqa:
         level=lc.level,
         max_bytes=lc.max_bytes,
         backups=lc.backups,
-        console=lc.console,
+        # TS_LOG_CONSOLE=0: set by the supervisor for its children (their stderr is a file; the .jsonl has it all)
+        console=lc.console and os.environ.get("TS_LOG_CONSOLE", "").strip() != "0",
         secret_env_names=settings.secret_env_names(),
     )

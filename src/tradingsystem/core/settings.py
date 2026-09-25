@@ -290,6 +290,15 @@ class ApiCfg(_Model):
         return v
 
 
+class SupervisorCfg(_Model):
+    """Supervisor ops knobs (P5.1/P5.3, docs/ops_windows.md)."""
+    keep_awake: bool = True                  # block *idle* sleep while running (lid/buttons: Windows power plan)
+    manage_mt5_terminal: bool = True         # start a missing MT5 terminal outside the supervisor's job/tree (OPS-04)
+    mt5_task: str = "TradingSystem-MT5"      # scheduled task that starts the data terminal (scripts/install_autostart.ps1)
+    child_log_max_bytes: int = 5 * 1024 * 1024   # logs/<service>.stderr.log rolled at (re)start above this
+    child_log_backups: int = 2
+
+
 # --------------------------------------------------------------------------- root
 class Settings(_Model):
     profile: Literal["low", "standard"] = "standard"
@@ -305,6 +314,7 @@ class Settings(_Model):
     execution: ExecutionCfg = ExecutionCfg()
     ai: AICfg
     api: ApiCfg = ApiCfg()
+    supervisor: SupervisorCfg = SupervisorCfg()
 
     # populated by the loader, not by YAML
     config_hash: str = ""
