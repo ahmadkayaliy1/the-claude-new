@@ -10,3 +10,5 @@ All files are unmodified slices of real market data (spec §0: no synthetic data
 
 Produced by `research/bench/bench_prepare.py` (cached Parquet) and sliced with pyarrow.
 | `payload_xauusd.json` | `SnapshotBuilder.build("XAUUSD", as_of)` on the production database (MT5 WindsorBrokers1-Demo + Binance USDⓈ-M XAUUSDT), 2026-09-25 ≈10:50 UTC | one complete real snapshot payload |
+| `claude_code_not_logged_in.json` | Claude Code CLI 2.1.282 `claude -p --output-format json --json-schema …` stdout, run with a clean environment before sign-in (no model call) | one complete result envelope (error: not logged in) |
+| `claude_code_auth_status_logged_out.json` | Claude Code CLI 2.1.282 `claude auth status --json` stdout before sign-in | complete output |

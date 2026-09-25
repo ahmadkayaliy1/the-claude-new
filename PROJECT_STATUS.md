@@ -5,9 +5,9 @@
 > Spec: `AI_Trading_System_Spec_EN.md`. Approved plan (Arabic): see Decision Log D-001.
 
 ## Overview
-- **Started:** 2026-09-25. **Approx. completion:** 72%.
-- **Current milestone:** Waiting on H4 (Gemini key) for live AI; meanwhile soak (P3.9/P4.6), recorder (P1.12), backfills run
-- **Summary:** M0–M4, M6, M8, M10 essentially complete; M9 paper execution complete (MT5 demo sends await H6); supervisor runs every service in production since 2026-09-25 11:13 UTC (dashboard http://127.0.0.1:8765). Next: H4 → first live AI decisions (P8.2/P8.8) → paper run; P1.11 gold-proxy study and P7.1 price matching once enough data (≥72 h); P6.15 replay study; P9.6 MT5 position manager; P5.3 ops/autostart.
+- **Started:** 2026-09-25. **Approx. completion:** 73%.
+- **Current milestone:** Waiting on H11 (sign in Claude Code) for live AI (Gemini H4 = fallback); soak (P3.9/P4.6), recorder (P1.12), backfills run
+- **Summary:** M0–M4, M6, M8, M10 essentially complete; M9 paper execution complete (MT5 demo sends await H6); supervisor runs every service in production since 2026-09-25 11:13 UTC (dashboard http://127.0.0.1:8765). AI brain = Claude via the user's subscription (D-030, P8.9) with Gemini free as fallback. Next: H11 → first live AI decisions (P8.9/P8.8) → paper run; P1.11 gold-proxy study and P7.1 price matching once enough data (≥72 h); P6.15 replay study; P9.6 MT5 position manager; P5.3 ops/autostart.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
@@ -17,13 +17,14 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 | H1 | MT5 terminal → Tools → Options → Charts → **Max bars in chart = Unlimited**, then restart terminal | P1.6 | ✅ done by the agent at the user's request (common.ini MaxBars → terminal now reports 100,000,000; backup `common.ini.bak-20260925`) |
 | H2 | Keep the PC awake (no sleep) during the 3–7 day price-matching recording (must include a weekend) | P1.12 | ⏳ |
 | H3 | Allow one close/reopen of the MT5 terminal during the multi-client probe | P1.9 | ✅ |
-| H4 | Put `GOOGLE_API_KEY` in `.env` and copy the actual free-tier RPM/RPD limits from AI Studio into config | P8.2 | ⏳ |
+| H4 | Put `GOOGLE_API_KEY` in `.env` and copy the actual free-tier RPM/RPD limits from AI Studio into config (since D-030 Gemini is the *fallback* provider, used while Claude is unavailable) | P8.2 | ⏳ |
 | H5 | Review the price-matching decision (Binance vs Windsor execution for BTC/ETH) | P7.2 | ⏳ |
 | H6 | Approve demo-account test orders (0.01 lot) | P9.5 | ⏳ |
 | H7 | Ops settings (sleep off, autostart, time sync) per `docs/ops_windows.md` | P5.3 | ⏳ |
 | H8 | Confirm/adjust default risk parameters (0.5%/trade, 2% daily loss, RR ≥ 1.5, max 3 open) | P9.1 | ⏳ |
 | H9 | Any switch to LIVE trading is the user's decision only | P9.7 / P11.4 | ⏳ |
 | H10 | Demo balance vs intended live capital | P9.5 | ✅ user's intended live capital ≈ $100 (all 3 pairs); the current demo (≈$158) is close enough for realistic tests |
+| H11 | Sign the Claude Code CLI in with your Claude subscription once: `claude auth login` in a terminal (or `claude setup-token` and put the token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`) | P8.9 | ⏳ |
 
 ## Environment facts (observed 2026-09-25, read-only probes)
 - Windows 11 Pro; CPU i3-1005G1 (2C/4T); RAM 7.7 GB; ~59 GB free on C:. Local TZ **"Middle East Standard Time"** (UTC+3 now).
@@ -68,6 +69,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - [2026-09-25] **D-027** AI levels are expressed in the *analysis* instrument's price space (`meta.price_reference`); the execution layer translates them to the execution instrument by the live basis (P7.3). Gold analyses and executes on the same instrument.
 - [2026-09-25] **D-028** Dashboard = FastAPI + vanilla JS (no build step) + locally vendored TradingView lightweight-charts 4.2.3 — lighter than React/Vite on 4 GB machines and editable without a toolchain.
 - [2026-09-25] **D-029** Production runs under the supervisor (`run all`, Windows Job Object, process-tree kills). The research recorder (P1.12) runs separately until its 3–7 day window ends.
+- [2026-09-25] **D-030** AI brain = Claude on the user's own Claude subscription through the local Claude Code CLI (`ai.active_provider: claude_code`, model `sonnet`, effort medium) with Gemini free as `ai.fallback_provider` (supersedes D-003's Gemini-first default). Claude only analyses (no tools, no files, no execution); data, the risk gate and execution stay deterministic in our code. Personal use of one's own subscription; it shares the plan's usage limits with interactive use (daily cap `rpd: 120`). API keys are never passed to the CLI, so nothing is billed per token.
 
 ## Phases
 
@@ -735,6 +737,15 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - Affected files: `docs/ai_modes_run.md`
 - What was done: — · Why this way: — · Notes/open issues: —
 - The exact next step: after P8.7.
+
+### Phase P8.9: Claude on the user's subscription (Claude Code CLI)
+- Status: 🔄 In Progress
+- Description: use the user's existing Claude subscription as the AI brain instead of pay-per-token APIs; Gemini free as fallback.
+- Affected files: `src/tradingsystem/ai/providers/claude_code.py`, `ai/providers/{base,__init__}.py`, `ai/orchestrator.py` (routing), `analysis/engine.py` (status), `core/settings.py` (`claude_code` kind, `cli_path`, `ai.fallback_provider`, `AI_FALLBACK_PROVIDER`), `config/config.yaml`, `.env.example`, `tests/unit/test_claude_code_provider.py`, `tests/fixtures/real/claude_code_*.json`
+- What was done: provider `claude_code` spawns `claude -p` (Claude Code CLI 2.1.282, found on PATH or `~/.local/bin`) with our system prompt file, the snapshot on stdin, `--json-schema` structured output, `--tools ""`, `--strict-mcp-config`, `--setting-sources ""`, `--no-session-persistence`, empty working dir → pure analysis (no files, commands, MCP, CLAUDE.md or hooks). Minimal child environment: none of our secrets and no `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` → can only run on the subscription login; an API-key sign-in is refused. `claude auth status` (no usage) checked every 5 min; "not signed in" → 5 min cooldown; usage limit → cooldown until the reset epoch (else 30 min). Calls serialized (one CLI process). Cost = $0 (flat subscription), API-equivalent cost kept in `LLMResult.extra`. Orchestrator routes to `ai.fallback_provider` (gemini) while the active provider is unavailable and back when it recovers; explicit provider names (consensus) are never rerouted; the engine status shows the provider in use and why. Verified against the real CLI with the full agent_per_pair prompt (6.5 k chars), the full Recommendation schema and a real 26 k payload (arguments accepted, "not signed in" classified, temp files removed). 12 tests.
+- Why this way: D-030 — the subscription is already paid (marginal cost $0) whereas the same load via the API is ≈ $50/month (Sonnet) – $100/month (Opus) — too much for a $100 account (D-004 ROI rule).
+- Notes/open issues: usage shares the plan's 5-hour/weekly limits with the user's interactive Claude use (`rpd: 120` cap protects them). The parser's success path is tested on the real envelope structure; replace with a real success capture after H11. RSS of the CLI process not measured yet.
+- The exact next step: after H11, run `engine --once --pairs XAUUSD` (one real call), save its CLI output as a fixture, measure latency/RSS/tokens, then watch one day of paper cycles to see how much of the plan's limits the system uses.
 
 ### M9 — Execution
 

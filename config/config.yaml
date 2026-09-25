@@ -161,7 +161,8 @@ execution:
   live_confirmation: ""                # must equal the exact phrase in settings.py to allow live
 
 ai:
-  active_provider: gemini              # D-003 (override with ACTIVE_AI_PROVIDER in .env)
+  active_provider: claude_code         # D-030 (override with ACTIVE_AI_PROVIDER in .env)
+  fallback_provider: gemini            # used while the active provider is unavailable (not signed in / usage limit)
   agent_mode: agent_per_pair           # single_agent_global | agent_per_pair | agent_per_timeframe |
                                        # agent_per_pair_and_timeframe | agent_per_pair_with_risk_reviewer |
                                        # multi_provider_consensus
@@ -179,6 +180,16 @@ ai:
     min_trades_for_ratio: 20
   # Model ids and prices are re-verified against official docs in P8.2 before any paid use.
   providers:
+    claude_code:                       # D-030: Claude on your own Claude subscription via the Claude Code CLI -
+      kind: claude_code                # no API key, no per-token bill; shares the plan's 5-hour/weekly limits
+      model: sonnet                    # alias = latest Sonnet (opus = deeper, uses the limits faster)
+      model_env: CLAUDE_CODE_MODEL
+      api_key_env: CLAUDE_CODE_OAUTH_TOKEN   # optional long-lived token (`claude setup-token`); empty = CLI login
+      effort: medium
+      free_tier: true                  # flat subscription: no marginal USD cost per call
+      rpm: 4
+      rpd: 120                         # daily cap - keeps limits free for your own interactive use
+      timeout_s: 300
     gemini:
       kind: gemini
       model: gemini-3.8-flash

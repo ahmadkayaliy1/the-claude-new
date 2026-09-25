@@ -20,5 +20,8 @@ def make_provider(settings: Settings, name: str | None = None, *, model: str | N
     if cfg.kind == "anthropic":
         from .anthropic_claude import AnthropicProvider
         return AnthropicProvider(name, cfg, mdl, key)
+    if cfg.kind == "claude_code":
+        from .claude_code import ClaudeCodeProvider
+        return ClaudeCodeProvider(name, cfg, mdl, key)
     from .openai_chat import OpenAIChatProvider
     return OpenAIChatProvider(name, cfg, mdl, key)

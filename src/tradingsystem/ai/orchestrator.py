@@ -26,7 +26,7 @@ from .budget import CostGovernor, RateLimiter, UsageStore
 from .contract import (AssessmentSet, Decision, Recommendation, RecommendationSet, RiskReview,
                        TimeframeAssessment)
 from .prompts import render
-from .providers import LLMProvider, make_provider
+from .providers import LLMProvider, ProviderError, make_provider
 from .repair import Generation, generate_validated
 from .store import DecisionRecord, DecisionStore
 
@@ -48,15 +48,51 @@ class Orchestrator:
         self._providers: dict[str, LLMProvider] = {}
         self._limiters: dict[str, RateLimiter] = {}
         self._sem = asyncio.Semaphore(max(1, settings.ai.max_parallel_calls))
+        self.route: tuple[str, str | None] = (settings.ai.active_provider, None)   # (provider in use, why rerouted)
 
     # ------------------------------------------------------------------ plumbing
     def provider(self, name: str | None = None) -> LLMProvider:
-        name = name or self.s.ai.active_provider
+        """A named provider, or (no name) the active one — rerouted to ``ai.fallback_provider`` while the active
+        provider is unavailable (not signed in, usage limit reached, missing key; D-030)."""
+        if name is not None:
+            return self._get(name)
+        active, fallback = self.s.ai.active_provider, self.s.ai.fallback_provider
+        try:
+            prov = self._get(active)
+            why = prov.unavailable_reason()
+        except ProviderError as exc:
+            if not fallback:
+                raise
+            prov, why = None, str(exc)
+        if why is None:
+            self._set_route(active, None)
+            return prov
+        if not fallback:
+            raise ProviderError(why, retryable=False)
+        try:
+            fb = self._get(fallback)
+            fb_why = fb.unavailable_reason()
+        except ProviderError as exc:
+            fb_why = str(exc)
+        if fb_why:
+            raise ProviderError(f"{why}; fallback {fallback}: {fb_why}", retryable=False)
+        self._set_route(fallback, why)
+        return fb
+
+    def _get(self, name: str) -> LLMProvider:
         if name not in self._providers:
             prov = make_provider(self.s, name)
             self._providers[name] = prov
             self._limiters[prov.name] = RateLimiter(prov.name, prov.cfg, self.usage)
         return self._providers[name]
+
+    def _set_route(self, name: str, why: str | None) -> None:
+        if (name, why) != self.route:
+            if why:
+                log.warning("AI provider %s unavailable (%s) — using fallback %s", self.s.ai.active_provider, why, name)
+            elif self.route[1]:
+                log.info("AI provider %s available again", name)
+            self.route = (name, why)
 
     def effective_mode(self) -> tuple[str, str]:
         st = self.governor.state()

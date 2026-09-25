@@ -99,6 +99,10 @@ class LLMProvider(ABC):
     async def _call(self, system: str, user: str, schema: dict | None, schema_name: str,
                     max_output_tokens: int) -> LLMResult: ...
 
+    def unavailable_reason(self) -> str | None:
+        """Why the provider cannot take calls right now (e.g. not signed in, usage limit), or None."""
+        return None
+
     async def generate(self, *, system: str, user: str, schema: dict | None = None, schema_name: str = "output",
                        max_output_tokens: int | None = None) -> LLMResult:
         t0 = time.perf_counter()

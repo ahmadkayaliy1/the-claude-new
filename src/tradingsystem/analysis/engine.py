@@ -55,7 +55,7 @@ class Engine:
     _ai_problem: str = ""
 
     def ai_ready(self) -> bool:
-        """True when the active provider can be constructed (e.g. its API key is set — H4)."""
+        """True when the active provider (or ``ai.fallback_provider`` while it is unavailable) can take calls."""
         try:
             self.orch.provider()
             self._ai_problem = ""
@@ -134,10 +134,15 @@ class Engine:
             try:
                 await self.tick()
                 st = self.governor.state()
+                ready = self.ai_ready()
+                in_use, rerouted = self.orch.route
                 self.appdb.set_status("engine", "live", last_data_ms=now_ms(), detail={
-                    "mode": self.s.ai.agent_mode, "policy": self._policy(), "provider": self.s.ai.active_provider,
+                    "mode": self.s.ai.agent_mode, "policy": self._policy(),
+                    "provider": in_use if ready else self.s.ai.active_provider,
+                    "provider_configured": self.s.ai.active_provider,
+                    "provider_fallback_reason": rerouted if ready else None,
                     "governor_level": st.level, "governor_reason": st.reason, "ai_spend_today_usd": round(st.spend_today, 4),
-                    "ai_ready": self.ai_ready(), "ai_problem": self._ai_problem or None,
+                    "ai_ready": ready, "ai_problem": self._ai_problem or None,
                     "processed": {p: iso(b) for p, b in self.processed.items()}})
             except Exception as exc:  # noqa: BLE001
                 log.exception("engine tick failed")
