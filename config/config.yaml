@@ -175,32 +175,45 @@ ai:
       model_env: GEMINI_MODEL
       fallback_model: gemini-3.5-flash-lite
       api_key_env: GOOGLE_API_KEY
-      free_tier: true
+      free_tier: true                  # set false if you move to the paid tier - prices below then apply
       rpm: 5                           # set from your AI Studio rate-limit page (H4)
       rpd: 100
+      model_prices:                    # paid-tier USD/MTok (ai.google.dev/gemini-api/docs/pricing, 2026-09)
+        gemini-3.8-flash: [1.50, 7.50] # upper bound of the published 3.x Flash range (conservative)
+        gemini-3.5-flash-lite: [0.30, 2.50]
     anthropic:
       kind: anthropic
-      model: claude-sonnet-5
+      model: claude-opus-5
       model_env: ANTHROPIC_MODEL
-      fallback_model: claude-haiku-4-5
+      fallback_model: claude-sonnet-5
       api_key_env: ANTHROPIC_API_KEY
+      effort: high
+      max_output_tokens: 16000
+      model_prices:                    # Anthropic first-party USD/MTok
+        claude-opus-5: [5.00, 25.00]
+        claude-opus-5-5: [4.00, 20.00]
+        claude-sonnet-5: [2.00, 10.00]
+        claude-haiku-4-5: [1.00, 5.00]
     openai:
       kind: openai
       model: gpt-5
       model_env: OPENAI_MODEL
       api_key_env: OPENAI_API_KEY
+      structured_output: native        # prices must be filled in before paid use (unknown cost -> blocked)
     grok:
       kind: openai_compat
       model: grok-4
       model_env: GROK_MODEL
       api_key_env: XAI_API_KEY
       base_url: https://api.x.ai/v1
+      structured_output: native
     groq:
       kind: openai_compat
       model: llama-3.3-70b-versatile
       model_env: GROQ_MODEL
       api_key_env: GROQ_API_KEY
       base_url: https://api.groq.com/openai/v1
+      structured_output: json_object
       free_tier: true
     openrouter:
       kind: openai_compat
@@ -208,6 +221,7 @@ ai:
       model_env: OPENROUTER_MODEL
       api_key_env: OPENROUTER_API_KEY
       base_url: https://openrouter.ai/api/v1
+      structured_output: prompt
       free_tier: true
     deepseek:
       kind: openai_compat
@@ -215,11 +229,13 @@ ai:
       model_env: DEEPSEEK_MODEL
       api_key_env: DEEPSEEK_API_KEY
       base_url: https://api.deepseek.com/v1
+      structured_output: json_object
     ollama:                            # local fallback; weak on 4 GB RAM machines (connectivity fallback only)
       kind: openai_compat
       model: qwen2.5:3b
       model_env: OLLAMA_MODEL
       base_url: http://127.0.0.1:11434/v1
+      structured_output: json_object
       free_tier: true
 
 api:

@@ -223,6 +223,9 @@ class AIProviderCfg(_Model):
     tpm: int | None = None
     usd_per_mtok_in: float = 0.0
     usd_per_mtok_out: float = 0.0
+    model_prices: dict[str, tuple[float, float]] = Field(default_factory=dict)   # model -> (in, out) USD/MTok
+    structured_output: Literal["native", "json_object", "prompt"] = "native"
+    effort: str | None = None
     timeout_s: float = 120.0
     max_output_tokens: int = 4096
     free_tier: bool = False

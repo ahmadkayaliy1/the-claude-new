@@ -1,0 +1,182 @@
+"""AI usage accounting, rate limiting and the ROI-based Cost Governor (P8.3, D-004).
+
+* Every call is recorded in ``app.db:ai_usage`` (tokens, cost, latency, outcome) — survives restarts, so the
+  free-tier daily quota (RPD) and USD caps are enforced across process restarts.
+* ``RateLimiter``: requests-per-minute spacing + requests-per-day from the persisted log.
+* ``CostGovernor``: blocks calls whose cost is unknown or would exceed the daily/monthly USD caps, and
+  degrades the AI workload when AI cost exceeds ``max_ai_cost_to_profit_ratio`` of realised profit over the
+  rolling window: level 0 configured mode → 1 ``agent_per_pair`` → 2 setup-event triggers only → 3 paused
+  (cycles return NO_TRADE with the reason).
+"""
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import logging
+import sqlite3
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from ..core.settings import AIBudgetCfg, AIProviderCfg
+from ..core.timeutil import MS_PER_DAY, now_ms
+from ..storage.sqlite_store import connect
+from .providers.base import LLMProvider, LLMResult
+
+log = logging.getLogger(__name__)
+
+_DDL = [
+    """CREATE TABLE IF NOT EXISTS ai_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+        purpose TEXT, pair TEXT, input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER,
+        cost_usd REAL, latency_ms INTEGER, ok INTEGER NOT NULL, error TEXT, request_id TEXT)""",
+    "CREATE INDEX IF NOT EXISTS ai_usage_ts ON ai_usage(ts)",
+]
+
+
+class BudgetExceeded(RuntimeError):
+    """A call was refused by the rate limiter or the Cost Governor (the cycle must fall back to NO_TRADE)."""
+
+
+class UsageStore:
+    def __init__(self, app_db: Path) -> None:
+        self._con = connect(app_db, cache_mb=2)
+        self._lock = threading.Lock()
+        with self._lock:
+            for s in _DDL:
+                self._con.execute(s)
+
+    def record(self, res: LLMResult | None, *, provider: str, model: str, purpose: str, pair: str | None,
+               ok: bool, error: str | None = None) -> None:
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO ai_usage(ts, provider, model, purpose, pair, input_tokens, output_tokens, cached_tokens, "
+                "cost_usd, latency_ms, ok, error, request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (now_ms(), provider, model, purpose, pair, res.input_tokens if res else 0, res.output_tokens if res else 0,
+                 res.cached_input_tokens if res else 0, res.cost_usd if res else 0.0, res.latency_ms if res else 0,
+                 int(ok), error, res.request_id if res else None))
+
+    def count_since(self, provider: str, since_ms: int) -> int:
+        with self._lock:
+            return int(self._con.execute("SELECT count(*) FROM ai_usage WHERE provider=? AND ts>=?",
+                                         (provider, since_ms)).fetchone()[0])
+
+    def cost_since(self, since_ms: int) -> float:
+        with self._lock:
+            return float(self._con.execute("SELECT COALESCE(sum(cost_usd),0) FROM ai_usage WHERE ts>=?",
+                                           (since_ms,)).fetchone()[0])
+
+    def close(self) -> None:
+        with self._lock:
+            self._con.close()
+
+
+def utc_midnight(ms: int) -> int:
+    return ms // MS_PER_DAY * MS_PER_DAY
+
+
+def month_start(ms: int) -> int:
+    d = dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc)
+    return int(dt.datetime(d.year, d.month, 1, tzinfo=dt.timezone.utc).timestamp() * 1000)
+
+
+class RateLimiter:
+    """Per-provider RPM spacing (in-process) + RPD (persisted)."""
+
+    def __init__(self, name: str, cfg: AIProviderCfg, usage: UsageStore) -> None:
+        self.name, self.cfg, self.usage = name, cfg, usage
+        self._last: list[float] = []
+        self._lock = asyncio.Lock()
+
+    def remaining_today(self) -> int | None:
+        if not self.cfg.rpd:
+            return None
+        return max(self.cfg.rpd - self.usage.count_since(self.name, utc_midnight(now_ms())), 0)
+
+    async def acquire(self) -> None:
+        left = self.remaining_today()
+        if left is not None and left <= 0:
+            raise BudgetExceeded(f"{self.name}: daily request quota ({self.cfg.rpd}) used up")
+        if not self.cfg.rpm:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            self._last = [t for t in self._last if now - t < 60]
+            if len(self._last) >= self.cfg.rpm:
+                wait = 60 - (now - self._last[0]) + 0.1
+                log.info("%s: RPM limit %d — waiting %.1fs", self.name, self.cfg.rpm, wait)
+                await asyncio.sleep(wait)
+            self._last.append(time.monotonic())
+
+
+@dataclass
+class GovernorState:
+    level: int
+    reason: str
+    spend_today: float
+    spend_month: float
+    window_cost: float
+    window_profit: float | None
+    window_trades: int
+
+
+LEVELS = {0: "configured mode", 1: "agent_per_pair", 2: "setup-event triggers only", 3: "paused (NO_TRADE)"}
+
+
+class CostGovernor:
+    """``profit_fn(since_ms) -> (realised_profit_usd, n_closed_trades)`` comes from the execution layer
+    (paper/demo outcomes during testing, D-004)."""
+
+    def __init__(self, cfg: AIBudgetCfg, usage: UsageStore,
+                 profit_fn: Callable[[int], tuple[float, int]] | None = None) -> None:
+        self.cfg, self.usage, self.profit_fn = cfg, usage, profit_fn
+
+    def state(self) -> GovernorState:
+        now = now_ms()
+        today = self.usage.cost_since(utc_midnight(now))
+        month = self.usage.cost_since(month_start(now))
+        since = now - self.cfg.rolling_window_days * MS_PER_DAY
+        wcost = self.usage.cost_since(since)
+        profit, trades = self.profit_fn(since) if self.profit_fn else (None, 0)
+        level, reason = 0, "within budget"
+        if trades >= self.cfg.min_trades_for_ratio and wcost > 0:
+            if profit is None or profit <= 0:
+                level, reason = 2, f"AI cost ${wcost:.2f} with no realised profit over {self.cfg.rolling_window_days} d"
+            else:
+                ratio = wcost / profit
+                if ratio > 2 * self.cfg.max_ai_cost_to_profit_ratio:
+                    level, reason = 2, f"AI cost/profit {ratio:.2f} > 2× limit {self.cfg.max_ai_cost_to_profit_ratio}"
+                elif ratio > self.cfg.max_ai_cost_to_profit_ratio:
+                    level, reason = 1, f"AI cost/profit {ratio:.2f} > limit {self.cfg.max_ai_cost_to_profit_ratio}"
+        if self.cfg.monthly_usd_cap > 0 and month >= self.cfg.monthly_usd_cap:
+            level, reason = 3, f"monthly AI cap ${self.cfg.monthly_usd_cap:.2f} reached"
+        return GovernorState(level, reason, today, month, wcost, profit, trades)
+
+    def check(self, provider: LLMProvider, est_input_tokens: int, est_output_tokens: int) -> None:
+        """Raise BudgetExceeded if this call may not be made."""
+        if provider.cfg.free_tier:
+            return
+        if not provider.priced:
+            raise BudgetExceeded(f"{provider.name}/{provider.model}: price unknown — configure model_prices first")
+        p_in, p_out = provider.prices()
+        est = (est_input_tokens * p_in + est_output_tokens * p_out) / 1e6
+        now = now_ms()
+        today = self.usage.cost_since(utc_midnight(now))
+        if today + est > self.cfg.daily_usd_cap:
+            raise BudgetExceeded(f"daily AI cap ${self.cfg.daily_usd_cap:.2f} would be exceeded "
+                                 f"(spent ${today:.4f}, next call ≈ ${est:.4f})")
+        month = self.usage.cost_since(month_start(now))
+        if self.cfg.monthly_usd_cap > 0 and month + est > self.cfg.monthly_usd_cap:
+            raise BudgetExceeded(f"monthly AI cap ${self.cfg.monthly_usd_cap:.2f} would be exceeded")
+        if self.state().level >= 3:
+            raise BudgetExceeded("Cost Governor paused AI calls")
+
+
+def is_budget_error(exc: BaseException) -> bool:
+    return isinstance(exc, BudgetExceeded)
+
+
+__all__ = ["BudgetExceeded", "UsageStore", "RateLimiter", "CostGovernor", "GovernorState", "LEVELS",
+           "is_budget_error", "sqlite3"]
