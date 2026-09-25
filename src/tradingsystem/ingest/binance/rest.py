@@ -25,6 +25,10 @@ class BinanceHTTPError(RuntimeError):
         self.status, self.body = status, body
 
 
+class RetriesExhausted(RuntimeError):
+    """Rate-limit (429/418) retries used up — transient: the caller may retry later."""
+
+
 class BinanceRest:
     def __init__(self, base_url: str, *, weight_budget_per_min: int = 3000, timeout_s: float = 20.0,
                  max_retries: int = 6) -> None:
@@ -89,7 +93,7 @@ class BinanceRest:
                 delay = min(delay * 2, 60)
                 continue
             raise BinanceHTTPError(r.status_code, r.text, str(r.url))
-        raise RuntimeError(f"GET {path}: retries exhausted")
+        raise RetriesExhausted(f"GET {path}: retries exhausted")
 
     async def sync_clock(self, path: str = "/api/v3/time", samples: int = 3) -> float:
         best: tuple[float, int] | None = None

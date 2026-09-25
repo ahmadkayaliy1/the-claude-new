@@ -16,6 +16,15 @@ import numpy as np
 from .tablespec import TableSpec
 
 _NP_TYPES = {"INTEGER": np.int64, "REAL": np.float64}
+_FETCH_CHUNK = 100_000
+
+
+def _to_array(col: list, sql_type: str) -> np.ndarray:
+    if sql_type not in _NP_TYPES:
+        return np.array(col, dtype=object)
+    if any(v is None for v in col):
+        return np.array([np.nan if v is None else v for v in col], dtype=np.float64)
+    return np.fromiter(col, dtype=_NP_TYPES[sql_type], count=len(col))
 
 
 def connect(path: Path, *, readonly: bool = False, cache_mb: int = 16, busy_timeout_ms: int = 10_000
@@ -181,29 +190,23 @@ class SQLiteHotStore:
         return {k: v[::-1].copy() for k, v in out.items()}   # chronological order
 
     def _fetch_columns(self, spec: TableSpec, sql: str, params: tuple, cols: list[str]) -> dict[str, np.ndarray]:
+        """Columns as numpy arrays, converted in chunks (peak memory ≈ the arrays, not millions of row tuples)."""
         types = {c.name: c.sql_type for c in spec.columns}
+        parts: dict[str, list[np.ndarray]] = {c: [] for c in cols}
         with self._lock:
             try:
-                rows = self._con.execute(sql, params).fetchall()
+                cur = self._con.execute(sql, params)
             except sqlite3.OperationalError as exc:
-                if "no such table" in str(exc):
-                    rows = []
-                else:
+                if "no such table" not in str(exc):
                     raise
-        if not rows:
+                cur = None
+            while cur is not None and (rows := cur.fetchmany(_FETCH_CHUNK)):
+                for i, c in enumerate(cols):
+                    parts[c].append(_to_array([r[i] for r in rows], types[c]))
+        if not parts[cols[0]]:
             return {c: np.empty(0, dtype=_NP_TYPES.get(types[c], object)) for c in cols}
-        out: dict[str, np.ndarray] = {}
-        for i, c in enumerate(cols):
-            t = types[c]
-            if t in _NP_TYPES:
-                col = [r[i] for r in rows]
-                if any(v is None for v in col):
-                    out[c] = np.array([np.nan if v is None else v for v in col], dtype=np.float64)
-                else:
-                    out[c] = np.fromiter(col, dtype=_NP_TYPES[t], count=len(col))
-            else:
-                out[c] = np.array([r[i] for r in rows], dtype=object)
-        return out
+        # a NULL anywhere makes that chunk float64 → concatenation promotes the column, as before
+        return {c: v[0] if len(v) == 1 else np.concatenate(v) for c, v in parts.items()}
 
     def close(self) -> None:
         with self._lock:

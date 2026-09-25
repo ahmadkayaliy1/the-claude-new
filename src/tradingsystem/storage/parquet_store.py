@@ -108,6 +108,10 @@ class ParquetColdStore:
             os.replace(tmp, path)
         return table.num_rows
 
+    def day_writer(self, inst: Instrument, spec: TableSpec, day: dt.date, *, dense_key: bool = False) -> "DayWriter":
+        """Streaming writer for one day (bounded memory) — see :class:`DayWriter`."""
+        return DayWriter(self, inst, spec, day, dense_key=dense_key)
+
     # ------------------------------------------------------------------ reads
     def day_rows(self, inst: Instrument, spec: TableSpec, day: dt.date) -> int:
         p = self.day_path(inst, spec, day)
@@ -172,6 +176,101 @@ class ParquetColdStore:
             return len(keys) == 0
         stored = pq.read_table(p, columns=[spec.key[0]])[spec.key[0]].to_numpy()
         return bool(np.isin(keys, stored, assume_unique=False).all())
+
+
+class DayWriter:
+    """Streams one UTC day of rows to a temp Parquet file batch by batch; ``commit()`` installs it atomically.
+
+    Memory stays at one batch (BF-04) — no whole-day accumulation. Rows should arrive sorted by a single integer
+    key (Vision files are); otherwise the temp file is sorted/de-duplicated in memory at commit. When the day file
+    already exists and ``dense_key`` (consecutive ids, e.g. aggTrade ids) lets the key ranges prove containment,
+    the superset file wins without a merge; any other overlap falls back to the in-memory merge of ``write_day``.
+    """
+
+    def __init__(self, store: ParquetColdStore, inst: Instrument, spec: TableSpec, day: dt.date, *,
+                 dense_key: bool = False) -> None:
+        if len(spec.key) != 1:
+            raise ValueError("DayWriter supports single-column keys only")
+        self.spec, self.schema, self.dense_key = spec, arrow_schema(spec), dense_key
+        self.path = store.day_path(inst, spec, day)
+        self.tmp = self.path.with_suffix(f".stmp{os.getpid()}")
+        self.lo, self.hi = day_start_ms(day), day_start_ms(day) + MS_PER_DAY
+        self.rows = 0
+        self._w: pq.ParquetWriter | None = None
+        self._last: int | None = None
+        self._sorted = True
+
+    def write(self, table: pa.Table) -> None:
+        if not table.num_rows:
+            return
+        table = table.select(list(self.schema.names)).cast(self.schema)
+        t = table[self.spec.time_col]
+        if pc.min(t).as_py() < self.lo or pc.max(t).as_py() >= self.hi:
+            raise ValueError(f"rows outside {self.path.stem} passed to DayWriter({self.spec.name})")
+        k = table[self.spec.key[0]].to_numpy()
+        if (self._last is not None and int(k[0]) <= self._last) or bool((np.diff(k) <= 0).any()):
+            self._sorted = False
+        self._last = int(k.max()) if self._last is None else max(self._last, int(k.max()))
+        if self._w is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._w = pq.ParquetWriter(self.tmp, self.schema, compression="zstd")
+        self._w.write_table(table, row_group_size=256_000)
+        self.rows += table.num_rows
+
+    def abort(self) -> None:
+        if self._w is not None:
+            self._w.close()
+            self._w = None
+        self.tmp.unlink(missing_ok=True)
+
+    def commit(self) -> int:
+        """Install the day file; returns the row count of the resulting file."""
+        if self._w is None:
+            return pq.read_metadata(self.path).num_rows if self.path.exists() else 0
+        self._w.close()
+        self._w = None
+        try:
+            with _DayLock(self.path.with_suffix(".lock")):
+                if not self._sorted:
+                    self._rewrite(_dedupe_sorted(pq.read_table(self.tmp, schema=self.schema), self.spec))
+                if self.path.exists():
+                    new, old = _key_range(self.tmp, self.spec), _key_range(self.path, self.spec)
+                    if old is not None and new is not None and self.dense_key and _dense(old) \
+                            and old[0] <= new[0] and new[1] <= old[1]:
+                        return old[2]                                   # existing file already holds every row
+                    if not (new is not None and old is not None and self.dense_key and _dense(new)
+                            and new[0] <= old[0] and old[1] <= new[1]):
+                        both = pa.concat_tables([pq.read_table(self.path, schema=self.schema),
+                                                 pq.read_table(self.tmp, schema=self.schema)])
+                        self._rewrite(_dedupe_sorted(both, self.spec))   # rare fallback: in-memory merge
+                n = pq.read_metadata(self.tmp).num_rows
+                os.replace(self.tmp, self.path)
+                return n
+        finally:
+            self.tmp.unlink(missing_ok=True)
+
+    def _rewrite(self, table: pa.Table) -> None:
+        pq.write_table(table, self.tmp, compression="zstd", row_group_size=256_000)
+
+
+def _key_range(path: Path, spec: TableSpec) -> tuple[int, int, int] | None:
+    """(min key, max key, rows) from Parquet statistics — no data read; None when statistics are missing."""
+    md = pq.read_metadata(path)
+    if md.num_rows == 0:
+        return None
+    col = md.schema.names.index(spec.key[0])
+    lo = hi = None
+    for i in range(md.num_row_groups):
+        st = md.row_group(i).column(col).statistics
+        if st is None or not st.has_min_max:
+            return None
+        lo = st.min if lo is None else min(lo, st.min)
+        hi = st.max if hi is None else max(hi, st.max)
+    return int(lo), int(hi), md.num_rows
+
+
+def _dense(r: tuple[int, int, int]) -> bool:
+    return r[1] - r[0] + 1 == r[2]
 
 
 def _dedupe_sorted(table: pa.Table, spec: TableSpec) -> pa.Table:
