@@ -85,10 +85,17 @@ def console_python() -> str:
     return str(alt) if exe.name.lower() == "pythonw.exe" and alt.exists() else str(exe)
 
 
-def _say(code: int | None, msg: str) -> int | None:
+def _say(code: int | None, msg: str, *, quiet: bool = False) -> int | None:
+    """Print for the user (ASCII: any console code page) and log (``quiet``: not logged, e.g. every keep-alive)."""
     print(msg)
-    log.info(msg)
+    if not quiet:
+        log.info(msg)
     return code
+
+
+def _running(name: str) -> bool:
+    """A supervisor runs: the lock is held, or an older build (no lock) is found by its command line."""
+    return instance_running(name) or bool(procs.other_supervisors())
 
 
 def _wait(cond: Callable[[], bool], timeout: float, step: float = 0.5) -> bool:
@@ -127,11 +134,17 @@ def detach(run_args: list[str], data: Path, s: Settings, *, auto: bool) -> int:
         st = read_state(data)
         proc, age = state_process(st), heartbeat_age(st)
         if proc is None or age is None or age <= HUNG_S:
-            return _say(0, f"supervisor already running (pid {(st or {}).get('pid', '?')}, heartbeat {_ago(age)})")
-        _say(None, f"supervisor pid {proc.pid} wrote no heartbeat for {age:.0f}s of awake time — replacing it")
+            return _say(0, f"supervisor already running (pid {(st or {}).get('pid', '?')}, heartbeat {_ago(age)})",
+                        quiet=auto)
+        _say(None, f"supervisor pid {proc.pid} wrote no heartbeat for {age:.0f}s of awake time - replacing it")
         procs.kill_tree(proc.pid)
         if not _wait(lambda: not instance_running(name), 30):
-            return _say(1, "the old supervisor still holds the single-instance lock — see logs/supervisor.jsonl")
+            return _say(1, "the old supervisor still holds the single-instance lock - see logs/supervisor.jsonl")
+    else:
+        older = procs.other_supervisors()
+        if older:
+            return _say(1, f"a supervisor without the single-instance lock (older build, pid {older}) is running - "
+                           "stop it first with scripts/stop.bat", quiet=auto)
     if not auto:
         hold.unlink(missing_ok=True)
     out = procs.open_rotating(s.paths.logs() / "supervisor.stderr.log", s.supervisor.child_log_max_bytes,
@@ -147,15 +160,15 @@ def detach(run_args: list[str], data: Path, s: Settings, *, auto: bool) -> int:
     while time.monotonic() < deadline:
         st = read_state(data)
         if st and int(st.get("heartbeat_ms", 0)) >= t0 and not st.get("stopping"):
-            return _say(0, f"supervisor started (pid {st.get('pid')}) — dashboard http://{s.api.host}:{s.api.port}")
+            return _say(0, f"supervisor started (pid {st.get('pid')}) - dashboard http://{s.api.host}:{s.api.port}")
         code = p.poll()
         if code is not None:
             if code == 3:
                 return _say(0, "supervisor already running (another start won the race)")
-            return _say(1, f"supervisor exited at start (code {code}) — see logs/supervisor.stderr.log and "
+            return _say(1, f"supervisor exited at start (code {code}) - see logs/supervisor.stderr.log and "
                            "logs/supervisor.jsonl")
         time.sleep(0.5)
-    return _say(1, f"no supervisor heartbeat after {START_WAIT_S:.0f}s — see logs/supervisor.jsonl")
+    return _say(1, f"no supervisor heartbeat after {START_WAIT_S:.0f}s - see logs/supervisor.jsonl")
 
 
 def stop(data: Path, *, timeout: float = STOP_WAIT_S) -> int:
@@ -170,17 +183,19 @@ def stop(data: Path, *, timeout: float = STOP_WAIT_S) -> int:
     stop_file = Path(data) / "STOP_ALL"
     stop_file.touch()
     name = instance_name("supervisor", data)
-    if not instance_running(name):
+    if not _running(name):
         return _say(0, "supervisor is not running (autostart paused until scripts/start.bat)")
-    _say(None, "stop requested — waiting for the services to shut down ...")
-    if _wait(lambda: not instance_running(name), timeout, 1.0):
+    _say(None, "stop requested - waiting for the services to shut down ...")
+    if _wait(lambda: not _running(name), timeout, 1.0):
         return _say(0, "supervisor stopped (autostart paused until scripts/start.bat)")
     proc = state_process(read_state(data))
-    if proc is None:
-        return _say(1, f"still running after {timeout:.0f}s and its pid is unknown — see logs/supervisor.jsonl")
-    _say(None, f"no clean exit after {timeout:.0f}s — killing supervisor pid {proc.pid} and its services")
-    procs.kill_tree(proc.pid)
-    ok = _wait(lambda: not instance_running(name), 20)
+    pids = [proc.pid] if proc is not None else procs.other_supervisors()
+    if not pids:
+        return _say(1, f"still running after {timeout:.0f}s and its pid is unknown - see logs/supervisor.jsonl")
+    _say(None, f"no clean exit after {timeout:.0f}s - killing supervisor pid {pids} and its services")
+    for pid in pids:
+        procs.kill_tree(pid)
+    ok = _wait(lambda: not _running(name), 20)
     stop_file.unlink(missing_ok=True)
     return _say(0 if ok else 1, "supervisor killed" if ok else "could not stop the supervisor")
 
@@ -201,9 +216,13 @@ def _collectors(app_db: Path) -> list[tuple]:
 def status(data: Path, s: Settings) -> int:
     """Human summary: supervisor, services, MT5 terminal(s), collectors, dashboard URL. Read-only."""
     st, running = read_state(data), instance_running(instance_name("supervisor", data))
+    older = [] if running else procs.other_supervisors()
     age = heartbeat_age(st)
     out: list[str] = []
-    if running and st:
+    if older:
+        out.append(f"supervisor : running WITHOUT the single-instance lock (older build), pid {older} - "
+                   "restart it: scripts/stop.bat then scripts/start.bat")
+    elif running and st:
         hung = "  <-- NO HEARTBEAT (hung?)" if age is not None and age > 60 else ""
         out.append(f"supervisor : running, pid {st.get('pid')}, up {_dur((now_ms() - st['started_ms']) / 1000)}, "
                    f"heartbeat {_ago(age)}{hung}")
@@ -227,4 +246,4 @@ def status(data: Path, s: Settings) -> int:
         out.append(f"  {col:<20} {state:<14} heartbeat {(now_ms() - upd) / 1000:.0f}s ago")
     out.append(f"dashboard  : http://{s.api.host}:{s.api.port}")
     print("\n".join(out))
-    return 0 if running else 1
+    return 0 if running or older else 1

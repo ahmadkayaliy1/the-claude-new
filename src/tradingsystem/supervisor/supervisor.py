@@ -6,7 +6,8 @@
 * Watchdog: a dead child is restarted with exponential backoff; a child whose heartbeat in ``collector_status``
   has not changed for ``stale_s`` of *awake* time (e.g. a hung MT5 call, D-019) is killed and restarted.
   PC sleep and wall-clock steps never count: staleness runs on the unbiased interrupt time, and a detected
-  suspend / clock jump / loop stall resets every baseline (F2/OPS-05). Unreadable heartbeats fail open, loudly.
+  suspend / clock jump / loop stall resets every baseline and grants ``RESUME_GRACE_S`` (F2/OPS-05) before
+  anyone can be judged stale again. Unreadable heartbeats fail open, loudly.
 * The MT5 terminal is started outside the job/tree and is never killed with a child (OPS-04).
 * One supervisor per data dir (named mutex, OPS-03); own heartbeat in ``data/run/supervisor.json`` and the
   ``collector_status`` row "supervisor" (dashboard); idle sleep blocked while running (H2).
@@ -47,6 +48,7 @@ SERVICES = {
     "api": (["api"], [], 0),
 }
 STARTUP_GRACE_S = 180
+RESUME_GRACE_S = 180            # after a suspend / clock jump / stall: network, MT5 and disks need time to recover
 LOOP_S = 5.0
 UNREADABLE_ALERT = 6            # consecutive unreadable heartbeat passes (≈30 s) before an event
 TERMINAL_CHECK_S = 15.0         # how often a missing MT5 terminal is looked for / relaunched
@@ -93,13 +95,14 @@ class Supervisor:
                                   SERVICES[n][1], SERVICES[n][2]) for n in services}
         self.job = JobObject()
         self.stop = False
-        self.clock = sample_clock                   # injectable (tests)
+        self.clock, self.sleep = sample_clock, time.sleep     # injectable (tests)
         self.started_ms = now_ms()
         try:
             self.create_time = psutil.Process().create_time()
         except psutil.Error:
             self.create_time = 0.0
         self.last_gap: dict | None = None
+        self.grace_until = 0.0                      # awake clock: no stale kills before this (after a gap)
         self.term_for = self._terminal_paths() if self.cfg.manage_mt5_terminal else {}
         self.term_info: dict[str, dict] = {}
         self._term_launch: dict[str, tuple[float, str]] = {}
@@ -128,8 +131,9 @@ class Supervisor:
             except Exception:  # noqa: BLE001
                 log.exception("MT5 terminal check failed")
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-        env = {**os.environ, "TS_SUPERVISED": "1", "TS_LOG_CONSOLE": "0", "PYTHONFAULTHANDLER": "1",
-               "PYTHONUNBUFFERED": "1"}
+        # children log to logs/<name>.jsonl only; raw stdout/stderr (tracebacks before logging is set up, native
+        # faults via PYTHONFAULTHANDLER) go to logs/<name>.stderr.log instead of the void (F8/OPS-06)
+        env = {**os.environ, "TS_LOG_CONSOLE": "0", "PYTHONFAULTHANDLER": "1", "PYTHONUNBUFFERED": "1"}
         c.log_path = self.s.paths.logs() / f"{c.name}.stderr.log"
         fh = procs.open_rotating(c.log_path, self.cfg.child_log_max_bytes, self.cfg.child_log_backups)
         try:
@@ -237,7 +241,7 @@ class Supervisor:
         for b in c.beats:
             if c.seen.get(b) != beats[b]:
                 c.seen[b], c.changed[b] = beats[b], now
-        if now - c.started <= STARTUP_GRACE_S:
+        if now - c.started <= STARTUP_GRACE_S or now < self.grace_until:
             return
         age = max(now - c.changed.get(b, c.started) for b in c.beats)
         if age > c.stale_s:
@@ -256,12 +260,14 @@ class Supervisor:
 
     def on_gap(self, kind: str, seconds: float) -> None:
         """PC slept / wall clock stepped / our own loop stalled: nobody's heartbeat could have moved — restart the
-        staleness clocks so a healthy child is never killed for it; a child hung before still dies ``stale_s`` later."""
+        staleness clocks and hold stale kills for ``RESUME_GRACE_S`` so a healthy child is never killed for it
+        (network and MT5 reconnect after a resume); a child still hung when the grace ends is killed then."""
         now = self.clock().awake
         text = {"suspend": f"PC was asleep for ~{seconds:.0f}s", "clock_jump": f"wall clock stepped {seconds:+.0f}s",
                 "stall": f"supervisor loop took {seconds:.0f}s (machine starved?)"}.get(kind, f"{kind} {seconds:.0f}s")
-        log.warning("%s — heartbeat baselines reset", text)
+        log.warning("%s — heartbeat baselines reset, no stale kills for %ds", text, RESUME_GRACE_S)
         self.last_gap = {"ts": now_ms(), "kind": kind, "seconds": round(seconds, 1)}
+        self.grace_until = now + RESUME_GRACE_S
         self._event("all", {"suspend": "system_suspend"}.get(kind, kind), text, int(abs(seconds) * 1000))
         for c in self.children.values():
             c.changed = {b: now for b in c.beats}
@@ -405,7 +411,7 @@ class Supervisor:
                     stop_file.unlink(missing_ok=True)
                     break
                 before = self.clock()           # measure the sleep only: kill()/DB waits in watch() never count
-                time.sleep(LOOP_S)
+                self.sleep(LOOP_S)
                 gap = time_gap(before, self.clock(), LOOP_S)
                 if gap:
                     self.on_gap(*gap)
@@ -445,11 +451,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.stop:
             return control.stop(data)
         run_args = [args.target] + (["--without", args.without] if args.without else []) + \
-                   (["--data-dir", args.data_dir] if args.data_dir else [])
+                   (["--data-dir", str(data.resolve())] if args.data_dir else [])     # it runs in PROJECT_ROOT
         return control.detach(run_args, data, s, auto=args.auto)
     setup_from_settings("supervisor", s)
     if not acquire_instance(instance_name("supervisor", data), wait_s=10):
         log.error("another supervisor is already running for %s — not starting (scripts/status.bat)", data)
+        return 3
+    older = procs.other_supervisors(older_s=1.0)     # an older build holds no lock: never run next to it (OPS-03)
+    if older:
+        log.error("another supervisor (pid %s, older build without the lock) is running — not starting; "
+                  "stop it first (scripts/stop.bat)", older)
         return 3
     log.info("supervisor starting: %s", ", ".join(names))
     Supervisor(names, args.data_dir).run()

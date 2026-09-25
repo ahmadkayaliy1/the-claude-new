@@ -82,14 +82,60 @@ def task_exists(task: str) -> bool:
 
 
 def launch_terminal(path: str, task: str | None = None) -> str:
-    """Start the terminal outside our job/tree: via its scheduled task if registered, else detached. Returns how."""
+    """Start the terminal outside our job *and* process tree. Returns how.
+
+    Its scheduled task if registered (Task Scheduler is the parent), else a short-lived ``cmd /c start``: cmd exits
+    at once, so the terminal is an orphan no tree kill of ours can reach.
+    """
     if task and task_exists(task):
         r = subprocess.run(["schtasks", "/Run", "/TN", task], capture_output=True, timeout=30,
                            creationflags=CREATE_NO_WINDOW)
         if r.returncode == 0:
             return f"task {task}"
+    if WIN:
+        p = spawn_outside(["cmd.exe", "/d", "/c", "start", "", path], cwd=Path(path).parent, console=True)
+        return f"cmd start (pid {p.pid})"
     p = spawn_outside([path], cwd=Path(path).parent, console=False)
     return f"detached pid {p.pid}"
+
+
+_CTL_FLAGS = frozenset({"--detach", "--stop", "--status", "-h", "--help"})
+
+
+def is_supervisor_cmd(cmd: list[str]) -> bool:
+    """``... -m tradingsystem run ...`` without a control flag (``--detach/--stop/--status`` only talk to one)."""
+    try:
+        i = cmd.index("tradingsystem")
+    except ValueError:
+        return False
+    return i > 0 and cmd[i - 1] == "-m" and cmd[i + 1:i + 2] == ["run"] and not _CTL_FLAGS & set(cmd[i + 2:])
+
+
+def other_supervisors(older_s: float | None = None) -> list[int]:
+    """PIDs of other running supervisors of any build (older ones hold no single-instance lock), never ours.
+
+    ``older_s``: only those started at least that long before this process (two new starts racing for the lock
+    must not both give up).
+    """
+    try:
+        me = psutil.Process()
+        mine = {me.pid, *(p.pid for p in me.parents()), *(c.pid for c in me.children(recursive=True))}
+        born = me.create_time()
+    except psutil.Error:
+        mine, born = {os.getpid()}, None
+    out = []
+    for p in psutil.process_iter(["name"]):
+        if p.pid in mine or not (p.info.get("name") or "").lower().startswith("python"):
+            continue
+        try:
+            if not is_supervisor_cmd(p.cmdline()):
+                continue
+            if older_s is not None and born is not None and p.create_time() > born - older_s:
+                continue
+        except (psutil.Error, OSError):
+            continue
+        out.append(p.pid)
+    return sorted(out)
 
 
 def open_rotating(path: Path, max_bytes: int, backups: int) -> IO[bytes]:
