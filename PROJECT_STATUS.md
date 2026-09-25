@@ -5,9 +5,9 @@
 > Spec: `AI_Trading_System_Spec_EN.md`. Approved plan (Arabic): see Decision Log D-001.
 
 ## Overview
-- **Started:** 2026-09-25. **Approx. completion:** 26%.
-- **Current milestone:** M3 (Binance ingestion) — implementation done; production run + 24 h soak (P3.9) next; M4 (MT5 ingestion) next
-- **Summary:** M0, M2 complete; M1 complete except P1.6 (running) and P1.11 (after backfill); M3 implemented and tested in a scratch dir (live WS + gap-fill + Vision backfill + bridging; integrity 0 gaps / 0 duplicates). Recorder P1.12 running. 46 unit tests.
+- **Started:** 2026-09-25. **Approx. completion:** 38%.
+- **Current milestone:** M6 (quant analysis) — order flow/footprint/profiles/context/snapshot next
+- **Summary:** M0–M4 complete: Binance live + backfill and MT5 live + backfill running in production since 2026-09-25 (10:00 / 10:33 UTC); integrity verified (0 gaps, 0 duplicates; MT5 ticks identical to re-fetch). M8 contract, providers, cost governor, prompts done (live AI call waits for H4). M6 indicators + structure/SMC done with causality tests. 101 unit tests. Recorder P1.12 running.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
@@ -178,13 +178,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P1.6: MT5 history depth 👤
-- Status: ⏳ Not Started
-- Description: after H1 (Max bars = Unlimited), find earliest bars per TF and earliest ticks per symbol by chunked requests; time downloads; terminal RSS.
+- Status: ✅ Completed
+- Description: after H1 (Max bars = Unlimited), earliest bars per TF and earliest ticks per symbol.
 - Affected files: `research/probes/probe_mt5_history.py`, `docs/exploration/mt5_history.md`
-- What was done: —
-- Why this way: spec §2.1-a — document the actual broker limit.
-- Notes/open issues: depends on H1.
-- The exact next step: ask user for H1, then run probe.
+- What was done: M1 history from 2019-02-24 (XAUUSD@), 2015-11-15 (BTCUSD@), 2019-06-27 (ETHUSD@); **XAUUSD@ ticks only from 2024-08-17** (≈200–360 k ticks/day, ≈145 M ticks ≈ 1.3 GB Parquet). BTC/ETH tick depth left to the backfill (config keeps 90 days).
+- Why this way: spec §2.1-a — document the broker's real limit.
+- Notes/open issues: deep history requests stall the terminal for other clients for minutes → backfill is chunked (month of bars / day of ticks per call) and probes must not run concurrently with it. The binary-search probe was stopped after the key results (retry sleeps made it slow).
+- The exact next step: —
 
 ### Phase P1.7: MT5 server-time model
 - Status: ✅ Completed
@@ -409,49 +409,49 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 ### M4 — MT5 ingestion
 
 ### Phase P4.1: Terminal manager
-- Status: ⏳ Not Started
-- Description: pinned path, owner-only login, account assertion, watchdog on hung calls.
+- Status: ✅ Completed
+- Description: pinned path, credentials only when configured, account assertion, symbol selection.
 - Affected files: `src/tradingsystem/ingest/mt5/terminal.py`
-- What was done: —
-- Why this way: multi-client safety (plan item 7).
-- Notes/open issues: —
-- The exact next step: after P1.9.
+- What was done: `MT5Terminal.connect()` (initialize with pinned path; asserts server and demo/real trade mode against the profile → `AccountMismatch`), `select_symbols`, `ensure`, `account()` snapshot.
+- Why this way: D-019/D-023 — never ingest from or trade on an unexpected account.
+- Notes/open issues: hung MT5 calls cannot be pre-empted in-process (GIL) → the supervisor (P5.1) restarts a process whose heartbeat (`collector_status.updated_ms`, every 2 s) goes stale.
+- The exact next step: —
 
 ### Phase P4.2: Server-time ↔ UTC converter
-- Status: ⏳ Not Started
-- Description: from P1.7 model, incl. ambiguous hours; tests at DST transitions.
-- Affected files: `src/tradingsystem/ingest/mt5/servertime.py`
-- What was done: —
-- Why this way: —
+- Status: ✅ Completed
+- Description: measured piecewise model incl. ambiguous hours; tests at DST transitions.
+- Affected files: `src/tradingsystem/ingest/mt5/servertime.py`, `tests/unit/test_servertime.py`
+- What was done: implemented during P1.7 (D-014); 11 tests.
+- Why this way: D-014.
 - Notes/open issues: —
-- The exact next step: after P1.7.
+- The exact next step: —
 
 ### Phase P4.3: MT5 backfill (rates + ticks)
-- Status: ⏳ Not Started
-- Description: rates per TF; ticks day-chunked with synthetic key; verify M1-from-ticks == copy_rates M1.
-- Affected files: `src/tradingsystem/ingest/mt5/backfill.py`
-- What was done: —
-- Why this way: —
-- Notes/open issues: —
-- The exact next step: after P4.2 + M2.
+- Status: ✅ Completed
+- Description: rates per TF gap-driven on the server-time grid; ticks per UTC day newest-first → cold.
+- Affected files: `src/tradingsystem/ingest/mt5/{backfill,convert}.py`, `tests/unit/test_mt5_convert.py`
+- What was done: `MT5Backfill` worker (own process, daily re-run 04:00 UTC): earliest-bar discovery, `mt5_candle_gaps` (server grid, session-aware), month chunks via `copy_rates_range(epoch seconds)`, validation, source gaps → `known_gaps`; ticks day by day → cold Parquet, progress in `vision_done`, stops after 10 trading days without ticks. Tick keys `utc_ms*1000+seq` identical to the live path (tested on real XAU ticks, incl. a poll cut mid-millisecond).
+- Why this way: spec §2.1-a; D-019 (heavy calls isolated from the live poller).
+- Notes/open issues: production backfill started 2026-09-25 10:33 UTC (≈7 y of M1 bars × 3 symbols, ≈2 y of XAU ticks).
+- The exact next step: —
 
 ### Phase P4.4: MT5 live poller
-- Status: ⏳ Not Started
-- Description: poll at P1.8 interval; bar-close detection; receive time; 2 h re-fetch equality.
-- Affected files: `src/tradingsystem/ingest/mt5/{poller,service}.py`
-- What was done: —
-- Why this way: spec §2.1-b.
-- Notes/open issues: —
-- The exact next step: after P4.3.
+- Status: ✅ Completed
+- Description: 50 ms tick polling with cursor de-dup; closed bars each second; forming bar; flush 0.5 s; heartbeat 2 s.
+- Affected files: `src/tradingsystem/ingest/mt5/service.py`, `tools/verify_mt5_ticks.py`
+- What was done: `MT5LiveService` (pre-live cursor resume from hot/cold, short gap-fill of rates, reconnect with backoff and `resumed` events with outage duration, market-closed status). Test: run 75 s → stop 30 s → run 60 s → **stored ticks identical to a fresh `copy_ticks_range` re-fetch for all 3 symbols (0 missing, 0 extra, 0 dup)**; candles 0 gaps on the server grid (integrity checker made MT5-aware).
+- Why this way: spec §2.1-b / §2.2.
+- Notes/open issues: production live capture started 2026-09-25 10:33 UTC.
+- The exact next step: —
 
 ### Phase P4.5: Session-aware states
-- Status: ⏳ Not Started
+- Status: ✅ Completed
 - Description: market-closed vs error; no false gaps on weekends/daily break.
-- Affected files: `src/tradingsystem/core/sessions.py`
-- What was done: —
-- Why this way: —
-- Notes/open issues: —
-- The exact next step: after P4.4.
+- Affected files: `src/tradingsystem/core/sessions.py`, `ingest/mt5/service.py`, `ingest/mt5/convert.py`
+- What was done: status `market_closed` when every MT5 symbol's calendar is closed; gap detection skips closed-session bars (NY-time calendar for gold, Saturday maintenance for Windsor crypto).
+- Why this way: spec §9 — no silent gaps, but no false alarms either.
+- Notes/open issues: holidays surface as source-confirmed known gaps.
+- The exact next step: —
 
 ### Phase P4.6: MT5 24 h soak 👤
 - Status: ⏳ Not Started
@@ -501,39 +501,49 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: after M3/M4.
 
 ### Phase P6.2: Indicators
-- Status: ⏳ Not Started
-- Description: EMA/SMA, RSI, MACD, ATR, Bollinger, ADX, realized vol (numpy); match `ta` on real data.
-- Affected files: `src/tradingsystem/analysis/indicators/*`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P6.1.
+- Status: ✅ Completed
+- Description: EMA/SMA, RSI, MACD, ATR, Bollinger, ADX, VWAP (anchored/session), realized vol, percentile rank.
+- Affected files: `src/tradingsystem/analysis/indicators.py`, `tests/unit/test_indicators.py`
+- What was done: numpy implementations; **match the `ta` library** on real BTCUSDT 1m candles (RSI/ATR 1e-6, MACD/ADX ≤1e-3) and pass truncate-at-t causality tests.
+- Why this way: speed on a 4 GB i3 + verifiable correctness.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P6.3: Pivots and structure labels
-- Status: ⏳ Not Started
-- Description: pivots with confirmation lag; HH/HL/LH/LL; causality test.
-- Affected files: `src/tradingsystem/analysis/structure/pivots.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P6.1.
+- Status: ✅ Completed
+- Description: pivots with confirmation lag; structure state.
+- Affected files: `src/tradingsystem/analysis/structure.py`, `tests/unit/test_structure.py`
+- What was done: fractal pivots (L/R bars, known at i+R); forward-walking state machine.
+- Why this way: no look-ahead by construction.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P6.4: BOS/CHoCH, EQH/EQL, premium/discount, sweeps
-- Status: ⏳ Not Started
+- Status: ✅ Completed
 - Description: SMC structure + liquidity; causality test.
-- Affected files: `src/tradingsystem/analysis/structure/{bos_choch,liquidity,premium_discount}.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P6.3.
+- Affected files: `src/tradingsystem/analysis/structure.py`, `tests/unit/test_structure.py`
+- What was done: close-based BOS/CHoCH, wick-only sweeps, equal-high/low liquidity pools (tol 0.1 ATR) with sweep tracking, premium/discount with OTE on a dealing range extended to the running extreme. Causality: events/pivots/zones computed on data truncated at t equal the full-run results known by t (4 cut points on real data).
+- Why this way: spec §3.1 SMC / liquidity sweeps.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P6.5: FVG and order blocks
-- Status: ⏳ Not Started
+- Status: ✅ Completed
 - Description: FVG + OB with mitigation state; causality test.
-- Affected files: `src/tradingsystem/analysis/structure/{fvg,order_blocks}.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P6.4.
+- Affected files: `src/tradingsystem/analysis/zones.py`
+- What was done: 3-candle FVGs (min 0.1 ATR), order blocks = last opposite candle of the breaking leg with displacement strength, mitigation (touch, fill %, invalidation/breaker) as of any bar; nearest-active helper. Mitigation-as-of-t equality tested.
+- Why this way: spec §3.1 SMC / order blocks.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P6.6: Price action patterns
-- Status: ⏳ Not Started
-- Description: candle patterns, ranges, breakouts.
-- Affected files: `src/tradingsystem/analysis/structure/price_action.py`
-- What was done: — · Why this way: — · Notes/open issues: —
-- The exact next step: after P6.3.
+- Status: ✅ Completed
+- Description: candle patterns, ranges.
+- Affected files: `src/tradingsystem/analysis/price_action.py`
+- What was done: doji, pin bars, engulfing, inside/outside bar, marubozu on closed bars; range/compression state in ATR units.
+- Why this way: spec §3.1 price action.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P6.7: Bar delta / CVD
 - Status: ⏳ Not Started
@@ -631,32 +641,40 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 ### M8 — AI layer
 
 ### Phase P8.1: Output contract v1
-- Status: ⏳ Not Started
-- Description: pydantic model + JSON schema (normalized order types, entry range, TP list with close fractions, SL, valid_until, price_reference, structured management & next_review, data_quality_notes, contract_version) + semantic validators.
-- Affected files: `src/tradingsystem/ai/contract.py`, tests
-- What was done: — · Why this way: spec §5. · Notes/open issues: —
-- The exact next step: can start right after M0.
+- Status: ✅ Completed
+- Description: pydantic contract + JSON schema + semantic validators.
+- Affected files: `src/tradingsystem/ai/contract.py`, `tests/unit/test_contract.py`
+- What was done: `Recommendation` (normalised order types, entry price/range, ≤4 TPs with close fractions, SL, valid_until, price_reference, structured management + next_review, data_quality_notes, contract_version) with semantic rules (BUY/SELL need matching order type, entry, SL on the correct side, TPs in direction and ordered, risk fields; NO_TRADE carries no levels; aware UTC timestamps); `rr_computed()` from worst fill; `TimeframeAssessment`, `RecommendationSet`, `AssessmentSet`, `RiskReview` (reject ⇒ NO_TRADE). 15 tests.
+- Why this way: spec §0/§5 — invalid trades can never pass the contract.
+- Notes/open issues: —
+- The exact next step: —
 
 ### Phase P8.2: Provider adapters
-- Status: ⏳ Not Started
-- Description: Gemini first; then Anthropic, OpenAI, OpenAI-compatible (Grok, Groq, OpenRouter, DeepSeek, Ollama). Native structured output where supported.
-- Affected files: `src/tradingsystem/ai/providers/*`
-- What was done: — · Why this way: spec §4.1, D-003. · Notes/open issues: H4.
-- The exact next step: after P8.1.
+- Status: 🔄 In Progress
+- Description: Gemini first; Anthropic, OpenAI, OpenAI-compatible (Grok, Groq, OpenRouter, DeepSeek, Ollama).
+- Affected files: `src/tradingsystem/ai/providers/{base,gemini,anthropic_claude,openai_chat,__init__}.py`, `config/config.yaml`
+- What was done: common `LLMProvider` (latency, JSON extraction, per-model pricing, `priced`), provider-specific transport schemas (unsupported keywords stripped; full contract validated client-side). Gemini via google-genai (`response_json_schema`); Anthropic via the official SDK (`output_config.format` json_schema + effort, cached system prompt, server-side refusal fallbacks `fallbacks="default"`, default model `claude-opus-5`, prices opus-5 5/25, sonnet-5 2/10, haiku-4-5 1/5 USD/MTok); OpenAI chat completions with `structured_output` native/json_object/prompt per endpoint. SDK parameter names verified by introspection of the installed packages.
+- Why this way: spec §4.1 — switch provider with one line (`ACTIVE_AI_PROVIDER`).
+- Notes/open issues: no live call made yet — needs H4 (`GOOGLE_API_KEY`). OpenAI/Grok/DeepSeek prices not configured → blocked by the Cost Governor until set.
+- The exact next step: when the user adds `GOOGLE_API_KEY` (and RPM/RPD) run a live contract-valid generation on a real snapshot (after P6.13).
 
 ### Phase P8.3: Repair/retry, rate limits, cost accounting, Cost Governor
-- Status: ⏳ Not Started
-- Description: timeouts, RPM/RPD limiter, token/cost accounting, budget caps, cost-to-profit ratio, degradation ladder.
-- Affected files: `src/tradingsystem/ai/{repair,budget}.py`
-- What was done: — · Why this way: D-004. · Notes/open issues: —
-- The exact next step: after P8.2.
+- Status: ✅ Completed
+- Description: timeouts, RPM/RPD limiter, token/cost accounting, caps, cost-to-profit ratio, degradation ladder.
+- Affected files: `src/tradingsystem/ai/{budget,repair}.py`, `tests/unit/test_ai_budget_repair.py`
+- What was done: `UsageStore` (`app.db:ai_usage`), `RateLimiter` (RPM spacing + persisted RPD), `CostGovernor` (unknown price → blocked; daily/monthly caps; ROI ladder 0→1→2→3), `generate_validated` (repair loop feeding exact validator errors back, bounded retries, refusal/budget handling). 8 control-flow tests with a scripted provider double.
+- Why this way: D-004.
+- Notes/open issues: `profit_fn` gets wired to paper/demo outcomes in M9.
+- The exact next step: —
 
 ### Phase P8.4: Prompt library
-- Status: ⏳ Not Started
-- Description: versioned prompts per mode + coordinators; mandatory risk, no-fabrication and data-quality clauses; prompt lint.
-- Affected files: `src/tradingsystem/ai/prompts/*`
-- What was done: — · Why this way: spec §4.2–§4.4. · Notes/open issues: —
-- The exact next step: after P8.1.
+- Status: ✅ Completed
+- Description: versioned prompts per role with mandatory clauses; lint.
+- Affected files: `src/tradingsystem/ai/prompts/**`, `tests/unit/test_prompts.py`
+- What was done: shared persona (top-down professional trader) + 12 non-negotiable rules (evidence only, data-quality flags, structural SL ≥ k·ATR, targets from real liquidity, RR ≥ min from worst fill, NO_TRADE as a decision, execution realism incl. bid/ask side, order-type discipline, account constraints, calibrated confidence, consistency with recent decisions, re-analysis conditions); roles: agent_per_pair, single_agent_global, timeframe_analyst, coordinator (conflict-resolution rules), risk_reviewer. `string.Template` rendering, stable system prompts (cacheable), `prompt_hash`, `library_hash`. 11 lint tests.
+- Why this way: spec §4.2–§4.4.
+- Notes/open issues: prompts will be tuned after the first real outputs (P8.8/P11.2).
+- The exact next step: —
 
 ### Phase P8.5: Orchestrator and modes
 - Status: ⏳ Not Started

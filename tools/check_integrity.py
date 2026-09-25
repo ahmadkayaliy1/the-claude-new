@@ -14,6 +14,8 @@ from tradingsystem.core.instruments import InstrumentRegistry
 from tradingsystem.core.sessions import calendar_for
 from tradingsystem.core.settings import load_settings
 from tradingsystem.core.timeutil import iso, now_ms
+from tradingsystem.ingest.mt5.convert import mt5_candle_gaps
+from tradingsystem.ingest.mt5.servertime import ServerTimeModel
 from tradingsystem.storage.gaps import candle_gaps, id_gaps
 from tradingsystem.storage.reader import InstrumentReader
 from tradingsystem.storage.tablespec import table_specs
@@ -41,7 +43,12 @@ def main() -> int:
             k = cols[spec.key[0]].astype(np.int64)
             dup = n - len(np.unique(k)) if len(spec.key) == 1 else 0
             msg = f"   {spec.name:<28} rows={n:>9,} first={iso(int(k.min()) if spec.datatype == 'candles' else None) or ''}"
-            if spec.datatype == "candles" and spec.timeframe is not None:
+            if spec.datatype == "candles" and spec.timeframe is not None and inst.venue == "mt5":
+                srv = rd.read_range(spec, start, None, columns=["srv_time"])["srv_time"].astype(np.int64)
+                gaps = mt5_candle_gaps(srv, spec.timeframe, int(srv.min()), int(srv.max()), cal, ServerTimeModel())
+                msg += f" gaps={len(gaps)}" + (f" (first srv {iso(gaps[0].start)} ×{gaps[0].count})" if gaps else "")
+                bad += len(gaps)
+            elif spec.datatype == "candles" and spec.timeframe is not None:
                 last_closed = spec.timeframe.floor(now_ms()) - spec.timeframe.ms
                 gaps = candle_gaps(k, spec.timeframe, int(k.min()), min(int(k.max()), last_closed), cal)
                 msg += f" gaps={len(gaps)}" + (f" (first {iso(gaps[0].start)} ×{gaps[0].count})" if gaps else "")
