@@ -74,6 +74,7 @@ pairs:
     asset_class: crypto
     decision_timeframe: 15m
     pip_size: 1.0                    # reporting convention only
+    footprint_bucket: 10.0
     instruments:
       - venue: binance_spot
         symbol: BTCUSDT
@@ -83,18 +84,20 @@ pairs:
       - venue: binance_usdm
         symbol: BTCUSDT
         roles: [flow_context]
-        datatypes: [candles, agg_trades, book_ticker, mark_price, funding, open_interest, metrics, liquidations]
+        datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics, liquidations]
         start: {candles: "2019-09-08", agg_trades: "-90d", funding: "2019-09-10", metrics: "-365d"}
       - venue: mt5
         symbol_by_profile: {demo: "BTCUSD@", live: "BTCUSD@"}   # validated against the server at startup
         roles: [execution, quote_reference]
         datatypes: [candles, ticks]
+        contract: {contract_size: 1, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01}   # P1.5
         start: {candles: earliest, ticks: "-90d"}
 
   ETHUSDT:
     asset_class: crypto
     decision_timeframe: 15m
     pip_size: 0.1
+    footprint_bucket: 0.5
     instruments:
       - venue: binance_spot
         symbol: ETHUSDT
@@ -104,28 +107,32 @@ pairs:
       - venue: binance_usdm
         symbol: ETHUSDT
         roles: [flow_context]
-        datatypes: [candles, agg_trades, book_ticker, mark_price, funding, open_interest, metrics, liquidations]
+        datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics, liquidations]
         start: {candles: "2019-11-27", agg_trades: "-90d", funding: "2019-11-27", metrics: "-365d"}
       - venue: mt5
         symbol_by_profile: {demo: "ETHUSD@", live: "ETHUSD@"}
         roles: [execution, quote_reference]
         datatypes: [candles, ticks]
+        contract: {contract_size: 10, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01}  # P1.5
         start: {candles: earliest, ticks: "-90d"}
 
   XAUUSD:
     asset_class: metal
     decision_timeframe: 15m
     pip_size: 0.1
+    footprint_bucket: 0.5
+    flow_proxy_approved: false       # XAUUSDT perp order flow as proxy — only after the P1.11 study approves it
     instruments:
       - venue: mt5
         symbol_by_profile: {demo: "XAUUSD@", live: "XAUUSD@"}
         roles: [analysis_primary, execution]
         datatypes: [candles, ticks]
+        contract: {contract_size: 100, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01}  # P1.5
         start: {candles: earliest, ticks: earliest}
       - venue: binance_usdm            # real trade flow proxy for gold — used only if P1.11 approves
         symbol: XAUUSDT
         roles: [flow_context]
-        datatypes: [candles, agg_trades, book_ticker, mark_price, funding, open_interest, metrics]
+        datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics]
         start: {candles: "2025-12-11", agg_trades: "2025-12-11", funding: "2025-12-11", metrics: "2025-12-11"}
 
 risk:                                  # proposed defaults — user to confirm (H8)
@@ -145,6 +152,7 @@ risk:                                  # proposed defaults — user to confirm (
   allow_high_risk_display: true
 
 execution:
+  paper_equity: 100                    # paper account start (user's intended live capital, D-021)
   mode: paper                          # paper | demo | live  (D-012)
   trigger: manual                      # manual (dashboard button) | auto
   venue_by_pair: {BTCUSDT: mt5, ETHUSDT: mt5, XAUUSD: mt5}   # D-002, revisited in P7.2

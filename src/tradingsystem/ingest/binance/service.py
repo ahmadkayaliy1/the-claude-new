@@ -46,6 +46,7 @@ class InstrumentSink:
         self.forming: dict[str, tuple] = {}
         self.first_live_agg_id: int | None = None     # first live id after (re)connect
         self.last_seen_agg_id: int | None = None      # newest id received live
+        self.agg_before_outage: int | None = None     # last live id when the connection dropped
         self.agg_mark: tuple[int, int] | None = None  # (last stored id, its time) before live started
         self.last_px: tuple[str, str] | None = None
         self.quote: tuple[int, float, float] | None = None
@@ -192,6 +193,8 @@ class BinanceLiveService:
                 for sink in self.sinks.values():
                     if sink.inst.venue == venue:
                         sink.first_live_agg_id = None      # next live id marks the end of the hole
+                        if sink.agg_before_outage is None:  # keep the id seen before the FIRST drop
+                            sink.agg_before_outage = sink.last_seen_agg_id
             elif event == "connect":
                 if outage_ms is None:
                     if venue in self._initial_done:
@@ -269,7 +272,8 @@ class BinanceLiveService:
         if since_ms is None:
             mark = sink.agg_mark
         else:
-            mark = (sink.last_seen_agg_id, since_ms) if sink.last_seen_agg_id is not None else None
+            before, sink.agg_before_outage = sink.agg_before_outage, None
+            mark = (before, since_ms) if before is not None else None
         if mark is None:
             return  # no history yet → the backfill worker bridges history → live
         last_id, last_ts = mark
@@ -282,6 +286,49 @@ class BinanceLiveService:
             return
         async for rows in fetch.agg_trades_from_id(rest, m, sink.inst.symbol, last_id + 1, until):
             sink.add_many(spec, rows)
+
+    # ------------------------------------------------------------------ self-healing audit
+    async def _audit_loop(self) -> None:
+        """Every 5 min: find id holes in recent aggTrades and missing recent candles, re-fetch them from REST.
+
+        Catches anything a reconnect gap-fill missed (network flaps, killed process) — spec §9 no silent gaps.
+        """
+        from ...storage.gaps import candle_gaps, id_gaps
+        await asyncio.sleep(120)
+        while not self.stop.is_set():
+            for sink in self.sinks.values():
+                inst, rest, m = sink.inst, self.rest[sink.inst.venue], MARKETS[sink.inst.venue]
+                now = rest.binance_now()
+                try:
+                    if sink.wants("agg_trades"):
+                        spec = sink.spec("agg_trades")
+                        c = await asyncio.to_thread(sink.hot.read_range, spec, now - 2 * 3_600_000, None, ["agg_id"])
+                        for g in id_gaps(c["agg_id"])[:10]:
+                            if g.count > 200_000:
+                                continue
+                            n = 0
+                            async for rows in fetch.agg_trades_from_id(rest, m, inst.symbol, g.start, g.end + 1):
+                                sink.add_many(spec, rows)
+                                n += len(rows)
+                            self.appdb.add_event(inst.venue, "audit_fill", f"{spec.name}: {n} ids {g.start}..{g.end}")
+                    if sink.wants("candles"):
+                        for tf in inst.timeframes:
+                            if tf.ms > 3_600_000:
+                                continue
+                            spec = sink.spec("candles", tf)
+                            lo = tf.floor(now - 2 * 3_600_000)
+                            hi = tf.floor(now) - tf.ms                      # last closed bar open
+                            c = await asyncio.to_thread(sink.hot.read_range, spec, lo, None, ["open_time"])
+                            for g in candle_gaps(c["open_time"], tf, lo, hi):
+                                async for rows in fetch.klines(rest, m, inst.symbol, tf, g.start, g.end + tf.ms):
+                                    sink.add_many(spec, rows)
+                                self.appdb.add_event(inst.venue, "audit_fill", f"{spec.name}: {g.count} bars from {iso(g.start)}")
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("audit failed for %s: %r", inst.key, exc)
+            try:
+                await asyncio.wait_for(self.stop.wait(), timeout=300)
+            except asyncio.TimeoutError:
+                pass
 
     # ------------------------------------------------------------------ periodic jobs
     async def _flush_loop(self) -> None:
@@ -387,7 +434,7 @@ class BinanceLiveService:
         self._build_connections()
         tasks = [asyncio.create_task(c.run(self.stop), name=c.name) for c in self.conns]
         tasks += [asyncio.create_task(f(), name=f.__name__) for f in
-                  (self._flush_loop, self._poll_loop, self._rollover_loop, self._status_loop)]
+                  (self._flush_loop, self._poll_loop, self._rollover_loop, self._status_loop, self._audit_loop)]
         log.info("binance live service started: %d instruments, %d connections",
                  len(self.sinks), len(self.conns))
         try:

@@ -27,6 +27,7 @@ class Instrument:
     datatypes: tuple[str, ...]
     timeframes: tuple[Timeframe, ...]
     start_specs: dict[str, str] = field(default_factory=dict, hash=False, compare=False)
+    contract: dict | None = field(default=None, hash=False, compare=False)
 
     @property
     def key(self) -> str:
@@ -83,6 +84,7 @@ class InstrumentRegistry:
                         datatypes=tuple(icfg.datatypes),
                         timeframes=tuple(icfg.timeframes or pair_tfs),
                         start_specs=dict(icfg.start),
+                        contract=icfg.contract.model_dump() if icfg.contract else None,
                     )
                 )
         return cls(out)

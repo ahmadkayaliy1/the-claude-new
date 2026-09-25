@@ -41,7 +41,7 @@ class StreamConnection:
         first = True
         while not stop.is_set():
             try:
-                async with websockets.connect(self.url, open_timeout=20, ping_interval=20, ping_timeout=20,
+                async with websockets.connect(self.url, open_timeout=20, ping_interval=60, ping_timeout=90,
                                               max_size=2**22, close_timeout=5) as ws:
                     self.connected = True
                     outage = None if first else (now_ms() - down_since if down_since else None)

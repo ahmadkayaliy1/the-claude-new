@@ -136,6 +136,14 @@ class BinanceCfg(_Model):
 
 
 # --------------------------------------------------------------------------- pairs/instruments
+class ContractCfg(_Model):
+    """Execution contract facts (measured from MT5 symbol_info, P1.5; re-validated by the executor at runtime)."""
+    contract_size: float
+    volume_min: float
+    volume_step: float
+    tick_size: float
+
+
 class InstrumentCfg(_Model):
     venue: Venue
     symbol: str | None = None
@@ -144,6 +152,7 @@ class InstrumentCfg(_Model):
     datatypes: list[DataType]
     timeframes: list[Timeframe] | None = None
     start: dict[str, str] = Field(default_factory=dict)
+    contract: ContractCfg | None = None
 
     @model_validator(mode="after")
     def _check_symbol(self) -> "InstrumentCfg":
@@ -163,6 +172,9 @@ class PairCfg(_Model):
     decision_timeframe: Timeframe = Timeframe.M15
     timeframes: list[Timeframe] | None = None
     pip_size: float
+    price_decimals: int = 2
+    footprint_bucket: float = 1.0          # price bucket for footprint / volume profile
+    flow_proxy_approved: bool = False      # use a flow_context instrument's order flow as proxy (P1.11)
     instruments: list[InstrumentCfg]
 
     @model_validator(mode="after")
@@ -202,6 +214,7 @@ class RiskCfg(_Model):
 
 
 class ExecutionCfg(_Model):
+    paper_equity: float = 100.0            # starting equity of the paper account (user's intended capital, D-021)
     mode: ExecutionMode = "paper"
     trigger: ExecutionTrigger = "manual"
     venue_by_pair: dict[str, Venue] = Field(default_factory=dict)

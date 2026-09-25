@@ -36,6 +36,9 @@ log = logging.getLogger("backfill-mt5")
 COLLECTOR = "mt5_backfill"
 DAILY_RUN_UTC_HOUR = 4
 MONTH_MS = 31 * MS_PER_DAY
+HOUR_MS = 3_600_000
+LIVE_COLLECTOR = "mt5"
+LIVE_STALE_MS = 5_000        # live heartbeat older than this → the terminal is busy: back off
 
 
 class MT5Backfill:
@@ -52,6 +55,22 @@ class MT5Backfill:
 
     def status(self, state: str = "backfilling", error: str | None = None) -> None:
         self.appdb.set_status(COLLECTOR, state, error=error, detail=self.progress)
+
+    def _yield_to_live(self) -> None:
+        """The terminal serves clients one at a time: never starve the live poller (D-024)."""
+        time.sleep(0.2)
+        for _ in range(24):
+            live = next((r for r in self.appdb.statuses() if r["collector"] == LIVE_COLLECTOR), None)
+            if live is None or live["state"] not in ("live",) or now_ms() - int(live["updated_ms"]) <= LIVE_STALE_MS:
+                return
+            time.sleep(5)
+
+    def _earliest_cached(self, hot: SQLiteHotStore, table: str) -> int | None:
+        rows = hot.read_range(VISION_DONE, columns=["table_name", "period", "rows"])
+        for t, p, r in zip(rows["table_name"], rows["period"], rows["rows"]):
+            if t == table and p == "earliest_srv_ms":
+                return int(r)
+        return None
 
     def _rates(self, sym: str, tf_const: int, lo_srv_ms: int, hi_srv_ms: int, retries: int = 3) -> np.ndarray | None:
         mt5 = self.term.mt5
@@ -75,22 +94,27 @@ class MT5Backfill:
             tfc = self.term.timeframe(tf.mt5_attr)
             # earliest bar the broker serves (probe from the oldest month forwards, coarse)
             have = hot.read_range(spec, columns=["srv_time"])["srv_time"]
-            if len(have) == 0:
+            first = self._earliest_cached(hot, spec.name)
+            if first is None:
                 first = self._earliest_bar(inst.symbol, tfc, max(start, 0), now_srv)
-                if first is None:
-                    self.progress[spec.name] = "no history on server"
-                    continue
-                lo = first
-            else:
-                lo = int(have.min())
+                if first is not None:
+                    hot.replace(VISION_DONE, [(spec.name, "earliest_srv_ms", first, now_ms())])
+            if first is None and len(have) == 0:
+                self.progress[spec.name] = "no history on server"
+                continue
+            lo = min(x for x in (first, int(have.min()) if len(have) else None) if x is not None)
+            if start > 0:
+                lo = max(lo, self.model.utc_to_server(start))
             end = (now_srv // tf.ms) * tf.ms - tf.ms          # last closed bar (server grid, approx for W1)
             known = self._known(hot, spec.name)
             gaps = [g for g in mt5_candle_gaps(have, tf, lo, end, cal, self.model) if g.start not in known]
             self.progress[spec.name] = f"{sum(g.count for g in gaps):,} bars to fetch in {len(gaps)} gaps"
             self.status()
+            chunk = max(tf.ms * 10_000, MS_PER_DAY)          # ≈ 7 days of M1 per request
             for g in gaps:
-                for c0 in range(g.start, g.end + tf.ms, MONTH_MS):
-                    c1 = min(c0 + MONTH_MS, g.end + tf.ms)
+                for c0 in range(g.start, g.end + tf.ms, chunk):
+                    c1 = min(c0 + chunk, g.end + tf.ms)
+                    self._yield_to_live()
                     r = self._rates(inst.symbol, tfc, c0, c1)
                     if r is None:
                         continue
@@ -152,8 +176,19 @@ class MT5Backfill:
                 day -= dt.timedelta(days=1)
                 continue
             open_any = any(cal.is_open(lo_utc + h * 3_600_000) for h in range(24))
-            lo_srv, hi_srv = self.model.utc_to_server(lo_utc), self.model.utc_to_server(lo_utc + MS_PER_DAY)
-            t = self.term.mt5.copy_ticks_range(inst.symbol, int(lo_srv // 1000), int(hi_srv // 1000), self.term.mt5.COPY_TICKS_ALL)
+            parts = []
+            for h in range(24):
+                a = self.model.utc_to_server(lo_utc + h * HOUR_MS)
+                b = self.model.utc_to_server(lo_utc + (h + 1) * HOUR_MS)
+                self._yield_to_live()
+                chunk = self.term.mt5.copy_ticks_range(inst.symbol, int(a // 1000), int(b // 1000) + 1,
+                                                       self.term.mt5.COPY_TICKS_ALL)
+                if chunk is not None and len(chunk):
+                    tm = chunk["time_msc"].astype(np.int64)
+                    chunk = chunk[(tm >= a) & (tm < b)]     # exact [a, b) → hour chunks never overlap
+                    if len(chunk):
+                        parts.append(chunk)
+            t = np.concatenate(parts) if parts else None
             if t is None or len(t) == 0:
                 if open_any:
                     empty_streak += 1
