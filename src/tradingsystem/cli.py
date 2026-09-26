@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
 import runpy
 import sys
 from pathlib import Path
 
-from .core.settings import PROJECT_ROOT
+from .core.settings import INSTANCE_ENV, PROJECT_ROOT
 
 # command -> ("module:function", phase that implements it)
 _TARGETS: dict[str, tuple[str, str]] = {
@@ -77,7 +78,9 @@ def _cmd_status(_: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="tradingsystem", description="AI-driven automated trading system")
+    p = argparse.ArgumentParser(prog="tradingsystem", description="AI-driven automated trading system",
+                                epilog="--instance PAIR (anywhere on the line): run as the independent system of that "
+                                       "pair (config 'instances:', D-042)")
     sub = p.add_subparsers(dest="command", required=True)
 
     pr = sub.add_parser("probe", help="run a data-exploration probe (research/probes)")
@@ -111,9 +114,30 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def take_instance(argv: list[str]) -> tuple[list[str], str | None]:
+    """Remove ``--instance PAIR`` / ``--instance=PAIR`` from ``argv`` (any position) → (rest, PAIR upper-cased)."""
+    out, inst, i = [], None, 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--instance":
+            if i + 1 >= len(argv):
+                raise SystemExit("--instance needs a pair, e.g. --instance BTCUSDT")
+            inst, i = argv[i + 1], i + 2
+            continue
+        if a.startswith("--instance="):
+            inst = a.split("=", 1)[1]
+        else:
+            out.append(a)
+        i += 1
+    inst = (inst or "").strip().upper() or None
+    return out, inst
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    argv = list(sys.argv[1:] if argv is None else argv)
+    argv, instance = take_instance(list(sys.argv[1:] if argv is None else argv))
+    if instance:            # every command (and every child process it starts) runs as that pair's system (D-042)
+        os.environ[INSTANCE_ENV] = instance
     if argv and argv[0] in _TARGETS:            # service commands own their argument parsing
         return _dispatch(argv[0], argv[1:])
     args = parser.parse_args(argv)

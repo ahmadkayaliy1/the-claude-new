@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ...core.filelock import FileLock
 from ...core.timeutil import now_ms
 from .base import LLMProvider, LLMResult, ProviderError, secret, transport_schema
 
@@ -59,8 +60,34 @@ _EPOCH_RE = re.compile(r"\|(\d{10})\b")
 _REFRESH_RACE_RE = re.compile(r"another claude code process is refreshing", re.I)
 # may follow a lost race, or be a real sign-in problem: retried once, and the sign-in is re-checked in the background
 _AUTH_TRANSIENT_RE = re.compile(r"403 request not allowed|failed to refresh oauth token", re.I)
-START_STAGGER_S = 15.0           # minimum gap between two CLI starts of this process (token refresh happens at start)
+START_STAGGER_S = 15.0           # minimum gap between two CLI starts on this machine (token refresh happens at start)
+START_STAMP = "last_start.txt"   # in the CLI work folder, shared by every system of this Windows user (D-042)
 
+
+
+def claim_start(workdir: Path, gap_s: float | None = None) -> float:
+    """Machine-wide spacing of CLI starts: 0.0 when this process may start a CLI now (the start is recorded), else
+    the seconds to wait. Every system on the machine (one per pair, D-042) and every sign-in check shares the work
+    folder, so two CLIs never refresh the OAuth token at the same moment."""
+    gap = START_STAGGER_S if gap_s is None else gap_s
+    if gap <= 0:
+        return 0.0
+    with FileLock(workdir / "start.lock").hold(timeout=5) as got:
+        if not got:
+            return 1.0
+        stamp = workdir / START_STAMP
+        try:
+            last = float(stamp.read_text(encoding="ascii").strip() or 0)
+        except (OSError, ValueError):
+            last = 0.0
+        now = time.time()
+        if last > now + 5:                  # the wall clock was stepped back: the stamp says nothing
+            last = 0.0
+        wait = last + gap - now
+        if wait > 0:
+            return wait
+        stamp.write_text(f"{now:.3f}", encoding="ascii")
+        return 0.0
 
 
 class AuthCheckFailed(RuntimeError):
@@ -157,6 +184,9 @@ class ClaudeCodeProvider(LLMProvider):
         return self._auth_problem
 
     def _refresh_auth(self) -> None:
+        if not self.api_key and claim_start(self.workdir) > 0:
+            self._auth_refreshing = False               # another system just started a CLI: ask again on the next look
+            return
         now = time.monotonic()
         self._last_start = now                          # the next model call waits START_STAGGER_S after this CLI start
         try:
@@ -213,13 +243,16 @@ class ClaudeCodeProvider(LLMProvider):
                 + json.dumps(_without_titles(schema), separators=(",", ":"), ensure_ascii=False))
 
     async def _staggered_start(self) -> None:
-        """Keep CLI starts of this process at least ``START_STAGGER_S`` apart (the OAuth refresh race)."""
+        """Keep CLI starts at least ``START_STAGGER_S`` apart — within this process and across every system on the
+        machine (the OAuth refresh race)."""
         if self._start_lock is None:
             self._start_lock = asyncio.Lock()
         async with self._start_lock:
             wait = self._last_start + START_STAGGER_S - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
+            while (wait := await asyncio.to_thread(claim_start, self.workdir)) > 0:
+                await asyncio.sleep(min(wait, START_STAGGER_S))
             self._last_start = time.monotonic()
 
     async def _call(self, system: str, user: str, schema: dict | None, schema_name: str,

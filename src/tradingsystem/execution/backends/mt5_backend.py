@@ -14,6 +14,7 @@ import time
 from ...core.timeutil import now_ms, parse_date_spec
 from ...ingest.mt5.servertime import ServerTimeModel
 from ...ingest.mt5.terminal import MT5Terminal
+from ..exposure import aggregate, leg
 from ..retcodes import SUCCESS, describe, retryable
 from .paper import Tick, split_volume
 
@@ -28,14 +29,31 @@ class MT5Backend:
     name = "mt5"
 
     def __init__(self, terminal: MT5Terminal, magic: int, *, expected_account_type: str,
-                 pair_by_symbol: dict[str, str] | None = None) -> None:
+                 pair_by_symbol: dict[str, str] | None = None, own_pairs: set[str] | None = None,
+                 adopt_magic: int | None = None, family: set[int] | None = None) -> None:
+        """``magic``: this system's orders. One system per pair (D-042): ``own_pairs`` are the pairs it trades,
+        ``adopt_magic`` the all-pairs system's magic (its orders on ``own_pairs`` — placed before the switch to one
+        system per pair — are managed and settled here), ``family`` every magic of this project on the account
+        (the other systems' positions count towards the correlated-exposure cap)."""
         self.t = terminal
         self.mt5 = terminal.mt5
         self.magic = magic
         self.expected = expected_account_type
         self.pair_by_symbol = dict(pair_by_symbol or {})     # MT5 symbol → logical pair (risk is keyed by pair)
+        self.own_pairs = set(own_pairs) if own_pairs is not None else set(self.pair_by_symbol.values())
+        self.adopt_magic = adopt_magic if adopt_magic != magic else None
+        self.family = set(family or ()) | {magic} | ({adopt_magic} if adopt_magic is not None else set())
         self._warned: set[str] = set()
         self.model = ServerTimeModel()
+
+    def mine(self, x) -> bool:
+        """An order / position / deal of this system (its magic, or an adopted all-pairs one on its pairs)."""
+        return x.magic == self.magic or (self.adopt_magic is not None and x.magic == self.adopt_magic
+                                         and self.pair_by_symbol.get(x.symbol) in self.own_pairs)
+
+    def sibling(self, x) -> bool:
+        """An order / position of another system of this project on the same account."""
+        return x.magic in self.family and not self.mine(x)
 
     # ------------------------------------------------------------------ state
     def assert_account(self) -> None:
@@ -59,38 +77,69 @@ class MT5Backend:
         # sees "no positions, no risk, no loss today" — the daily limit and exposure caps depend on these, D-036)
         a = self.t.account()
         m = self.mt5
-        positions = [p for p in self._ask("positions", m.positions_get()) if p.magic == self.magic]
-        orders = [o for o in self._ask("orders", m.orders_get()) if o.magic == self.magic]
+        all_pos = self._ask("positions", m.positions_get())
+        all_ord = self._ask("orders", m.orders_get())
+        positions = [p for p in all_pos if self.mine(p)]
+        orders = [o for o in all_ord if self.mine(o)]
         buy_orders = {m.ORDER_TYPE_BUY, m.ORDER_TYPE_BUY_LIMIT, m.ORDER_TYPE_BUY_STOP}
         risk_usd: dict[str, float] = {}
+        sibling_usd: dict[str, float] = {}
 
-        def add_risk(symbol: str, buy: bool, volume: float, price: float, sl: float) -> None:
+        def add_risk(into: dict[str, float], symbol: str, buy: bool, volume: float, price: float, sl: float) -> None:
             pair = self._pair(symbol)
             if not sl:           # never ours (every leg carries an SL) — unbounded risk: counts as the whole equity
-                risk_usd[pair] = risk_usd.get(pair, 0.0) + max(a.equity, 0.0)
+                into[pair] = into.get(pair, 0.0) + max(a.equity, 0.0)
                 return
             loss = m.order_calc_profit(m.ORDER_TYPE_BUY if buy else m.ORDER_TYPE_SELL, symbol, volume, price, sl)
             if loss is None:
                 raise RuntimeError(f"MT5 order_calc_profit failed for {symbol} ({m.last_error()})")
-            risk_usd[pair] = risk_usd.get(pair, 0.0) + max(0.0, -loss)
+            into[pair] = into.get(pair, 0.0) + max(0.0, -loss)
 
-        for p in positions:
-            add_risk(p.symbol, p.type == m.POSITION_TYPE_BUY, p.volume, p.price_open, p.sl)
-        for o in orders:
-            add_risk(o.symbol, o.type in buy_orders, o.volume_current, o.price_open, o.sl)
+        for p in all_pos:
+            if self.mine(p) or self.sibling(p):
+                add_risk(risk_usd if self.mine(p) else sibling_usd, p.symbol, p.type == m.POSITION_TYPE_BUY,
+                         p.volume, p.price_open, p.sl)
+        for o in all_ord:
+            if self.mine(o) or self.sibling(o):
+                add_risk(risk_usd if self.mine(o) else sibling_usd, o.symbol, o.type in buy_orders,
+                         o.volume_current, o.price_open, o.sl)
         today = now_ms() // 86_400_000 * 86_400_000
         deals = self._ask("today's deals",
                           m.history_deals_get(self.model.utc_to_server(today) // 1000, int(time.time()) + 86_400))
-        realized = sum(d.profit + d.commission + d.swap + getattr(d, "fee", 0.0) for d in deals if d.magic == self.magic)
+        realized = sum(d.profit + d.commission + d.swap + getattr(d, "fee", 0.0) for d in deals if self.mine(d))
         with_pos = {p.comment.rsplit(":", 1)[0] for p in positions}
         with_ord = {o.comment.rsplit(":", 1)[0] for o in orders}
+        pct = (lambda d: {k: round(v / a.equity * 100, 3) for k, v in d.items()} if a.equity > 0 else {})
         return {"mode": self.expected, "currency": a.currency, "balance": a.balance, "equity": a.equity,
-                "margin_free": a.margin_free, "unrealized_usd": round(sum(p.profit + p.swap for p in positions), 2),
+                "margin_free": a.margin_free, "login": getattr(a, "login", None), "server": getattr(a, "server", None),
+                "unrealized_usd": round(sum(p.profit + p.swap for p in positions), 2),
                 "open_positions": len(with_pos | with_ord), "open_orders": len(with_ord - with_pos),
                 "open_risk_usd_by_pair": {k: round(v, 2) for k, v in risk_usd.items()},
-                "open_risk_pct_by_pair":
-                    {k: round(v / a.equity * 100, 3) for k, v in risk_usd.items()} if a.equity > 0 else {},
-                "realized_today_usd": realized}
+                "open_risk_pct_by_pair": pct(risk_usd), "sibling_risk_pct_by_pair": pct(sibling_usd),
+                "realized_today_usd": realized, "exposure": self._exposure(positions, orders, buy_orders)}
+
+    def _exposure(self, positions: list, orders: list, buy_orders: set) -> list[dict]:
+        m = self.mt5
+        names = {getattr(m, f"ORDER_TYPE_{n}", None): n for n in
+                 ("BUY", "SELL", "BUY_LIMIT", "SELL_LIMIT", "BUY_STOP", "SELL_STOP", "BUY_STOP_LIMIT", "SELL_STOP_LIMIT")}
+
+        def utc(server_ms: int) -> int | None:
+            return self.model.server_to_utc(int(server_ms), prefer="earlier") if server_ms else None
+
+        def decision(comment: str) -> str:
+            parts = (comment or "").split(":")
+            return parts[1] if len(parts) >= 3 and parts[0] == "ts" else (comment or "?")
+
+        legs = [leg(pair=self._pair(p.symbol), decision=decision(p.comment), kind="position",
+                    side="BUY" if p.type == m.POSITION_TYPE_BUY else "SELL", order_type="MARKET", volume=p.volume,
+                    price=p.price_open, sl=p.sl or None, tp=getattr(p, "tp", 0) or None, profit_usd=p.profit + p.swap,
+                    since_ms=utc(getattr(p, "time_msc", 0))) for p in positions]
+        legs += [leg(pair=self._pair(o.symbol), decision=decision(o.comment), kind="order",
+                     side="BUY" if o.type in buy_orders else "SELL", order_type=names.get(o.type, str(o.type)),
+                     volume=o.volume_current, price=o.price_open, sl=o.sl or None, tp=getattr(o, "tp", 0) or None,
+                     since_ms=utc(getattr(o, "time_setup_msc", 0)),
+                     expires_ms=utc(int(getattr(o, "time_expiration", 0) or 0) * 1000)) for o in orders]
+        return aggregate(legs)
 
     def specs(self, symbol: str) -> dict:
         i = self.mt5.symbol_info(symbol)
@@ -256,7 +305,7 @@ class MT5Backend:
         pending = self._ask("orders", m.orders_get())
         open_pos = self._ask("positions", m.positions_get())
         hist = self._ask("history orders", m.history_orders_get(since_s, until_s))
-        placed = [o for o in hist if o.magic == self.magic and o.comment.startswith(prefix)]
+        placed = [o for o in hist if self.mine(o) and o.comment.startswith(prefix)]
         pids = {o.position_id for o in placed if getattr(o, "position_id", 0)}
         if any(o.comment.startswith(prefix) for o in pending) or \
                 any(p.identifier in pids or p.comment.startswith(prefix) for p in open_pos):

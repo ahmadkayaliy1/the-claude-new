@@ -34,6 +34,12 @@ class ExecContext:
     kill_switch: bool = False
     basis_ok: bool = True
     basis_reason: str = ""
+    # D-042 — other systems of this project on the same account (correlated cap), this pair's live positions and
+    # pending orders by side (no second trade in the same direction), the account's drawdown from its peak
+    sibling_risk_pct_by_pair: dict[str, float] = field(default_factory=dict)
+    live_sides: dict[str, list[str]] = field(default_factory=dict)
+    account_drawdown_pct: float | None = None
+    account_drawdown_tripped: bool = False
 
 
 @dataclass
@@ -85,6 +91,15 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
     buy = rec["decision"] == "BUY"
     sl = rec.get("stop_loss")
     add("kill_switch", not ctx.kill_switch, "kill switch engaged" if ctx.kill_switch else "off")
+    dd = ctx.account_drawdown_pct
+    add("account_drawdown", not ctx.account_drawdown_tripped and (dd is None or dd < risk.account_drawdown_stop_pct),
+        "no peak recorded yet" if dd is None else
+        f"account {dd:.1f}% below its peak (stop at {risk.account_drawdown_stop_pct:.0f}%"
+        + ("; TRIPPED — no new trades until scripts\\reset_drawdown_stop.bat)" if ctx.account_drawdown_tripped else ")"))
+    same = ctx.live_sides.get(rec["decision"]) or []
+    add("no_same_direction", not same,
+        f"a {rec['decision']} {', '.join(same)} of this pair is live — no second trade in the same direction"
+        if same else f"no live {rec['decision']} position or order on this pair")
     add("stop_loss_present", sl is not None, "SL present" if sl is not None else "no SL — invalid (spec §0)")
     add("market_open", ctx.market_open, "open" if ctx.market_open else "execution market closed")
     add("quote_fresh", ctx.quote_age_s <= 30, f"quote age {ctx.quote_age_s:.1f}s (≤30s)")
@@ -135,9 +150,11 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
         f"{ctx.open_positions} open positions/pending orders (< {risk.max_open_positions})")
     # a pair outside every correlated group is its own group: repeat positions on one pair are capped the same way
     group = next((g for g in correlated_groups if pair in g), [pair])
-    corr = sum(v for p, v in ctx.open_risk_pct_by_pair.items() if p in group) + (size.risk_pct if size.ok else 0)
+    others = sum(v for p, v in ctx.sibling_risk_pct_by_pair.items() if p in group)
+    corr = sum(v for p, v in ctx.open_risk_pct_by_pair.items() if p in group) + others + (size.risk_pct if size.ok else 0)
     add("correlated_exposure", corr <= risk.max_correlated_risk_pct,
-        f"group {group}: {corr:.2f}% open+new SL risk (≤ {risk.max_correlated_risk_pct}%)")
+        f"group {group}: {corr:.2f}% open+new SL risk (≤ {risk.max_correlated_risk_pct}%)"
+        + (f", of which {others:.2f}% held by the other pairs' systems" if others else ""))
     day = (ctx.realized_pnl_today_usd + ctx.unrealized_pnl_usd) / ctx.equity * 100
     add("daily_loss_limit", day > -risk.max_daily_loss_pct, f"today {day:.2f}% (limit −{risk.max_daily_loss_pct}%)")
     # worst case: every open position / pending order and this new trade stop out today — the day may still not

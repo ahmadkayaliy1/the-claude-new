@@ -389,7 +389,7 @@ def test_instance_name_is_per_data_dir(tmp_path):
 def test_main_refuses_to_run_next_to_an_older_unlocked_supervisor(tmp_path, monkeypatch):
     monkeypatch.setattr(sv, "setup_from_settings", lambda *a, **k: None)
     monkeypatch.setattr(sv, "acquire_instance", lambda name, wait_s=0: True)
-    monkeypatch.setattr(procs, "other_supervisors", lambda older_s=None: [1234])
+    monkeypatch.setattr(procs, "running_supervisors", lambda older_s=None: {1234: None})
     monkeypatch.setattr(sv, "Supervisor", lambda *a, **k: pytest.fail("must not start"))
     assert sv.main(["all", "--data-dir", str(tmp_path)]) == 3
     assert sv.main(["nope"]) == 2
@@ -411,7 +411,7 @@ def test_state_roundtrip(tmp_path):
 
 def test_stop_when_nothing_runs_pauses_autostart(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(control, "instance_running", lambda name: False)
-    monkeypatch.setattr(procs, "other_supervisors", lambda older_s=None: [])
+    monkeypatch.setattr(procs, "running_supervisors", lambda older_s=None: {})
     assert control.stop(tmp_path, timeout=0) == 0
     assert (control.run_dir(tmp_path) / control.HOLD).exists() and (tmp_path / "STOP_ALL").exists()
     assert "not running" in capsys.readouterr().out
@@ -428,7 +428,7 @@ def test_autostart_respects_a_manual_stop_and_a_running_supervisor(tmp_path, mon
     control.write_state(tmp_path, {"pid": os.getpid(), "awake_s": winops.sample_clock().awake})
     assert control.detach(["all"], tmp_path, s, auto=True) == 0          # healthy one already running
     monkeypatch.setattr(control, "instance_running", lambda name: False)
-    monkeypatch.setattr(procs, "other_supervisors", lambda older_s=None: [99])
+    monkeypatch.setattr(procs, "running_supervisors", lambda older_s=None: {99: None})
     assert control.detach(["all"], tmp_path, s, auto=False) == 1         # older unlocked build still running
 
 

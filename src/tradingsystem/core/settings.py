@@ -63,14 +63,33 @@ class _Model(BaseModel):
 
 # --------------------------------------------------------------------------- infrastructure
 class PathsCfg(_Model):
+    """``data()`` = market data (hot/cold stores, Vision cache) — shared by every instance, one file per instrument,
+    so instances never write the same file. ``state()`` = the running system's own state (app.db, STOP_ALL,
+    KILL_SWITCH, supervisor lock/state): ``data/instances/<PAIR>`` for an instance (D-042), else ``data``.
+    ``shared()`` = cross-instance files (AI usage ledger, account high-water mark, locks, global KILL_SWITCH)."""
     data_dir: str = "data"
     logs_dir: str = "logs"
+    instance: str | None = None            # set by the TS_INSTANCE overlay (one system per pair); None = all pairs
 
     def data(self) -> Path:
         return _resolve(self.data_dir)
 
     def logs(self) -> Path:
-        return _resolve(self.logs_dir)
+        base = _resolve(self.logs_dir)
+        return base / self.instance if self.instance else base
+
+    def state(self) -> Path:
+        return self.data() / "instances" / self.instance if self.instance else self.data()
+
+    def shared(self) -> Path:
+        return self.data() / "shared"
+
+
+def system_state_dirs(settings: "Settings") -> list[Path]:
+    """The state dir of every system that may run on this data root: the all-pairs one (``data``) and one per
+    configured instance (``data/instances/<PAIR>``) — whether or not it runs (callers check the heartbeats)."""
+    base = settings.paths.data()
+    return [base, *(base / "instances" / name for name in settings.instances)]
 
 
 class StorageCfg(_Model):
@@ -207,6 +226,7 @@ class RiskCfg(_Model):
     sl_atr_max_mult: float = 5.0
     max_spread_to_sl_ratio: float = 0.2
     min_confidence: int = Field(55, ge=50, le=90)     # the gate executes nothing below this confidence
+    account_drawdown_stop_pct: float = Field(25.0, gt=0, le=100)   # whole account below its high-water mark (D-039)
     max_recommendation_age_s: int = 300
     max_data_staleness_s: int = 120
     correlated_groups: list[list[str]] = Field(default_factory=lambda: [["BTCUSDT", "ETHUSDT"]])
@@ -274,6 +294,9 @@ class AICfg(_Model):
     min_minutes_between_calls: int = 15     # per pair (protects free-tier quotas)
     max_idle_minutes: int = 120             # hybrid policy: review a pair at least this often (market open)
     max_parallel_calls: int = 2
+    # one system per pair (D-042): the daily request cap (rpd) is shared by every instance through one ledger; no
+    # instance may use more than this share of it, so one busy pair never leaves the others without analysis
+    instance_max_rpd_share: float = Field(0.6, gt=0, le=1)
     review_floor_minutes: int = 5           # next_review price/candle triggers: not sooner after the last call
     max_backoff_minutes: int = 120          # per-pair back-off cap after failed cycles (spacing doubles per failure)
     cycle_deadline_s: float = 600.0         # an AI cycle is cut off after this; unfinished pairs stored as 'error'
@@ -325,6 +348,12 @@ class SupervisorCfg(_Model):
 
 
 # --------------------------------------------------------------------------- root
+class InstanceCfg(_Model):
+    """One fully independent system for one pair (D-042): ``run all --instance <PAIR>``."""
+    api_port: int = Field(ge=1024, le=65535)
+    magic_offset: int = Field(ge=1, le=999)   # MT5 magic = execution.magic + offset → per-instance risk limits
+
+
 class Settings(_Model):
     profile: Literal["low", "standard"] = "standard"
     timeframes: list[Timeframe]
@@ -340,6 +369,7 @@ class Settings(_Model):
     ai: AICfg
     api: ApiCfg = ApiCfg()
     supervisor: SupervisorCfg = SupervisorCfg()
+    instances: dict[str, InstanceCfg] = Field(default_factory=dict)
 
     # populated by the loader, not by YAML
     config_hash: str = ""
@@ -359,6 +389,13 @@ class Settings(_Model):
             for pair in group:
                 if pair not in self.pairs:
                     raise ValueError(f"risk.correlated_groups references unknown pair {pair!r}")
+        for name in self.instances:
+            if name not in self.pairs:
+                raise ValueError(f"instances.{name} is not a configured pair")
+        ports = [i.api_port for i in self.instances.values()] + [self.api.port]
+        offsets = [i.magic_offset for i in self.instances.values()]
+        if len(set(offsets)) != len(offsets) or (not self.paths.instance and len(set(ports)) != len(ports)):
+            raise ValueError("instances need distinct api_port (and != api.port) and distinct magic_offset")
         if self.execution.mode == "live" and self.execution.live_confirmation != LIVE_CONFIRMATION_PHRASE:
             raise ValueError(
                 "execution.mode=live requires execution.live_confirmation to equal "
@@ -434,6 +471,34 @@ def _apply_env_overrides(raw: dict[str, Any], env: dict[str, str]) -> dict[str, 
     return out
 
 
+INSTANCE_ENV = "TS_INSTANCE"
+
+
+def _apply_instance(raw: dict[str, Any], instance: str) -> dict[str, Any]:
+    """One system per pair (D-042): only ``instance`` is enabled; state, logs, API port and MT5 magic are the
+    instance's own; Binance REST budgets are shared out between the configured instances (one IP limit)."""
+    if not instance:
+        return raw
+    out = copy.deepcopy(raw)
+    pairs = out.get("pairs") or {}
+    icfg = (out.get("instances") or {}).get(instance)
+    if instance not in pairs or icfg is None:
+        raise ValueError(f"{INSTANCE_ENV}={instance!r}: not a configured instance (config 'instances:' has "
+                         f"{sorted(out.get('instances') or {})})")
+    for name, p in pairs.items():
+        p["enabled"] = name == instance
+    out.setdefault("paths", {})["instance"] = instance
+    out.setdefault("api", {})["port"] = icfg["api_port"]
+    ex = out.setdefault("execution", {})
+    ex["magic"] = int(ex.get("magic", ExecutionCfg().magic)) + int(icfg["magic_offset"])
+    n = max(1, len(out.get("instances") or {}))
+    b = out.setdefault("binance", {})
+    b["rest_weight_budget_per_min"] = max(300, int(b.get("rest_weight_budget_per_min", 3000)) // n)
+    for prof in (out.get("resources") or {}).values():
+        prof["vision_download_concurrency"] = 1
+    return out
+
+
 def load_env(env_path: Path | None = None) -> None:
     """Load ``.env`` into ``os.environ`` without overriding variables already set."""
     path = env_path or DEFAULT_ENV
@@ -464,6 +529,7 @@ def load_settings(
     if extra_env:
         env.update(extra_env)
     raw = _apply_env_overrides(raw, env)
+    raw = _apply_instance(raw, (env.get(INSTANCE_ENV) or "").strip())
     digest = hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()[:16]
     raw["config_hash"] = digest
     return Settings.model_validate(raw)

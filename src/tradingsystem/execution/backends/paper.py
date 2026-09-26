@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ...core.timeutil import now_ms, parse_date_spec
 from ...storage.sqlite_store import connect
+from ..exposure import aggregate, leg
 
 _DDL = [
     """CREATE TABLE IF NOT EXISTS paper_account (id INTEGER PRIMARY KEY CHECK (id = 1), start_equity REAL NOT NULL,
@@ -114,7 +115,29 @@ class PaperBackend:
                 "unrealized_usd": round(unreal, 2), "open_legs": len(open_legs), "start_equity": start,
                 "open_positions": len(with_open | with_pending), "open_orders": len(with_pending - with_open),
                 "open_risk_pct_by_pair": {p: round(v / equity * 100, 3) for p, v in risk_by_pair.items()} if equity > 0 else {},
-                "realized_today_usd": self.realized_since(now // 86_400_000 * 86_400_000)}
+                "realized_today_usd": self.realized_since(now // 86_400_000 * 86_400_000),
+                "exposure": self.exposure(marks, now)}
+
+    def exposure(self, marks: dict[str, Tick] | None = None, now: int | None = None) -> list[dict]:
+        """Open positions and live pending orders, one row per decision and kind (see :mod:`..exposure`)."""
+        now = now_ms() if now is None else now
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT decision_id, pair, instrument, side, order_type, status, volume, contract_size, order_price, "
+                "fill_price, sl, tp, created_ms, fill_ms, expires_ms FROM paper_legs WHERE status='open' OR "
+                "(status='pending' AND (expires_ms IS NULL OR expires_ms > ?))", (now,)).fetchall()
+        legs = []
+        for did, pair, inst, side, otype, status, vol, cs, oprice, fill, sl, tp, created, fill_ms, exp in rows:
+            is_open = status == OPEN
+            profit = None
+            if is_open and (m := (marks or {}).get(inst)) is not None:
+                px = m.bid if side == "BUY" else m.ask
+                profit = (px - fill if side == "BUY" else fill - px) * vol * cs
+            legs.append(leg(pair=pair, decision=did, kind="position" if is_open else "order", side=side,
+                            order_type=otype, volume=vol, price=fill if is_open else oprice, sl=sl, tp=tp,
+                            profit_usd=profit, since_ms=fill_ms if is_open else created,
+                            expires_ms=None if is_open else exp))
+        return aggregate(legs)
 
     def realized_since(self, since_ms: int) -> float:
         with self._lock:

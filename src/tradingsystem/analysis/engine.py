@@ -29,7 +29,7 @@ import json
 import logging
 import time
 
-from ..ai.budget import CostGovernor, UsageStore
+from ..ai.budget import CostGovernor, UsageStore, usage_db
 from ..ai.orchestrator import CycleRequest, Orchestrator
 from ..ai.store import DecisionRecord, DecisionStore
 from ..ai.triggers import decide, review_due
@@ -48,6 +48,7 @@ SETTLE_MS = 5_000           # wait after a close so the closed bar is stored
 DATA_WAIT_MS = 90_000       # MT5 closes a bar on the next tick — a bar still missing after this is reported
 HEARTBEAT_S = 10.0          # collector_status heartbeat, independent of the AI work (supervisor stale limit 120 s)
 QUIET_MS = 10 * 60_000      # repeated warnings (AI not ready, quota) are logged at most this often
+EXECUTOR_FRESH_MS = 120_000  # the executor's account report is used while it is at most this old
 MAX_FAILS = 8               # back-off exponent cap
 
 
@@ -55,10 +56,10 @@ class Engine:
     def __init__(self, s: Settings) -> None:
         self.s = s
         self.reg = InstrumentRegistry.from_settings(s)
-        self.appdb = AppDB(s.paths.data() / "app.db")
+        self.appdb = AppDB(s.paths.state() / "app.db")
         self.builder = SnapshotBuilder(s, self.reg)
-        self.store = DecisionStore(s.paths.data() / "app.db", s.config_hash)
-        self.usage = UsageStore(s.paths.data() / "app.db")
+        self.store = DecisionStore(s.paths.state() / "app.db", s.config_hash)
+        self.usage = UsageStore(usage_db(s))
         self.governor = CostGovernor(s.ai.budget, self.usage, profit_fn=self.store.realised_since)
         self.orch = Orchestrator(s, self.reg, self.builder, self.store, self.usage, self.governor)
         self.processed: dict[str, int] = {}
@@ -72,6 +73,40 @@ class Engine:
         self.stop = False
 
     _ai_problem: str = ""
+
+    def live_account(self, pair: str | None) -> dict:
+        """The ``account`` block of the payload (Phase 2): the live account this system trades, as its executor last
+        reported it — equity, today's PnL of this system, the account's drawdown and, for ``pair``, the positions
+        and pending orders it holds. The configured size when the executor is not reporting."""
+        base = self.orch.default_account()
+        try:
+            row = next((r for r in self.appdb.statuses() if r["collector"] == "executor"), None)
+            d = json.loads(row["detail"]) if row and row.get("detail") else {}
+        except Exception:  # noqa: BLE001 — the payload must never fail on the status row
+            row, d = None, {}
+        age = now_ms() - int(row["updated_ms"]) if row else None
+        if not d.get("equity") or age is None or age > EXECUTOR_FRESH_MS or row["state"] != "live":
+            why = "the executor is not reporting" if row is None or age is None or age > EXECUTOR_FRESH_MS \
+                else f"the executor is {row['state']}"
+            return {**base, "equity_source": f"configured account size ({why}); positions unknown"}
+        out = {"mode": d.get("mode", self.s.execution.mode), "currency": d.get("currency", "USD"),
+               "equity": d["equity"], "balance": d.get("balance"),
+               "equity_source": f"live {d.get('mode')} account, reported by the executor {age // 1000}s ago",
+               "today_pnl_pct": d.get("today_pnl_pct"), "daily_loss_limit_pct": self.s.risk.max_daily_loss_pct}
+        dd = d.get("account_drawdown") or {}
+        if dd:
+            out["account_drawdown_pct"] = dd.get("drawdown_pct")
+            out["account_drawdown_stop_pct"] = self.s.risk.account_drawdown_stop_pct
+            if dd.get("tripped"):
+                out["account_drawdown_tripped"] = dd["tripped"]
+        if pair:
+            rows = [{k: v for k, v in x.items() if k not in ("pair", "kind")} for x in d.get("exposure") or []
+                    if x.get("pair") == pair]
+            kinds = [x.get("kind") for x in d.get("exposure") or [] if x.get("pair") == pair]
+            out["open_positions"] = [r for r, k in zip(rows, kinds) if k == "position"]
+            out["pending_orders"] = [{k: v for k, v in r.items() if k != "profit_usd"}
+                                     for r, k in zip(rows, kinds) if k == "order"]
+        return out
 
     def ai_ready(self) -> bool:
         """True when the active provider (or ``ai.fallback_provider`` while it is unavailable) can take calls."""
@@ -152,7 +187,7 @@ class Engine:
                     self.appdb.add_event("engine", "data_not_ready", msg)
                 continue
             at_close = bar > self.processed.get(pair, 0) and now >= bar + tf.ms + SETTLE_MS
-            payload = self.orch.payload(pair, now) if at_close else None
+            payload = self.orch.payload(pair, now, self.live_account(pair)) if at_close else None
             fire, reasons, strength = self.evaluate(pair, now, at_close, payload, policy)
             if at_close:
                 self.processed[pair] = bar
@@ -173,7 +208,7 @@ class Engine:
         payloads: dict[str, dict] = {}
         queue: list[CycleRequest] = []
         for pair, reasons, _, payload in fired:
-            p = payload or self.orch.payload(pair, now)
+            p = payload or self.orch.payload(pair, now, self.live_account(pair))
             problems = data_problems(p, now, self.s.risk.max_data_staleness_s)
             if problems:
                 self.store.save(DecisionRecord(pair, self.orch.effective_mode()[0], "; ".join(reasons)[:600],
@@ -208,7 +243,7 @@ class Engine:
     async def _cycle(self, queue: list[CycleRequest], payloads: dict[str, dict], as_of: int) -> None:
         pairs = [q.pair for q in queue]
         try:
-            recs = await self.orch.run_cycle(queue, as_of=as_of, payloads=payloads)
+            recs = await self.orch.run_cycle(queue, as_of=as_of, payloads=payloads, account=self.live_account(None))
             for r in recs:
                 self.fails[r.pair] = 0 if r.status in ("valid", "skipped") else self.fails.get(r.pair, 0) + 1
         except Exception as exc:  # noqa: BLE001
@@ -318,12 +353,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.once:
             pairs = [p for p in (args.pairs.split(",") if args.pairs else s.enabled_pairs()) if p]
             now = now_ms()
-            payloads = {p: eng.orch.payload(p, now) for p in pairs}
+            payloads = {p: eng.orch.payload(p, now, eng.live_account(p)) for p in pairs}
             for p, pl in payloads.items():          # manual run: the data gate only warns
                 for problem in data_problems(pl, now, s.risk.max_data_staleness_s):
                     print(f"WARNING {p}: {problem}")
             recs = asyncio.run(eng.orch.run_cycle([CycleRequest(p, "manual --once") for p in pairs], as_of=now,
-                                                  payloads=payloads))
+                                                  payloads=payloads, account=eng.live_account(None)))
             for r in recs:
                 print(f"\n=== {r.pair}: {r.status} (mode {r.mode}, {r.provider}/{r.model}, ${r.cost_usd:.4f}, "
                       f"{r.latency_ms} ms) id={r.id}")

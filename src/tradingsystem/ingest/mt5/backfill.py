@@ -27,10 +27,11 @@ from typing import Any, Callable
 import numpy as np
 import pyarrow as pa
 
+from ...core.filelock import FileLock, locks_dir
 from ...core.instruments import Instrument, InstrumentRegistry
 from ...core.logsetup import setup_from_settings
 from ...core.sessions import calendar_for
-from ...core.settings import PathsCfg, Settings, load_settings
+from ...core.settings import Settings, load_settings, system_state_dirs
 from ...core.timeutil import MS_PER_DAY, now_ms
 from ...storage.gaps import KNOWN_GAPS
 from ...storage.parquet_store import ParquetColdStore, arrow_schema, day_start_ms
@@ -50,6 +51,8 @@ MONTH_MS = 31 * MS_PER_DAY
 HOUR_MS = 3_600_000
 LIVE_COLLECTOR = "mt5"
 LIVE_STALE_MS = 5_000        # live heartbeat older than this → the terminal is busy: back off
+SIBLING_DOWN_MS = 10 * 60_000  # another system's live heartbeat older than this → that system is not running
+HEAVY_LOCK_WAIT_S = 120      # a history call waits this long for another system's call, then goes ahead anyway
 LIVE_WAIT_BEFORE_CONNECT_S = 600
 LIVE_WAIT_PER_CHUNK_S = 120
 CONNECT_RETRY_S = 600        # keep retrying initialize() this long before failing the pass (retried later)
@@ -83,13 +86,19 @@ class MT5Backfill:
     def __init__(self, s: Settings) -> None:
         self.s = s
         self.data = s.paths.data()
-        self.appdb = AppDB(self.data / "app.db")
+        self.appdb = AppDB(s.paths.state() / "app.db")
         self.cold = ParquetColdStore(self.data / "cold")
         self.model = ServerTimeModel()
         self.term = MT5Terminal(s.mt5_data_profile())
         reg = InstrumentRegistry.from_settings(s)
         self.instruments = [i for i in reg.all() if i.venue == "mt5"]
         self.progress: dict[str, str] = {}
+        # D-042: the systems of other pairs share this terminal — their live feeds come first too, and only one
+        # history call at a time goes to the terminal across all of them
+        own = s.paths.state().resolve()
+        self.sibling_dbs = [d / "app.db" for d in system_state_dirs(s) if d.resolve() != own]
+        self.heavy_lock = FileLock(locks_dir(s) / "mt5_history.lock")
+        self._lock_warned = False
 
     def status(self, state: str = "backfilling", error: str | None = None) -> None:
         self.appdb.set_status(COLLECTOR, state, error=error, detail=self.progress)
@@ -102,10 +111,20 @@ class MT5Backfill:
 
     # ------------------------------------------------------------------ terminal etiquette
     def _live_healthy(self) -> bool:
+        """Every live MT5 feed on this terminal is healthy: ours, and those of the other running systems."""
         live = next((r for r in self.appdb.statuses() if r["collector"] == LIVE_COLLECTOR), None)
-        if live is None or live["state"] in ("stopped", "error"):
-            return True             # no live poller to protect (an account problem shows in our own connect)
-        return live["state"] in ("live", "market_closed") and now_ms() - int(live["updated_ms"]) <= LIVE_STALE_MS
+        rows = [live] if live is not None else []
+        now = now_ms()
+        for db in self.sibling_dbs:
+            r = _read_live_row(db)
+            if r is not None and now - int(r["updated_ms"]) <= SIBLING_DOWN_MS:
+                rows.append(r)
+        for r in rows:
+            if r["state"] in ("stopped", "error"):
+                continue            # no live poller to protect (an account problem shows in our own connect)
+            if not (r["state"] in ("live", "market_closed") and now - int(r["updated_ms"]) <= LIVE_STALE_MS):
+                return False
+        return True
 
     def _wait_for_live(self, max_s: float) -> None:
         """Wait while the live poller is starting/reconnecting or its heartbeat is stale (BF-08) — the terminal
@@ -149,8 +168,17 @@ class MT5Backfill:
     # ------------------------------------------------------------------ MT5 calls
     def _call(self, what: str, fn: Callable[..., Any], *args: Any) -> np.ndarray | None:
         """ndarray (possibly empty) on success; None when the terminal answered with a non-link error (unverified —
-        never proof of absence); raises MT5CallError when the IPC/terminal link failed."""
-        r = fn(*args)
+        never proof of absence); raises MT5CallError when the IPC/terminal link failed. One history call at a time
+        across every system on this machine (D-042)."""
+        got = self.heavy_lock.acquire(timeout=HEAVY_LOCK_WAIT_S, poll=0.2)
+        if not got and not self._lock_warned:
+            self._lock_warned = True
+            log.warning("another system held the MT5 history lock for %ds — going ahead", HEAVY_LOCK_WAIT_S)
+        try:
+            r = fn(*args)
+        finally:
+            if got:
+                self.heavy_lock.release()
         if r is not None:
             return r
         code, msg = self.term.mt5.last_error()
@@ -431,12 +459,28 @@ class MT5Backfill:
             self.appdb.close()
 
 
+def _read_live_row(db) -> dict | None:
+    """Another system's live MT5 heartbeat (read-only; None when its app.db or row is missing / unreadable)."""
+    if not db.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=2)
+        try:
+            r = con.execute("SELECT state, updated_ms FROM collector_status WHERE collector=?",
+                            (LIVE_COLLECTOR,)).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    return {"state": r[0], "updated_ms": r[1]} if r else None
+
+
 def worker_main(data_dir: str | None, once: bool = False) -> None:
     s = load_settings()
     if data_dir:
-        s = s.model_copy(update={"paths": PathsCfg(data_dir=data_dir, logs_dir=s.paths.logs_dir)})
+        s = s.model_copy(update={"paths": s.paths.model_copy(update={"data_dir": data_dir})})   # keeps the instance
     setup_from_settings("backfill-mt5", s)
-    appdb = AppDB(s.paths.data() / "app.db")
+    appdb = AppDB(s.paths.state() / "app.db")
     worker_loop(lambda: MT5Backfill(s).run(), collector=COLLECTOR, appdb=appdb, daily_hour=DAILY_RUN_UTC_HOUR,
                 once=once, logger=log)
 

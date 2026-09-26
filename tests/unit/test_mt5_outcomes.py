@@ -13,7 +13,7 @@ IN, OUT, BUY, SELL = 0, 1, 0, 1
 
 def backend(orders=(), positions=(), hist=(), deals_by_pos=None, err=(1, "Success")):
     b = object.__new__(MT5Backend)
-    b.magic = 7
+    b.magic, b.adopt_magic, b.own_pairs, b.family, b.pair_by_symbol = 7, None, set(), {7}, {}
     b.t = NS(healthy=lambda: True)
     b.mt5 = NS(orders_get=lambda: orders, positions_get=lambda: positions,
                history_orders_get=lambda a, z: hist, history_deals_get=lambda position: (deals_by_pos or {}).get(position),

@@ -30,6 +30,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from ..ai.budget import usage_db
 from ..analysis.registry import capability_matrix
 from ..core.instruments import InstrumentRegistry
 from ..core.settings import PROJECT_ROOT, Settings, load_settings
@@ -59,8 +60,9 @@ def _rows(con: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
 def create_app(s: Settings) -> FastAPI:
     app = FastAPI(title="Trading System", docs_url=None, redoc_url=None)
     reg = InstrumentRegistry.from_settings(s)
-    data = s.paths.data()
-    app_db = data / "app.db"
+    data = s.paths.data()                      # market data (shared stores)
+    app_db = s.paths.state() / "app.db"         # this system's decisions, status, events
+    usage_path = usage_db(s)                    # AI usage (shared ledger when running as an instance)
     token = os.environ.get(s.api.token_env) or secrets.token_urlsafe(32)
     readers: dict[str, InstrumentReader] = {}
     allowed_origins = {f"http://127.0.0.1:{s.api.port}", f"http://localhost:{s.api.port}"}
@@ -75,7 +77,7 @@ def create_app(s: Settings) -> FastAPI:
         return readers[key]
 
     def snapshot() -> dict:
-        return _shared_snapshot(app_db, pair_names, known)
+        return _shared_snapshot(app_db, pair_names, known, usage_path)
 
     # ------------------------------------------------------------------ pages
     @app.get("/", response_class=HTMLResponse)
@@ -160,7 +162,7 @@ def create_app(s: Settings) -> FastAPI:
 
     @app.get("/api/performance")
     def performance() -> dict:
-        return _performance(app_db)
+        return _performance(app_db, usage_path, s.paths.instance)
 
     @app.get("/api/events")
     def events(limit: int = 200) -> list[dict]:
@@ -258,16 +260,29 @@ def _process_list() -> list[dict]:
     return rows
 
 
-def _shared_snapshot(app_db: Path, pairs: tuple[str, ...] = (), known: set[str] | None = None) -> dict:
+def _shared_snapshot(app_db: Path, pairs: tuple[str, ...] = (), known: set[str] | None = None,
+                     usage_path: Path | None = None) -> dict:
     """One status snapshot per ~second, shared by ``/api/status`` and every WebSocket client (read-only: copy it)."""
     with _SNAP_LOCK:
-        key = (str(app_db), pairs)
+        key = (str(app_db), pairs, str(usage_path))
         if _SNAP_CACHE["key"] != key or now_ms() - _SNAP_CACHE["ts"] >= _SNAP_TTL_MS:
-            _SNAP_CACHE.update(snap=_status_snapshot(app_db, pairs, known), key=key, ts=now_ms())
+            _SNAP_CACHE.update(snap=_status_snapshot(app_db, pairs, known, usage_path), key=key, ts=now_ms())
         return _SNAP_CACHE["snap"]
 
 
-def _status_snapshot(app_db: Path, pairs: tuple[str, ...] = (), known: set[str] | None = None) -> dict:
+def _usage_rows(usage_path: Path, sql: str, params: tuple = ()) -> list[dict]:
+    """AI usage lives in app.db (single system) or in the shared ledger data/shared/ai_usage.db (instances)."""
+    if not usage_path.exists():
+        return []
+    try:
+        with _ro(usage_path) as con:
+            return _rows(con, sql, params)
+    except sqlite3.OperationalError:          # ledger not created yet (no AI call so far)
+        return []
+
+
+def _status_snapshot(app_db: Path, pairs: tuple[str, ...] = (), known: set[str] | None = None,
+                     usage_path: Path | None = None) -> dict:
     out: dict[str, Any] = {"server_time": now_ms(), "server_time_iso": iso(now_ms())}
     if not app_db.exists():
         return out
@@ -292,11 +307,12 @@ def _status_snapshot(app_db: Path, pairs: tuple[str, ...] = (), known: set[str] 
                 det = r[0].pop("execution_detail")
                 r[0]["execution_reason"] = (json.loads(det) or {}).get("reason") if det else None
                 out["latest_decisions"][p] = r[0]
-        day0 = now_ms() // 86_400_000 * 86_400_000
-        u = _rows(con, "SELECT provider, count(*) AS calls, COALESCE(sum(cost_usd),0) AS cost, "
-                       "COALESCE(sum(ok),0) AS ok FROM ai_usage WHERE ts>=? GROUP BY provider", (day0,))
-        out["ai_today"] = u
         out["paper_account"] = _rows(con, "SELECT * FROM paper_account")
+    day0 = now_ms() // 86_400_000 * 86_400_000
+    # the whole account's usage today (every instance shares the subscription's limits)
+    out["ai_today"] = _usage_rows(usage_path or app_db,
+                                  "SELECT provider, count(*) AS calls, COALESCE(sum(cost_usd),0) AS cost, "
+                                  "COALESCE(sum(ok),0) AS ok FROM ai_usage WHERE ts>=? GROUP BY provider", (day0,))
     du = shutil.disk_usage(app_db.anchor)
     out["disk_free_gb"] = round(du.free / 2**30, 1)
     procs = _process_list()
@@ -305,16 +321,21 @@ def _status_snapshot(app_db: Path, pairs: tuple[str, ...] = (), known: set[str] 
     return out
 
 
-def _performance(app_db: Path) -> dict:
+def _performance(app_db: Path, usage_path: Path | None = None, pair: str | None = None) -> dict:
     if not app_db.exists():
         return {}
+    usage_path = usage_path or app_db
+    if pair:
+        cost = _usage_rows(usage_path, "SELECT COALESCE(sum(cost_usd),0) AS total, count(*) AS calls FROM ai_usage "
+                                       "WHERE pair=?", (pair,))
+    else:
+        cost = _usage_rows(usage_path, "SELECT COALESCE(sum(cost_usd),0) AS total, count(*) AS calls FROM ai_usage")
     with _ro(app_db) as con:
         by_status = _rows(con, "SELECT status, decision, count(*) AS n FROM ai_decisions GROUP BY status, decision")
         outcomes = _rows(con, "SELECT outcome, count(*) AS n, COALESCE(sum(outcome_pnl_usd),0) AS pnl FROM ai_decisions "
                               "WHERE outcome IS NOT NULL GROUP BY outcome")
         virtual = _rows(con, "SELECT virtual_outcome, count(*) AS n, COALESCE(avg(virtual_r),0) AS avg_r FROM ai_decisions "
                              "WHERE virtual_outcome IS NOT NULL GROUP BY virtual_outcome")
-        cost = _rows(con, "SELECT COALESCE(sum(cost_usd),0) AS total, count(*) AS calls FROM ai_usage")
         per_pair = _rows(con, "SELECT pair, count(*) AS decisions, SUM(decision!='NO_TRADE') AS trades, "
                               "COALESCE(sum(outcome_pnl_usd),0) AS pnl FROM ai_decisions WHERE status='valid' GROUP BY pair")
     wins = sum(o["n"] for o in outcomes if o["outcome"] == "closed_profit")

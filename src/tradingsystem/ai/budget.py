@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -39,6 +40,15 @@ _DDL = [
 
 class BudgetExceeded(RuntimeError):
     """A call was refused by the rate limiter or the Cost Governor (the cycle must fall back to NO_TRADE)."""
+
+
+def usage_db(settings) -> Path:
+    """Where AI usage is recorded: one ledger shared by every instance (the subscription's limits and the daily
+    request cap are per account, not per pair — D-042), or the single system's app.db."""
+    if settings.paths.instance:
+        settings.paths.shared().mkdir(parents=True, exist_ok=True)
+        return settings.paths.shared() / "ai_usage.db"
+    return settings.paths.state() / "app.db"
 
 
 EXTRA_COLUMNS = (("api_equivalent_usd", "REAL"), ("num_turns", "INTEGER"), ("cache_creation_tokens", "INTEGER"))
@@ -73,10 +83,12 @@ class UsageStore:
                  int(ok), error, res.request_id if res else None, x.get("api_equivalent_usd"), x.get("num_turns"),
                  x.get("cache_creation_input_tokens")))
 
-    def count_since(self, provider: str, since_ms: int) -> int:
+    def count_since(self, provider: str, since_ms: int, pair: str | None = None) -> int:
+        sql, args = "SELECT count(*) FROM ai_usage WHERE provider=? AND ts>=?", [provider, since_ms]
+        if pair:
+            sql, args = sql + " AND pair=?", args + [pair]
         with self._lock:
-            return int(self._con.execute("SELECT count(*) FROM ai_usage WHERE provider=? AND ts>=?",
-                                         (provider, since_ms)).fetchone()[0])
+            return int(self._con.execute(sql, args).fetchone()[0])
 
     def cost_since(self, since_ms: int) -> float:
         with self._lock:
@@ -98,23 +110,36 @@ def month_start(ms: int) -> int:
 
 
 class RateLimiter:
-    """Per-provider RPM spacing (in-process) + RPD (persisted)."""
+    """Per-provider RPM spacing (in-process) + RPD (persisted). ``instance`` (one system per pair, D-042): the
+    ledger is shared, ``rpd`` counts every instance's calls, and this instance may use at most ``share`` of it."""
 
-    def __init__(self, name: str, cfg: AIProviderCfg, usage: UsageStore) -> None:
+    def __init__(self, name: str, cfg: AIProviderCfg, usage: UsageStore, *, instance: str | None = None,
+                 share: float = 1.0) -> None:
         self.name, self.cfg, self.usage = name, cfg, usage
+        self.instance, self.share = instance, share
         self._last: list[float] = []
         self._lock = asyncio.Lock()
+
+    def cap(self) -> int | None:
+        """This system's daily cap: ``rpd``, or its share of it when running as an instance."""
+        if not self.cfg.rpd:
+            return None
+        return max(1, math.ceil(self.cfg.rpd * self.share)) if self.instance else self.cfg.rpd
 
     def remaining_today(self) -> int | None:
         if not self.cfg.rpd:
             return None
-        return max(self.cfg.rpd - self.usage.count_since(self.name, quota_day_start(now_ms(), self.cfg.quota_reset_tz)),
-                   0)
+        day0 = quota_day_start(now_ms(), self.cfg.quota_reset_tz)
+        left = max(self.cfg.rpd - self.usage.count_since(self.name, day0), 0)
+        if self.instance:
+            left = min(left, max(self.cap() - self.usage.count_since(self.name, day0, pair=self.instance), 0))
+        return left
 
     async def acquire(self) -> None:
         left = self.remaining_today()
         if left is not None and left <= 0:
-            raise BudgetExceeded(f"{self.name}: daily request quota ({self.cfg.rpd}) used up")
+            share = f", {self.instance}'s share {self.cap()}" if self.instance else ""
+            raise BudgetExceeded(f"{self.name}: daily request quota ({self.cfg.rpd}{share}) used up")
         if not self.cfg.rpm:
             return
         async with self._lock:

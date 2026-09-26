@@ -111,31 +111,73 @@ def is_supervisor_cmd(cmd: list[str]) -> bool:
     return i > 0 and cmd[i - 1] == "-m" and cmd[i + 1:i + 2] == ["run"] and not _CTL_FLAGS & set(cmd[i + 2:])
 
 
-def other_supervisors(older_s: float | None = None) -> list[int]:
-    """PIDs of other running supervisors of any build (older ones hold no single-instance lock), never ours.
+def cmd_instance(cmd: list[str]) -> str | None:
+    """The pair a ``tradingsystem`` command line runs as (``--instance X`` / ``--instance=X``); None = all pairs."""
+    for i, a in enumerate(cmd):
+        if a == "--instance" and i + 1 < len(cmd):
+            return cmd[i + 1].strip().upper() or None
+        if a.startswith("--instance="):
+            return a.split("=", 1)[1].strip().upper() or None
+    return None
 
-    ``older_s``: only those started at least that long before this process (two new starts racing for the lock
-    must not both give up).
-    """
+
+def _proc_instance(p: psutil.Process, cmd: list[str]) -> str | None:
+    inst = cmd_instance(cmd)
+    if inst is None:                    # started with TS_INSTANCE in its environment instead of --instance
+        try:
+            inst = (p.environ().get("TS_INSTANCE") or "").strip().upper() or None
+        except (psutil.Error, OSError):
+            inst = None
+    return inst
+
+
+def running_supervisors(older_s: float | None = None) -> dict[int, str | None]:
+    """``{pid: instance}`` of other running supervisors of any build (older ones hold no single-instance lock),
+    never ours; instance None = the all-pairs system. ``older_s``: only those started at least that long before this
+    process (two new starts racing for the lock must not both give up)."""
     try:
         me = psutil.Process()
         mine = {me.pid, *(p.pid for p in me.parents()), *(c.pid for c in me.children(recursive=True))}
         born = me.create_time()
     except psutil.Error:
         mine, born = {os.getpid()}, None
-    out = []
+    out: dict[int, str | None] = {}
     for p in psutil.process_iter(["name"]):
         if p.pid in mine or not (p.info.get("name") or "").lower().startswith("python"):
             continue
         try:
-            if not is_supervisor_cmd(p.cmdline()):
+            cmd = p.cmdline()
+            if not is_supervisor_cmd(cmd):
                 continue
             if older_s is not None and born is not None and p.create_time() > born - older_s:
                 continue
+            out[p.pid] = _proc_instance(p, cmd)
         except (psutil.Error, OSError):
             continue
-        out.append(p.pid)
-    return sorted(out)
+    return dict(sorted(out.items()))
+
+
+def conflicts(mine: str | None, other: str | None) -> bool:
+    """D-042: one system per pair may run next to the others; the all-pairs system runs alone (it trades every pair
+    and would double every order and every heartbeat)."""
+    return mine is None or other is None or mine == other
+
+
+def other_supervisors(older_s: float | None = None, *, instance: str | None = None, scope: str = "all") -> list[int]:
+    """PIDs of other running supervisors. ``scope``: ``all`` (any system), ``exact`` (the same system as
+    ``instance``: that pair, or the all-pairs one for None), ``conflict`` (those that may not run next to it)."""
+    found = running_supervisors(older_s)
+    if scope == "exact":
+        return [pid for pid, inst in found.items() if inst == instance]
+    if scope == "conflict":
+        return [pid for pid, inst in found.items() if conflicts(instance, inst)]
+    return list(found)
+
+
+def describe(pids: dict[int, str | None] | list[int]) -> str:
+    """``pid 123 (BTCUSDT), pid 456 (all pairs)`` for messages."""
+    found = pids if isinstance(pids, dict) else {p: running_supervisors().get(p) for p in pids}
+    return ", ".join(f"pid {pid} ({inst or 'all pairs'})" for pid, inst in found.items())
 
 
 def open_rotating(path: Path, max_bytes: int, backups: int) -> IO[bytes]:

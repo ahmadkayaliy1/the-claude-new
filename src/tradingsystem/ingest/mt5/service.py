@@ -23,7 +23,7 @@ import numpy as np
 from ...core.instruments import Instrument, InstrumentRegistry
 from ...core.logsetup import setup_from_settings
 from ...core.sessions import calendar_for
-from ...core.settings import PathsCfg, Settings, load_settings
+from ...core.settings import Settings, load_settings
 from ...core.timeframes import Timeframe
 from ...core.timeutil import MS_PER_DAY, iso, now_ms
 from ...storage.parquet_store import ParquetColdStore
@@ -81,7 +81,7 @@ class MT5LiveService:
     def __init__(self, s: Settings) -> None:
         self.s = s
         self.model = ServerTimeModel()
-        self.appdb = AppDB(s.paths.data() / "app.db")
+        self.appdb = AppDB(s.paths.state() / "app.db")
         self.cold = ParquetColdStore(s.paths.data() / "cold")
         reg = InstrumentRegistry.from_settings(s)
         self.instruments = [i for i in reg.all() if i.venue == "mt5"]
@@ -336,7 +336,7 @@ class MT5LiveService:
 def main(data_dir: str | None = None, backfill: bool = True) -> None:
     s = load_settings()
     if data_dir:
-        s = s.model_copy(update={"paths": PathsCfg(data_dir=data_dir, logs_dir=s.paths.logs_dir)})
+        s = s.model_copy(update={"paths": s.paths.model_copy(update={"data_dir": data_dir})})   # keeps the instance
     setup_from_settings("ingest-mt5", s)
     svc = MT5LiveService(s)
 

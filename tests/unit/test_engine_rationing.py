@@ -118,7 +118,7 @@ def test_cycle_runs_in_the_background_and_the_heartbeat_keeps_going(eng, monkeyp
     monkeypatch.setattr(eng_mod, "data_problems", lambda *a: [])
     gate = asyncio.Event()
 
-    async def run_cycle(queue, as_of, payloads):
+    async def run_cycle(queue, as_of, payloads, account=None):
         await gate.wait()
         return [DecisionRecord(q.pair, "m", q.reason, "invalid") for q in queue]
     monkeypatch.setattr(eng.orch, "run_cycle", run_cycle)

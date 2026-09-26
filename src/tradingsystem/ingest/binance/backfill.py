@@ -25,7 +25,7 @@ import numpy as np
 from ...core.instruments import Instrument, InstrumentRegistry
 from ...core.logsetup import setup_from_settings
 from ...core.sessions import CALENDARS
-from ...core.settings import PathsCfg, Settings, load_settings
+from ...core.settings import Settings, load_settings
 from ...core.timeframes import Timeframe
 from ...core.timeutil import iso, now_ms
 from ...storage.gaps import KNOWN_GAPS, candle_gaps, id_gaps
@@ -75,7 +75,7 @@ class BinanceBackfill:
     def __init__(self, s: Settings) -> None:
         self.s = s
         self.data = s.paths.data()
-        self.appdb = AppDB(self.data / "app.db")
+        self.appdb = AppDB(s.paths.state() / "app.db")
         self.cold = ParquetColdStore(self.data / "cold")
         self.vision = VisionClient(s.binance.vision, self.data / "vision_cache", min_free_gb=s.storage.min_free_disk_gb)
         reg = InstrumentRegistry.from_settings(s)
@@ -83,9 +83,9 @@ class BinanceBackfill:
         b = s.binance
         # leave most of the weight budget to the live service
         # Binance IP limits: spot 6000/min, USDⓈ-M 2400/min — the live service keeps most of its own share
-        self.rest = {"binance_spot": BinanceRest(b.spot_rest, weight_budget_per_min=2000,
+        self.rest = {"binance_spot": BinanceRest(b.spot_rest, weight_budget_per_min=min(2000, b.rest_weight_budget_per_min * 2 // 3),
                                                  retry_deadline_s=REST_RETRY_DEADLINE_S),
-                     "binance_usdm": BinanceRest(b.usdm_rest, weight_budget_per_min=1200,
+                     "binance_usdm": BinanceRest(b.usdm_rest, weight_budget_per_min=min(1200, b.rest_weight_budget_per_min * 2 // 5),
                                                  retry_deadline_s=REST_RETRY_DEADLINE_S)}
         self.progress: dict[str, str] = {}
         self._first_bar: dict[tuple[str, str], int] = {}
@@ -431,9 +431,9 @@ def worker_main(data_dir: str | None, once: bool = False) -> None:
     a pass with transient failures is retried within minutes."""
     s = load_settings()
     if data_dir:
-        s = s.model_copy(update={"paths": PathsCfg(data_dir=data_dir, logs_dir=s.paths.logs_dir)})
+        s = s.model_copy(update={"paths": s.paths.model_copy(update={"data_dir": data_dir})})   # keeps the instance
     setup_from_settings("backfill-binance", s)
-    appdb = AppDB(s.paths.data() / "app.db")
+    appdb = AppDB(s.paths.state() / "app.db")
     worker_loop(lambda: asyncio.run(BinanceBackfill(s).run()), collector=COLLECTOR, appdb=appdb,
                 daily_hour=DAILY_RUN_UTC_HOUR, once=once, logger=log)
 

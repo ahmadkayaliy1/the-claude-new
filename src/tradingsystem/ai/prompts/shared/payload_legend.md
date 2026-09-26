@@ -1,4 +1,4 @@
-<!-- prompt: shared/payload_legend · version 2 -->
+<!-- prompt: shared/payload_legend · version 3 -->
 ## Reading the payload
 
 - Times are UTC and written `MM-DD HH:MM` in the year of `meta.as_of` (another year is written in full); `meta.as_of` is the cycle time. `"none"` means nothing was detected (no divergence, no absorption, no killzone, no pattern). An omitted field means the value is not available — how reliable each analysis is, is stated by `capabilities` and the blocks' `data_quality`.
@@ -7,7 +7,7 @@
 - `timeframes.<tf>.structure.events` rows are `[time, kind, dir, level]` (kind: BOS, CHoCH or sweep).
 - `timeframes.<tf>.zones.fvg` and `.order_blocks` rows are `[dir, top, bottom, formed, fill_pct, touched (1/0), strength_atr, age_bars]`.
 - `capabilities.real` lists the analyses computed from real data; `approx`, `proxy` and `unavailable` map an analysis to the reason it is weaker or missing.
-- `account.equity` is the configured account size; in demo and live mode (`account.mode`) the system sizes with the broker's live equity. Open positions and pending orders are not part of the payload yet.
+- `account` is the live account of this system (`account.mode`: paper, demo or live) as the executor last reported it: `equity`, `balance`, this system's result today `today_pnl_pct` (it stops trading at −`daily_loss_limit_pct`), and the whole account's `account_drawdown_pct` below its peak (every system stops at `account_drawdown_stop_pct`). `open_positions` and `pending_orders` are what the system holds on this pair (`decision` = the first 8 characters of the decision that placed it; `tps` every take profit; `profit_usd` floating). Every BUY or SELL you return is a new order next to them, and the system refuses one in the same direction as a live position or order of this pair. Without `open_positions` the executor was not reporting: `equity` is then the configured size and the holdings are unknown.
 - `market.execution` is the venue that executes orders. Your levels stay in the analysis instrument's prices; the system translates them by `market.basis_exec_minus_analysis` before sending (distances are preserved). `market.execution.costs` gives the venue's spread statistics, stops level, swaps, commission and the stop distances the system accepts (`min_stop_distance`, `max_stop_distance`).
 - `memory` holds the notes you wrote for yourself on the previous cycle for this pair (`notes`), with their time and your decision then.
 - `history[].rejected_by` says who stopped a trade idea: `gate` (the system's risk rules — `gate_reason` lists every failed check in the execution instrument's prices), `broker` or `system` (`reject_reason`).

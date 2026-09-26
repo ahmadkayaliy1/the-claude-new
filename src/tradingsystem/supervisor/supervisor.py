@@ -9,10 +9,13 @@
   suspend / clock jump / loop stall resets every baseline and grants ``RESUME_GRACE_S`` (F2/OPS-05) before
   anyone can be judged stale again. Unreadable heartbeats fail open, loudly.
 * The MT5 terminal is started outside the job/tree and is never killed with a child (OPS-04).
-* One supervisor per data dir (named mutex, OPS-03); own heartbeat in ``data/run/supervisor.json`` and the
+* One supervisor per system (named mutex on its state dir, OPS-03): the all-pairs system (state ``data``) or one
+  system per pair (``--instance BTCUSDT``, state ``data/instances/BTCUSDT``, D-042) — pairs run next to each other,
+  never next to the all-pairs system. Own heartbeat in ``<state>/run/supervisor.json`` and the
   ``collector_status`` row "supervisor" (dashboard); idle sleep blocked while running (H2).
+* Systems sharing one MT5 terminal launch it under a machine-wide file lock (never two copies).
 * Child stdout/stderr → ``logs/<service>.stderr.log`` (rolled at each start); exit events carry its tail.
-* Ctrl+C / STOP file (``data/STOP_ALL``): graceful stop (CTRL_BREAK), then terminate after a timeout.
+* Ctrl+C / STOP file (``<state>/STOP_ALL``): graceful stop (CTRL_BREAK), then terminate after a timeout.
 * ``run --detach | --stop | --status``: see :mod:`.control` (scripts/*.bat, docs/ops_windows.md).
 """
 from __future__ import annotations
@@ -30,8 +33,9 @@ from pathlib import Path
 
 import psutil
 
+from ..core.filelock import FileLock, locks_dir
 from ..core.logsetup import get_redactor, setup_from_settings, setup_logging
-from ..core.settings import PROJECT_ROOT, load_settings
+from ..core.settings import PROJECT_ROOT, Settings, load_settings
 from ..core.timeutil import now_ms
 from . import control, procs
 from .winops import JobObject, acquire_instance, in_job, instance_name, keep_awake, sample_clock, time_gap
@@ -53,6 +57,7 @@ LOOP_S = 5.0
 UNREADABLE_ALERT = 6            # consecutive unreadable heartbeat passes (≈30 s) before an event
 TERMINAL_CHECK_S = 15.0         # how often a missing MT5 terminal is looked for / relaunched
 TERMINAL_RELAUNCH_S = 60.0      # minimum awake time between two launches of the same terminal
+TERMINAL_APPEAR_S = 10.0        # the launch lock is held until the new terminal shows (another system then sees it)
 _STATUS_DDL = ("CREATE TABLE IF NOT EXISTS collector_status (collector TEXT PRIMARY KEY, state TEXT NOT NULL, "
                "last_data_ms INTEGER, last_error TEXT, last_error_ms INTEGER, detail TEXT, updated_ms INTEGER NOT NULL)")
 _EVENTS_DDL = ("CREATE TABLE IF NOT EXISTS ingestion_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, "
@@ -87,10 +92,12 @@ class Supervisor:
     kill_tree = staticmethod(procs.kill_tree)       # spares MT5 terminals (OPS-04)
 
     def __init__(self, services: list[str], data_dir: str | None) -> None:
-        self.s = load_settings()
+        self.s = with_data_dir(load_settings(), data_dir)
         self.cfg = self.s.supervisor
-        self.data = Path(data_dir) if data_dir else self.s.paths.data()
-        self.app_db = self.data / "app.db"
+        self.data = self.s.paths.data()                     # market data (shared by every system)
+        self.state = self.s.paths.state()                   # this system's app.db, run/, STOP_ALL
+        self.state.mkdir(parents=True, exist_ok=True)
+        self.app_db = self.state / "app.db"
         self.children = {n: Child(n, SERVICES[n][0] + (["--data-dir", str(self.data)] if data_dir and n.startswith("ingest") else []),
                                   SERVICES[n][1], SERVICES[n][2]) for n in services}
         self.job = JobObject()
@@ -295,17 +302,25 @@ class Supervisor:
             last = self._term_launch.get(path)
             if last and now - last[0] < TERMINAL_RELAUNCH_S:
                 continue
-            # the scheduled task (Task Scheduler creates it: no parent of ours, no job of ours); if a task start
-            # did not bring it up last time, start it detached instead
-            task = self.cfg.mt5_task if path == data_path and not (last and last[1].startswith("task")) else None
-            via = procs.launch_terminal(path, task)
-            self._term_launch[path] = (now, via)
-            log.warning("MT5 terminal was not running — started it (%s): %s", via, path)
-            self._event("mt5", "terminal_started", f"{via}: {path}")
-            if wait_s:
-                deadline = time.monotonic() + wait_s
+            # every system on this machine checks the same terminal: one launches it, the others see it (D-042)
+            lock = FileLock(locks_dir(self.s) / "mt5_terminal.lock")
+            if not lock.acquire(timeout=wait_s or 0.0):
+                continue                            # another system is starting it right now
+            try:
+                if procs.find_terminals([path])[path]:
+                    continue                        # started by another system meanwhile
+                # the scheduled task (Task Scheduler creates it: no parent of ours, no job of ours); if a task start
+                # did not bring it up last time, start it detached instead
+                task = self.cfg.mt5_task if path == data_path and not (last and last[1].startswith("task")) else None
+                via = procs.launch_terminal(path, task)
+                self._term_launch[path] = (now, via)
+                log.warning("MT5 terminal was not running — started it (%s): %s", via, path)
+                self._event("mt5", "terminal_started", f"{via}: {path}")
+                deadline = time.monotonic() + max(wait_s, TERMINAL_APPEAR_S)
                 while time.monotonic() < deadline and not procs.find_terminals([path])[path]:
                     time.sleep(0.5)
+            finally:
+                lock.release()
 
     def _check_terminal_job(self, path: str, pids: list[int]) -> None:
         inside = [p for p in pids if self.job.handle is not None and in_job(p, self.job.handle)]
@@ -356,15 +371,16 @@ class Supervisor:
                     for c in self.children.values()}
         st = {"pid": os.getpid(), "create_time": self.create_time, "started_ms": self.started_ms,
               "heartbeat_ms": now_ms(), "awake_s": round(self.clock().awake, 3), "data_dir": str(self.data),
+              "instance": self.s.paths.instance, "state_dir": str(self.state),
               "stopping": state != "live", "services": children, "terminals": self.term_info,
               "last_gap": self.last_gap}
         try:
-            control.write_state(self.data, st)
+            control.write_state(self.state, st)
             self._state_err = 0
         except OSError as exc:
             self._state_err += 1
             if self._state_err in (1, 60):
-                log.warning("cannot write %s: %s", control.run_dir(self.data) / control.STATE, exc)
+                log.warning("cannot write %s: %s", control.run_dir(self.state) / control.STATE, exc)
         detail = json.dumps({"pid": os.getpid(), "children": {n: v["pid"] for n, v in children.items()},
                              "restarts": {n: v["restarts"] for n, v in children.items()}, "last_gap": self.last_gap})
         self._db((_STATUS_DDL, ()),
@@ -398,7 +414,7 @@ class Supervisor:
         self._beat("stopped")
 
     def run(self) -> None:
-        stop_file = self.data / "STOP_ALL"
+        stop_file = self.state / "STOP_ALL"
         stop_file.unlink(missing_ok=True)
         awake = self.cfg.keep_awake and keep_awake(True)
         if awake:
@@ -425,15 +441,23 @@ class Supervisor:
                 keep_awake(False)
 
 
+def with_data_dir(s: Settings, data_dir: str | None) -> Settings:
+    """``--data-dir`` moves the data root; the system (``paths.instance``) stays the same."""
+    if not data_dir:
+        return s
+    return s.model_copy(update={"paths": s.paths.model_copy(update={"data_dir": str(data_dir)})})
+
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="tradingsystem run")
+    ap = argparse.ArgumentParser(prog="tradingsystem run", epilog="--instance PAIR (any command): one system for that "
+                                 "pair (D-042), e.g. `run all --detach --instance BTCUSDT`")
     ap.add_argument("target", nargs="?", default="all", help="all | comma-separated services "
                     f"({', '.join(SERVICES)})")
     ap.add_argument("--without", default="", help="comma-separated services to skip")
     ap.add_argument("--data-dir")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--detach", action="store_true", help="start in the background (hidden console) and return")
-    g.add_argument("--stop", action="store_true", help="graceful stop via data/STOP_ALL (also pauses autostart)")
+    g.add_argument("--stop", action="store_true", help="graceful stop via <state>/STOP_ALL (also pauses autostart)")
     g.add_argument("--status", action="store_true", help="show supervisor, services and MT5 terminal status")
     ap.add_argument("--auto", action="store_true", help="with --detach: autostart keep-alive (respects --stop)")
     args = ap.parse_args(argv)
@@ -443,27 +467,30 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         print(f"unknown services: {unknown}")
         return 2
-    s = load_settings()
-    data = Path(args.data_dir) if args.data_dir else s.paths.data()
+    s = with_data_dir(load_settings(), args.data_dir)
+    inst = s.paths.instance
+    state = s.paths.state()
     if args.status:
-        return control.status(data, s)
+        return control.status(state, s)
     if args.stop or args.detach:
         setup_logging("supervisor-ctl", logs_dir=s.paths.logs(), level=s.logging.level, max_bytes=s.logging.max_bytes,
                       backups=s.logging.backups, console=False, secret_env_names=s.secret_env_names())
         if args.stop:
-            return control.stop(data)
+            return control.stop(state, instance=inst)
         run_args = [args.target] + (["--without", args.without] if args.without else []) + \
-                   (["--data-dir", str(data.resolve())] if args.data_dir else [])     # it runs in PROJECT_ROOT
-        return control.detach(run_args, data, s, auto=args.auto)
+                   (["--data-dir", str(s.paths.data().resolve())] if args.data_dir else []) + \
+                   (["--instance", inst] if inst else [])      # it runs in PROJECT_ROOT; the pair is on its command line
+        return control.detach(run_args, state, s, auto=args.auto)
     setup_from_settings("supervisor", s)
-    if not acquire_instance(instance_name("supervisor", data), wait_s=10):
-        log.error("another supervisor is already running for %s — not starting (scripts/status.bat)", data)
+    if not acquire_instance(instance_name("supervisor", state), wait_s=10):
+        log.error("another supervisor is already running for %s — not starting (%s)", state,
+                  control.script("status", inst))
         return 3
-    older = procs.other_supervisors(older_s=1.0)     # an older build holds no lock: never run next to it (OPS-03)
-    if older:
-        log.error("another supervisor (pid %s, older build without the lock) is running — not starting; "
-                  "stop it first (scripts/stop.bat)", older)
+    # an older build holds no lock, and the all-pairs system never runs next to a per-pair one (OPS-03, D-042)
+    found = {pid: i for pid, i in procs.running_supervisors(older_s=1.0).items() if procs.conflicts(inst, i)}
+    if found:
+        log.error("not starting: %s", control.conflict_message(inst, found))
         return 3
-    log.info("supervisor starting: %s", ", ".join(names))
+    log.info("supervisor starting%s: %s", f" for {inst}" if inst else "", ", ".join(names))
     Supervisor(names, args.data_dir).run()
     return 0

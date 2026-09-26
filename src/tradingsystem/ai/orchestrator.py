@@ -92,7 +92,8 @@ class Orchestrator:
         if name not in self._providers:
             prov = make_provider(self.s, name)
             self._providers[name] = prov
-            self._limiters[prov.name] = RateLimiter(prov.name, prov.cfg, self.usage)
+            self._limiters[prov.name] = RateLimiter(prov.name, prov.cfg, self.usage, instance=self.s.paths.instance,
+                                                    share=self.s.ai.instance_max_rpd_share)
         return self._providers[name]
 
     def _set_route(self, name: str, why: str | None) -> None:
@@ -115,11 +116,11 @@ class Orchestrator:
     def quota(self, name: str | None = None) -> tuple[int | None, int | None]:
         """(requests left in the provider's quota day, its daily cap) for ``name`` or the provider in use."""
         lim = self._limiters.get(name or self.route[0])
-        return (lim.remaining_today(), lim.cfg.rpd) if lim else (None, None)
+        return (lim.remaining_today(), lim.cap()) if lim else (None, None)
 
     def default_account(self) -> dict:
         return {"equity": self.s.execution.paper_equity, "currency": "USD", "mode": self.s.execution.mode,
-                "equity_source": "configured paper equity (live balance and open positions are not wired in yet)"}
+                "equity_source": "configured account size"}
 
     def payload(self, pair: str, as_of: int, account: dict | None = None) -> dict:
         """The snapshot the model receives for ``pair`` at ``as_of`` (account block + recent decisions)."""

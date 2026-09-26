@@ -148,6 +148,11 @@ pairs:
         datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics]
         start: {candles: "2025-12-11", agg_trades: "2025-12-11", funding: "2025-12-11", metrics: "2025-12-11"}
 
+instances:                             # D-042: one fully independent system per pair — scripts\start.bat BTCUSDT
+  BTCUSDT: {api_port: 8766, magic_offset: 1}   # own data/instances/<PAIR>/app.db, logs/<PAIR>/, dashboard port,
+  ETHUSDT: {api_port: 8767, magic_offset: 2}   # MT5 magic (execution.magic + offset) → its own 10 %/day limit;
+  XAUUSD:  {api_port: 8768, magic_offset: 3}   # market data (data/hot, data/cold) stays shared, one file per instrument
+
 risk:                                  # D-036 (user, 2026-09-26): never lose more than 10 % in a day ($100 account)
   risk_per_trade_pct: 1.0              # target; with $100 the 0.01-lot minimum usually sets the size
   max_risk_per_trade_pct: 3.0          # a trade whose smallest size risks more is skipped (gold usually)
@@ -158,6 +163,7 @@ risk:                                  # D-036 (user, 2026-09-26): never lose mo
   sl_atr_min_mult: 0.5
   sl_atr_max_mult: 5.0
   max_spread_to_sl_ratio: 0.2
+  account_drawdown_stop_pct: 25        # every instance stops opening trades when the WHOLE account is 25 % below its peak
   min_confidence: 55                   # the gate executes nothing below this (was hard-coded)
   max_recommendation_age_s: 300
   max_data_staleness_s: 120

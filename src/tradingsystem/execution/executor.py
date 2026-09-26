@@ -10,7 +10,12 @@
   of every trade idea are computed on real prices.
 * Each candidate is isolated: claimed atomically ('executing'), a failure never blocks the others (transient errors
   retried with backoff, then rejected), and 'executing' rows left by a crash are reconciled with the backend.
-* Kill switch: file ``data/KILL_SWITCH`` (or config) blocks all new orders.
+* Kill switch: file ``data/KILL_SWITCH`` blocks all new orders of every system, ``data/instances/<PAIR>/KILL_SWITCH``
+  those of one system.
+* One system per pair (D-042): its own MT5 magic (``execution.magic`` + the instance's offset) → its own positions,
+  daily loss and open-trade limits; the other systems' positions count towards the correlated cap; the account-wide
+  drawdown stop (:mod:`.drawdown`) is shared. What it holds is published in its status row (``exposure``) for the
+  dashboard and the model's payload, and the gate refuses a second trade in the direction of a live one.
 """
 from __future__ import annotations
 
@@ -29,12 +34,15 @@ from ..analysis.frames import load_frame
 from ..core.instruments import InstrumentRegistry
 from ..core.logsetup import setup_from_settings
 from ..core.sessions import calendar_for
+from ..core.instruments import _resolve_symbol
 from ..core.settings import Settings, load_settings
 from ..core.timeutil import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, iso, now_ms, parse_date_spec
 from ..ingest.common.appdb import AppDB
 from ..storage.reader import InstrumentReader
 from ..storage.tablespec import spec_for
 from .backends.paper import PaperBackend, Tick
+from .drawdown import AccountPeak
+from .exposure import live_sides
 from .price_mapping import check_basis, translate
 from .risk_gate import ExecContext, evaluate
 
@@ -46,6 +54,24 @@ TICK_CHUNK_MS = MS_PER_HOUR          # paper replay window: bounded memory, inde
 MAX_REPLAY_TICKS = 300_000           # per instrument per loop — a long catch-up resumes on the next loop
 MAX_HANDLE_ATTEMPTS = 5              # transient failures of one decision before it is rejected
 ERROR_HEARTBEAT_MS = 5 * MS_PER_MINUTE   # a loop failing longer stops refreshing its heartbeat → watchdog restart
+PEAK_EVERY_S = 5.0                   # the account peak file is read/updated at most this often by the loop
+
+
+def magics(s: Settings) -> tuple[int, int, set[int]]:
+    """(this system's magic, the all-pairs system's magic, every magic of this project) — D-042."""
+    inst = s.paths.instance
+    base = s.execution.magic - (s.instances[inst].magic_offset if inst and inst in s.instances else 0)
+    return s.execution.magic, base, {base, *(base + i.magic_offset for i in s.instances.values())}
+
+
+def all_pairs_by_symbol(s: Settings, profile: str) -> dict[str, str]:
+    """Execution-account MT5 symbol → pair for every configured pair (enabled here or in another system)."""
+    out = {}
+    for name, pair in s.pairs.items():
+        for icfg in pair.instruments:
+            if icfg.venue == "mt5" and "execution" in icfg.roles:
+                out[_resolve_symbol(icfg, profile)] = name
+    return out
 
 
 class Executor:
@@ -53,7 +79,8 @@ class Executor:
         self.s = s
         self.reg = InstrumentRegistry.from_settings(s)
         self.exec_reg = self.reg             # symbols as named on the execution account (MT5 profile of the mode)
-        data = s.paths.data()
+        data = s.paths.state()
+        data.mkdir(parents=True, exist_ok=True)
         self.app_db = data / "app.db"
         self.appdb = AppDB(self.app_db)
         self.store = DecisionStore(self.app_db, s.config_hash)
@@ -69,8 +96,11 @@ class Executor:
             self.exec_reg = InstrumentRegistry.from_settings(s, mt5_profile=pname)
             term = MT5Terminal(prof)
             self._connect_mt5(term)
-            self.mt5 = MT5Backend(term, s.execution.magic, expected_account_type=prof.account_type,
-                                  pair_by_symbol=self.pair_by_symbol())
+            own, base, family = magics(s)
+            self.mt5 = MT5Backend(term, own, expected_account_type=prof.account_type,
+                                  pair_by_symbol={**all_pairs_by_symbol(s, pname), **self.pair_by_symbol()},
+                                  own_pairs=set(s.enabled_pairs()),
+                                  adopt_magic=base if s.paths.instance else None, family=family)
             self.mt5.assert_account()
         self.attempts: dict[str, tuple[int, int]] = {}     # decision id → (failed attempts, next try ms)
         self.unreconciled: set[str] = set()                # 'executing' rows whose reconciliation failed
@@ -82,6 +112,8 @@ class Executor:
         self.started = now_ms()
         self.mt5_quiet_until = 0
         self.stop = False
+        self.peak: AccountPeak | None = None                # the account's high-water mark (shared by every system)
+        self._peak_at = 0.0
 
     def _connect_mt5(self, term, first_delay_s: float = 5.0) -> None:
         """MT5 may be offline at start-up (terminal starting, reconnecting after a network drop): retry with backoff,
@@ -161,6 +193,31 @@ class Executor:
                 out.append((eq["bid"][j] + eq["ask"][j]) / 2 - (pq["bid"][i] + pq["ask"][i]) / 2)
         return out
 
+    def account_peak(self, acct: dict) -> AccountPeak:
+        """The shared high-water-mark record of this account: the MT5 login, or this system's paper account."""
+        if self.peak is None:
+            key = (f"mt5:{acct.get('server') or self.s.execution.mode}:{acct.get('login') or '?'}" if self.mt5 else
+                   f"paper:{self.s.paths.instance or 'all'}")
+            self.peak = AccountPeak(self.s.paths.shared(), key, self.s.risk.account_drawdown_stop_pct)
+        return self.peak
+
+    def update_peak(self, acct: dict, force: bool = False):
+        """Record the account's equity in the shared peak file (every ``PEAK_EVERY_S`` from the loop, always at
+        gate time) → :class:`.drawdown.PeakState`, or None without a usable equity."""
+        eq = acct.get("equity")
+        if not eq or eq <= 0:
+            return None
+        peak = self.account_peak(acct)
+        if not force and peak.last is not None and time.time() - self._peak_at < PEAK_EVERY_S:
+            return peak.last
+        self._peak_at = time.time()
+        return peak.update(float(eq))
+
+    def kill_switch(self) -> bool:
+        """``data/KILL_SWITCH`` stops every system (scripts/kill_switch_on.bat); ``data/instances/<PAIR>/KILL_SWITCH``
+        stops this instance only."""
+        return (self.s.paths.data() / "KILL_SWITCH").exists() or (self.s.paths.state() / "KILL_SWITCH").exists()
+
     def atr(self, pair: str, as_of: int | None = None) -> float:
         """Decision-TF ATR14 exactly as the snapshot computed it for the model (same bar count, as of the
         recommendation's cycle time), so the stop bounds the model was shown are the ones the gate checks."""
@@ -213,6 +270,7 @@ class Executor:
             basis_ok, basis_reason = bc.ok, bc.reason
             rec_x = translate(rec, bc.basis, exe.contract["tick_size"] if exe.contract else 0.01)
         acct = self.paper.account({**self.marks(), exe.key: eq}) if self.paper else self.mt5.account()
+        dd = self.update_peak(acct, force=True)
         spec = exe.contract or {"contract_size": 1, "volume_min": 0.01, "volume_step": 0.01, "tick_size": 0.01}
         stops, vmax = STOPS_LEVEL_PRICE.get(exe.symbol, 0.0), None
         if self.mt5:                           # the broker's live specs: stops level, volume limits, contract size
@@ -226,7 +284,10 @@ class Executor:
             volume_min=spec["volume_min"], volume_step=spec["volume_step"], volume_max=vmax, equity=acct["equity"],
             open_positions=acct["open_positions"], open_risk_pct_by_pair=acct.get("open_risk_pct_by_pair", {}),
             realized_pnl_today_usd=acct.get("realized_today_usd", 0.0), unrealized_pnl_usd=acct.get("unrealized_usd", 0.0),
-            kill_switch=(self.s.paths.data() / "KILL_SWITCH").exists(), basis_ok=basis_ok, basis_reason=basis_reason)
+            kill_switch=self.kill_switch(), basis_ok=basis_ok, basis_reason=basis_reason,
+            sibling_risk_pct_by_pair=acct.get("sibling_risk_pct_by_pair", {}),
+            live_sides=live_sides(acct.get("exposure") or [], pair),
+            account_drawdown_pct=dd.drawdown_pct if dd else None, account_drawdown_tripped=bool(dd and dd.tripped))
         gate = evaluate(rec_x, pair, ctx, self.s.risk, self.s.risk.correlated_groups,
                         min_confidence=self.s.risk.min_confidence)
         detail = {"gate": [{"check": n, "ok": ok, "detail": d} for n, ok, d in gate.checks],
@@ -490,16 +551,30 @@ class Executor:
                     last_virtual = t0
                 now = now_ms()
                 self.loop_errors = [t for t in self.loop_errors if now - t < 5 * MS_PER_MINUTE]
-                self.appdb.set_status("executor", "live", last_data_ms=now, error="" if self.clear_error else None, detail={
-                    "mode": self.mode, "trigger": self.s.execution.trigger, "equity": acct.get("equity"),
-                    "open_positions": acct.get("open_positions"), "open_orders": acct.get("open_orders"),
-                    "errors_last_5min": len(self.loop_errors),
-                    "kill_switch": (self.s.paths.data() / "KILL_SWITCH").exists()})
+                self.appdb.set_status("executor", "live", last_data_ms=now, error="" if self.clear_error else None,
+                                      detail=self.status_detail(acct))
                 self.error_since, self.clear_error = None, False
             except Exception as exc:  # noqa: BLE001
                 log.exception("executor loop error")
                 self._loop_failed(exc)
             time.sleep(max(0.2, 1.0 - (time.time() - t0)))
+
+    def status_detail(self, acct: dict) -> dict:
+        """The executor's status row: the live account of this system and what it holds (dashboard, and the
+        ``account`` block of the model's payload — :meth:`..analysis.engine.Engine.live_account`)."""
+        eq = acct.get("equity")
+        today = (acct.get("realized_today_usd") or 0.0) + (acct.get("unrealized_usd") or 0.0)
+        try:
+            dd = self.update_peak(acct)
+        except Exception:  # noqa: BLE001 — the status row must not fail on the shared peak file
+            log.exception("account peak update failed")
+            dd = None
+        return {"mode": self.mode, "trigger": self.s.execution.trigger, "equity": eq, "balance": acct.get("balance"),
+                "currency": acct.get("currency", "USD"), "open_positions": acct.get("open_positions"),
+                "open_orders": acct.get("open_orders"),
+                "today_pnl_pct": round(today / eq * 100, 2) if eq else None,
+                "exposure": acct.get("exposure") or [], "account_drawdown": dd.as_detail() if dd else None,
+                "errors_last_5min": len(self.loop_errors), "kill_switch": self.kill_switch()}
 
     def _loop_failed(self, exc: Exception) -> None:
         """Report a failing loop — but only for ERROR_HEARTBEAT_MS: a loop that keeps failing stops refreshing its

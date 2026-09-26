@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from tradingsystem.core.filelock import FileLock
 from tradingsystem.core.instruments import InstrumentRegistry
 from tradingsystem.core.sessions import CALENDARS
 from tradingsystem.core.settings import load_settings
@@ -102,6 +103,7 @@ def bf(tmp_path, settings, monkeypatch):
     b.term = FakeTerm()
     b.instruments = [i for i in InstrumentRegistry.from_settings(settings).all() if i.venue == "mt5"]
     b.progress = {}
+    b.sibling_dbs, b.heavy_lock, b._lock_warned = [], FileLock(tmp_path / "history.lock"), False
     b.clock = clock
     return b
 

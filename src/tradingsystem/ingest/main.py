@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ..core.instruments import InstrumentRegistry
 from ..core.logsetup import setup_from_settings
-from ..core.settings import PathsCfg, Settings, load_settings
+from ..core.settings import Settings, load_settings
 
 log = logging.getLogger("ingest")
 
@@ -22,7 +22,7 @@ log = logging.getLogger("ingest")
 def _settings(data_dir: str | None) -> Settings:
     s = load_settings()
     if data_dir:
-        s = s.model_copy(update={"paths": PathsCfg(data_dir=data_dir, logs_dir=s.paths.logs_dir)})
+        s = s.model_copy(update={"paths": s.paths.model_copy(update={"data_dir": data_dir})})   # keeps the instance
     return s
 
 
@@ -32,7 +32,7 @@ def run_binance(data_dir: str | None = None, backfill: bool = True) -> None:
 
     s = _settings(data_dir)
     setup_from_settings("ingest-binance", s)
-    appdb = AppDB(s.paths.data() / "app.db")
+    appdb = AppDB(s.paths.state() / "app.db")
     svc = BinanceLiveService(s, InstrumentRegistry.from_settings(s), appdb)
     keeper = keeper_done = None
     if backfill:                  # restarted with backoff if it ever dies (BF-03)

@@ -1,8 +1,10 @@
 """``run --detach | --stop | --status``: start, stop and inspect the supervisor (scripts/*.bat, Task Scheduler).
 
-``data/run/supervisor.json`` is rewritten by the supervisor every loop: pid, heartbeat on the system-wide *awake*
+Every function takes the system's *state* directory (``Settings.paths.state()``): ``data`` for the all-pairs
+system, ``data/instances/<PAIR>`` for one system per pair (D-042).
+``<state>/run/supervisor.json`` is rewritten by the supervisor every loop: pid, heartbeat on the system-wide *awake*
 clock (sleep never makes it look hung), children, MT5 terminals, last suspend/clock jump.
-``data/run/manual_stop`` = the user stopped it: the autostart keep-alive (``--detach --auto``) then leaves the
+``<state>/run/manual_stop`` = the user stopped it: the autostart keep-alive (``--detach --auto``) then leaves the
 system down until ``--detach`` (scripts/start.bat) is run by hand.
 """
 from __future__ import annotations
@@ -93,9 +95,26 @@ def _say(code: int | None, msg: str, *, quiet: bool = False) -> int | None:
     return code
 
 
-def _running(name: str) -> bool:
-    """A supervisor runs: the lock is held, or an older build (no lock) is found by its command line."""
-    return instance_running(name) or bool(procs.other_supervisors())
+def _running(name: str, instance: str | None = None) -> bool:
+    """This system's supervisor runs: the lock is held, or an older build (no lock) is found by its command line."""
+    return instance_running(name) or bool(procs.other_supervisors(instance=instance, scope="exact"))
+
+
+def script(name: str, instance: str | None) -> str:
+    """How the user runs a script for this system: ``scripts\\start.bat`` or ``scripts\\start.bat BTCUSDT``."""
+    return f"scripts\\{name}.bat" + (f" {instance}" if instance else "")
+
+
+def conflict_message(instance: str | None, found: dict[int, str | None]) -> str:
+    """Why this system may not start next to the supervisors in ``found`` (see :func:`procs.conflicts`)."""
+    if instance is None and any(v is not None for v in found.values()):
+        return (f"per-pair systems are running ({procs.describe(found)}) - the all-pairs system cannot run next to "
+                "them; stop them first (scripts\\stop_all.bat)")
+    if instance is not None and any(v is None for v in found.values()):
+        return (f"the all-pairs system is running ({procs.describe(found)}) - stop it first (scripts\\stop.bat), "
+                "then start one system per pair")
+    return (f"a supervisor without the single-instance lock (older build, {procs.describe(found)}) is running - "
+            f"stop it first with {script('stop', instance)}")
 
 
 def _wait(cond: Callable[[], bool], timeout: float, step: float = 0.5) -> bool:
@@ -126,10 +145,11 @@ def detach(run_args: list[str], data: Path, s: Settings, *, auto: bool) -> int:
 
     ``auto`` (Task Scheduler keep-alive): respect a manual stop; replace a supervisor whose heartbeat is dead.
     """
+    inst = s.paths.instance
     name = instance_name("supervisor", data)
     hold = run_dir(data) / HOLD
     if auto and hold.exists():
-        return _say(0, "supervisor held: stopped by the user (scripts/start.bat resumes it)")
+        return _say(0, f"supervisor held: stopped by the user ({script('start', inst)} resumes it)")
     if instance_running(name):
         st = read_state(data)
         proc, age = state_process(st), heartbeat_age(st)
@@ -141,10 +161,9 @@ def detach(run_args: list[str], data: Path, s: Settings, *, auto: bool) -> int:
         if not _wait(lambda: not instance_running(name), 30):
             return _say(1, "the old supervisor still holds the single-instance lock - see logs/supervisor.jsonl")
     else:
-        older = procs.other_supervisors()
-        if older:
-            return _say(1, f"a supervisor without the single-instance lock (older build, pid {older}) is running - "
-                           "stop it first with scripts/stop.bat", quiet=auto)
+        found = {pid: i for pid, i in procs.running_supervisors().items() if procs.conflicts(inst, i)}
+        if found:
+            return _say(1, conflict_message(inst, found), quiet=auto)
     if not auto:
         hold.unlink(missing_ok=True)
     out = procs.open_rotating(s.paths.logs() / "supervisor.stderr.log", s.supervisor.child_log_max_bytes,
@@ -160,22 +179,24 @@ def detach(run_args: list[str], data: Path, s: Settings, *, auto: bool) -> int:
     while time.monotonic() < deadline:
         st = read_state(data)
         if st and int(st.get("heartbeat_ms", 0)) >= t0 and not st.get("stopping"):
-            return _say(0, f"supervisor started (pid {st.get('pid')}) - dashboard http://{s.api.host}:{s.api.port}")
+            return _say(0, f"supervisor{' ' + inst if inst else ''} started (pid {st.get('pid')}) - dashboard "
+                           f"http://{s.api.host}:{s.api.port}")
         code = p.poll()
         if code is not None:
             if code == 3:
                 return _say(0, "supervisor already running (another start won the race)")
-            return _say(1, f"supervisor exited at start (code {code}) - see logs/supervisor.stderr.log and "
-                           "logs/supervisor.jsonl")
+            logs = s.paths.logs()
+            return _say(1, f"supervisor exited at start (code {code}) - see {logs / 'supervisor.stderr.log'} and "
+                           f"{logs / 'supervisor.jsonl'}")
         time.sleep(0.5)
-    return _say(1, f"no supervisor heartbeat after {START_WAIT_S:.0f}s - see logs/supervisor.jsonl")
+    return _say(1, f"no supervisor heartbeat after {START_WAIT_S:.0f}s - see {s.paths.logs() / 'supervisor.jsonl'}")
 
 
-def stop(data: Path, *, timeout: float = STOP_WAIT_S) -> int:
-    """Graceful stop via ``data/STOP_ALL`` (also pauses autostart); kills the supervisor tree after ``timeout``.
+def stop(data: Path, *, instance: str | None = None, timeout: float = STOP_WAIT_S) -> int:
+    """Graceful stop via ``<state>/STOP_ALL`` (also pauses autostart); kills the supervisor tree after ``timeout``.
 
     STOP_ALL is written even when no guarded supervisor runs (an older build without the lock honours it too;
-    the next start removes it).
+    the next start removes it). Only this system is stopped: ``instance`` (a pair) or the all-pairs one (None).
     """
     d = run_dir(data)
     d.mkdir(parents=True, exist_ok=True)
@@ -183,19 +204,21 @@ def stop(data: Path, *, timeout: float = STOP_WAIT_S) -> int:
     stop_file = Path(data) / "STOP_ALL"
     stop_file.touch()
     name = instance_name("supervisor", data)
-    if not _running(name):
-        return _say(0, "supervisor is not running (autostart paused until scripts/start.bat)")
-    _say(None, "stop requested - waiting for the services to shut down ...")
-    if _wait(lambda: not _running(name), timeout, 1.0):
-        return _say(0, "supervisor stopped (autostart paused until scripts/start.bat)")
+    who = f"supervisor {instance}" if instance else "supervisor"
+    resume = f"autostart paused until {script('start', instance)}"
+    if not _running(name, instance):
+        return _say(0, f"{who} is not running ({resume})")
+    _say(None, f"stop requested ({who}) - waiting for the services to shut down ...")
+    if _wait(lambda: not _running(name, instance), timeout, 1.0):
+        return _say(0, f"{who} stopped ({resume})")
     proc = state_process(read_state(data))
-    pids = [proc.pid] if proc is not None else procs.other_supervisors()
+    pids = [proc.pid] if proc is not None else procs.other_supervisors(instance=instance, scope="exact")
     if not pids:
         return _say(1, f"still running after {timeout:.0f}s and its pid is unknown - see logs/supervisor.jsonl")
     _say(None, f"no clean exit after {timeout:.0f}s - killing supervisor pid {pids} and its services")
     for pid in pids:
         procs.kill_tree(pid)
-    ok = _wait(lambda: not _running(name), 20)
+    ok = _wait(lambda: not _running(name, instance), 20)
     stop_file.unlink(missing_ok=True)
     return _say(0 if ok else 1, "supervisor killed" if ok else "could not stop the supervisor")
 
@@ -215,13 +238,16 @@ def _collectors(app_db: Path) -> list[tuple]:
 
 def status(data: Path, s: Settings) -> int:
     """Human summary: supervisor, services, MT5 terminal(s), collectors, dashboard URL. Read-only."""
+    inst = s.paths.instance
     st, running = read_state(data), instance_running(instance_name("supervisor", data))
-    older = [] if running else procs.other_supervisors()
+    others = procs.running_supervisors()
+    older = [] if running else [pid for pid, i in others.items() if i == inst]
     age = heartbeat_age(st)
-    out: list[str] = []
+    out: list[str] = [f"system     : {inst + ' (one system for this pair)' if inst else 'all pairs'}  "
+                      f"state {data}  logs {s.paths.logs()}"]
     if older:
         out.append(f"supervisor : running WITHOUT the single-instance lock (older build), pid {older} - "
-                   "restart it: scripts/stop.bat then scripts/start.bat")
+                   f"restart it: {script('stop', inst)} then {script('start', inst)}")
     elif running and st:
         hung = "  <-- NO HEARTBEAT (hung?)" if age is not None and age > 60 else ""
         out.append(f"supervisor : running, pid {st.get('pid')}, up {_dur((now_ms() - st['started_ms']) / 1000)}, "
@@ -234,7 +260,10 @@ def status(data: Path, s: Settings) -> int:
     else:
         out.append("supervisor : running (no state file yet)" if running else "supervisor : not running")
     if (run_dir(data) / HOLD).exists():
-        out.append("autostart  : paused (stopped by the user; scripts/start.bat resumes it)")
+        out.append(f"autostart  : paused (stopped by the user; {script('start', inst)} resumes it)")
+    rest = {pid: i for pid, i in others.items() if i != inst}
+    if rest:
+        out.append(f"other      : {procs.describe(rest)}")
     paths = {s.mt5_data_profile().terminal_path}
     if s.execution.mode in ("demo", "live"):
         paths.add(s.mt5.profiles[s.mt5.execution_profile_by_mode[s.execution.mode]].terminal_path)
