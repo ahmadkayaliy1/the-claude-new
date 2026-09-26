@@ -40,6 +40,8 @@ from .risk_gate import ExecContext, evaluate
 
 log = logging.getLogger("executor")
 STOPS_LEVEL_PRICE = {"XAUUSD@": 0.25, "BTCUSD@": 25.0, "ETHUSD@": 2.0}   # P1.5 (stops_level × point); MT5 backend reads live
+MT5_SETTLE_MS = 3_000          # after an MT5 placement, before the next candidate is gated (broker listing lag)
+SETTLE_LOOKBACK_DAYS = 45      # executed decisions older than this are no longer polled for their outcome
 TICK_CHUNK_MS = MS_PER_HOUR          # paper replay window: bounded memory, indexed [start, end) time-range reads
 MAX_REPLAY_TICKS = 300_000           # per instrument per loop — a long catch-up resumes on the next loop
 MAX_HANDLE_ATTEMPTS = 5              # transient failures of one decision before it is rejected
@@ -78,6 +80,7 @@ class Executor:
         self.clear_error = True                            # first healthy loop clears a stale last_error
         self._warned: set[str] = set()
         self.started = now_ms()
+        self.mt5_quiet_until = 0
         self.stop = False
 
     def pair_by_symbol(self) -> dict[str, str]:
@@ -210,7 +213,7 @@ class Executor:
                   "executed_levels": {"entry": gate.entry, "stop_loss": rec_x["stop_loss"],
                                       "take_profits": [t["price"] for t in rec_x["take_profits"]]},
                   "translation": rec_x.get("price_reference_translated"), "mode": self.mode,
-                  "lots": gate.size.lots if gate.size else None,
+                  "equity_at_entry": acct["equity"], "lots": gate.size.lots if gate.size else None,
                   "risk_pct": round(gate.size.risk_pct, 3) if gate.size else None, "rr_exec": gate.rr_exec}
         if not gate.approved:
             detail["reason"] = "; ".join(gate.failures())
@@ -228,8 +231,14 @@ class Executor:
         else:
             res = self.mt5.place(decision_id=did, symbol=exe_symbol, rec=rec_x, lots=gate.size.lots, entry=gate.entry,
                                  dry_run=False)
+            # the broker lists a new position/order a moment later: no second trade may be gated against an account
+            # snapshot that does not show this one yet (exposure caps, worst-case daily loss)
+            self.mt5_quiet_until = now_ms() + MT5_SETTLE_MS
         detail["backend"] = res
-        self.store.set_execution_state(did, "executed" if res.get("ok") else "rejected", detail)
+        partial = not res.get("ok") and bool(res.get("placed"))
+        if partial:              # some legs are live at the broker: executed (settled from the history), not rejected
+            detail["partial"] = f"{len(res['placed'])} leg(s) placed before: {res.get('reason')}"
+        self.store.set_execution_state(did, "executed" if res.get("ok") or partial else "rejected", detail)
         self.appdb.add_event("executor", "order" if res.get("ok") else "order_failed",
                              f"{self.mode} {pair} {did[:8]}: {res.get('reason') or res.get('legs') or res.get('placed')}"[:300])
         log.info("%s %s → %s: %s", pair, did[:8], self.mode, "placed" if res.get("ok") else res.get("reason"))
@@ -288,6 +297,8 @@ class Executor:
         """Handle every candidate in isolation: one failing decision never blocks or starves the others."""
         now = now_ms()
         for cand in self.candidates():
+            if now_ms() < self.mt5_quiet_until:
+                return                          # an MT5 order was just placed: the next candidate waits (see handle)
             n, next_ms = self.attempts.get(cand["id"], (0, 0))
             if now < next_ms:
                 continue
@@ -371,13 +382,20 @@ class Executor:
         + commission + swap from the deal history). A terminal that cannot be asked settles nothing (retried)."""
         con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True, timeout=10)
         try:
-            rows = con.execute("SELECT id, ts, pair FROM ai_decisions WHERE execution_state='executed' AND outcome IS NULL "
-                               "AND ts>=?", (now_ms() - 14 * 86_400_000,)).fetchall()
+            rows = con.execute("SELECT id, ts, pair, execution_detail FROM ai_decisions WHERE execution_state='executed' "
+                               "AND outcome IS NULL AND json_extract(execution_detail,'$.mode')=? AND ts>=?",
+                               (self.mode, now_ms() - SETTLE_LOOKBACK_DAYS * 86_400_000)).fetchall()
         finally:
             con.close()
-        for did, ts, pair in rows:
+        for did, ts, pair, dj in rows:
+            detail = json.loads(dj) if dj else {}
+            legs = {x["comment"] for x in ((detail.get("backend") or {}).get("placed") or []) if x.get("comment")}
+            if now_ms() - ts > (SETTLE_LOOKBACK_DAYS - 1) * 86_400_000 and did not in self._warned:
+                self._warned.add(did)
+                log.warning("%s %s: still unsettled after %d days — polling stops soon", pair, did[:8],
+                            SETTLE_LOOKBACK_DAYS - 1)
             try:
-                r = self.mt5.decision_result(did, since_s=ts // 1000 - 86_400)
+                r = self.mt5.decision_result(did, since_s=ts // 1000 - 86_400, legs=legs or None)
             except Exception as exc:  # noqa: BLE001
                 log.warning("outcome of %s not readable yet: %s", did[:8], exc)
                 continue
@@ -388,12 +406,11 @@ class Executor:
                 self.appdb.add_event("executor", "outcome", f"{pair} {did[:8]}: not filled (expired/cancelled)")
                 continue
             pnl = r["pnl_usd"]
-            balance = self.mt5.t.account().balance
-            base = balance - pnl if balance - pnl > 0 else balance
+            base = detail.get("equity_at_entry") or (self.mt5.t.account().balance - pnl)
             pcfg = self.s.pairs.get(pair)
             pips = r["move"] / pcfg.pip_size if r["move"] is not None and pcfg else None
             outcome = "closed_profit" if pnl > 0 else "closed_loss" if pnl < 0 else "closed_breakeven"
-            self.store.set_outcome(did, outcome, pnl, round(pnl / base * 100, 3) if base else None,
+            self.store.set_outcome(did, outcome, pnl, round(pnl / base * 100, 3) if base and base > 0 else None,
                                    round(pips, 1) if pips is not None else None)
             self.appdb.add_event("executor", "outcome", f"{pair} {did[:8]}: {outcome} {pnl:+.2f} USD")
             log.info("%s %s settled at the broker: %s %+.2f USD", pair, did[:8], outcome, pnl)

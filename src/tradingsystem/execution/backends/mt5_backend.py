@@ -55,27 +55,33 @@ class MT5Backend:
     def account(self, marks=None) -> dict:
         """Same contract as ``PaperBackend.account`` (the executor's risk gate reads these keys): our positions and
         pending orders (by magic) → open decisions, SL risk % of equity by *pair*, floating PnL, realised today."""
+        # fail closed: a terminal that cannot list positions / orders / today's deals raises (the gate then never
+        # sees "no positions, no risk, no loss today" — the daily limit and exposure caps depend on these, D-036)
         a = self.t.account()
         m = self.mt5
-        positions = [p for p in (m.positions_get() or []) if p.magic == self.magic]
-        orders = [o for o in (m.orders_get() or []) if o.magic == self.magic]
+        positions = [p for p in self._ask("positions", m.positions_get()) if p.magic == self.magic]
+        orders = [o for o in self._ask("orders", m.orders_get()) if o.magic == self.magic]
         buy_orders = {m.ORDER_TYPE_BUY, m.ORDER_TYPE_BUY_LIMIT, m.ORDER_TYPE_BUY_STOP}
         risk_usd: dict[str, float] = {}
 
         def add_risk(symbol: str, buy: bool, volume: float, price: float, sl: float) -> None:
-            loss = m.order_calc_profit(m.ORDER_TYPE_BUY if buy else m.ORDER_TYPE_SELL, symbol, volume, price, sl) or 0.0
             pair = self._pair(symbol)
+            if not sl:           # never ours (every leg carries an SL) — unbounded risk: counts as the whole equity
+                risk_usd[pair] = risk_usd.get(pair, 0.0) + max(a.equity, 0.0)
+                return
+            loss = m.order_calc_profit(m.ORDER_TYPE_BUY if buy else m.ORDER_TYPE_SELL, symbol, volume, price, sl)
+            if loss is None:
+                raise RuntimeError(f"MT5 order_calc_profit failed for {symbol} ({m.last_error()})")
             risk_usd[pair] = risk_usd.get(pair, 0.0) + max(0.0, -loss)
 
         for p in positions:
-            if p.sl:
-                add_risk(p.symbol, p.type == m.POSITION_TYPE_BUY, p.volume, p.price_open, p.sl)
+            add_risk(p.symbol, p.type == m.POSITION_TYPE_BUY, p.volume, p.price_open, p.sl)
         for o in orders:
-            if o.sl:
-                add_risk(o.symbol, o.type in buy_orders, o.volume_current, o.price_open, o.sl)
+            add_risk(o.symbol, o.type in buy_orders, o.volume_current, o.price_open, o.sl)
         today = now_ms() // 86_400_000 * 86_400_000
-        deals = m.history_deals_get(self.model.utc_to_server(today) // 1000, int(time.time()) + 86_400) or []
-        realized = sum(d.profit + d.commission + d.swap for d in deals if d.magic == self.magic)
+        deals = self._ask("today's deals",
+                          m.history_deals_get(self.model.utc_to_server(today) // 1000, int(time.time()) + 86_400))
+        realized = sum(d.profit + d.commission + d.swap + getattr(d, "fee", 0.0) for d in deals if d.magic == self.magic)
         with_pos = {p.comment.rsplit(":", 1)[0] for p in positions}
         with_ord = {o.comment.rsplit(":", 1)[0] for o in orders}
         return {"mode": self.expected, "currency": a.currency, "balance": a.balance, "equity": a.equity,
@@ -236,12 +242,16 @@ class MT5Backend:
             return ()
         return value
 
-    def decision_result(self, decision_id: str, since_s: int) -> dict | None:
-        """A decision's real result from the broker's own records: None while any of its legs is still a pending
-        order or an open position (or its orders are not in the history yet); else ``filled`` (any leg entered),
-        ``pnl_usd`` (profit + commission + swap + fee of every deal of its positions), ``move`` (volume-weighted
-        price move in the trade's favour) and ``volume``. Raises when the terminal cannot be asked."""
+    def decision_result(self, decision_id: str, since_s: int, legs: set[str] | None = None) -> dict | None:
+        """A decision's real result from the broker's own records, or None while it cannot be final: a leg is
+        still a pending order or an open position, a leg tag recorded at placement (``legs``) is not in the history
+        yet, a position's closing deals do not yet cover its opening volume (history still syncing after a
+        relaunch), or the terminal is not connected. Else ``filled`` (any leg entered), ``pnl_usd`` (profit +
+        commission + swap + fee of every deal of its positions), ``move`` (volume-weighted price move in the trade's
+        favour) and ``volume``. Raises when the terminal cannot be asked."""
         m, prefix = self.mt5, f"ts:{decision_id[:20]}:"
+        if not self.t.healthy():
+            return None
         until_s = int(time.time()) + 86_400
         pending = self._ask("orders", m.orders_get())
         open_pos = self._ask("positions", m.positions_get())
@@ -251,16 +261,17 @@ class MT5Backend:
         if any(o.comment.startswith(prefix) for o in pending) or \
                 any(p.identifier in pids or p.comment.startswith(prefix) for p in open_pos):
             return None
-        if not placed:
+        if not placed or (legs and not legs <= {o.comment for o in placed}):
             return None
         pnl, move_vol, vol_out = 0.0, 0.0, 0.0
         for pid in pids:
             deals = self._ask(f"deals of position {pid}", m.history_deals_get(position=pid))
-            pnl += sum(d.profit + d.commission + d.swap + getattr(d, "fee", 0.0) for d in deals)
             ins = [d for d in deals if d.entry == m.DEAL_ENTRY_IN]
             outs = [d for d in deals if d.entry in (m.DEAL_ENTRY_OUT, m.DEAL_ENTRY_OUT_BY)]
-            if not ins or not outs:
-                continue
+            v_in, v_out = sum(d.volume for d in ins), sum(d.volume for d in outs)
+            if not ins or v_out + 1e-9 < v_in:
+                return None                      # opening deal missing or not fully closed in the history yet
+            pnl += sum(d.profit + d.commission + d.swap + getattr(d, "fee", 0.0) for d in deals)
             buy = ins[0].type == m.DEAL_TYPE_BUY
             p_in = sum(d.price * d.volume for d in ins) / sum(d.volume for d in ins)
             v = sum(d.volume for d in outs)
