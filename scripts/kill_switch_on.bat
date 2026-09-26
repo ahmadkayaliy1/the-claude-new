@@ -12,7 +12,7 @@ set "NOPAUSE="
 :args
 if "%~1"=="" goto run
 if /i "%~1"=="/nopause" (set "NOPAUSE=1") else (set "PAIR=%~1")
-shift
+shift /1
 goto args
 :run
 if defined PAIR (

@@ -55,7 +55,12 @@ MAX_REPLAY_TICKS = 300_000           # per instrument per loop — a long catch-
 MAX_HANDLE_ATTEMPTS = 5              # transient failures of one decision before it is rejected
 ERROR_HEARTBEAT_MS = 5 * MS_PER_MINUTE   # a loop failing longer stops refreshing its heartbeat → watchdog restart
 PEAK_EVERY_S = 5.0                   # the account peak file is read/updated at most this often by the loop
-PLACEMENT_LOCK_WAIT_S = 30.0         # MT5: gate + placement of one system at a time on the account (D-042)
+PLACEMENT_LOCK_WAIT_S = 20.0         # MT5: gate + placement of one system at a time on the account (D-042)
+
+
+class PlacementBusy(RuntimeError):
+    """Another system holds the MT5 placement lock: the candidate stays queued and the pass ends (the heartbeat
+    keeps going; this is not a failed attempt)."""
 
 
 def magics(s: Settings) -> tuple[int, int, set[int]]:
@@ -264,10 +269,14 @@ class Executor:
             return
         with FileLock(locks_dir(self.s) / "mt5_placement.lock").hold(timeout=PLACEMENT_LOCK_WAIT_S) as got:
             if not got:
-                raise RuntimeError(f"MT5 placement lock busy for {PLACEMENT_LOCK_WAIT_S:.0f}s (another system is "
-                                   "placing) - retried")
-            if self._handle(cand):
-                time.sleep(MT5_SETTLE_MS / 1000)   # the broker lists the new order before another system gates
+                raise PlacementBusy(f"MT5 placement lock busy for {PLACEMENT_LOCK_WAIT_S:.0f}s (another system is "
+                                    "placing) - retried on the next pass")
+            self._placing = False
+            try:
+                self._handle(cand)
+            finally:
+                if self._placing:                  # also when placing raised after some legs reached the broker
+                    time.sleep(MT5_SETTLE_MS / 1000)   # the broker lists the new order before another system gates
 
     def _handle(self, cand: dict) -> bool:
         """True when an order reached the backend (placed or partly placed)."""
@@ -337,6 +346,7 @@ class Executor:
                                    entry=gate.entry, contract_size=spec["contract_size"],
                                    volume_step=spec["volume_step"], volume_min=spec["volume_min"], quote=eq)
         else:
+            self._placing = True
             res = self.mt5.place(decision_id=did, symbol=exe_symbol, rec=rec_x, lots=gate.size.lots, entry=gate.entry,
                                  dry_run=False)
             # the broker lists a new position/order a moment later: no second trade may be gated against an account
@@ -414,6 +424,9 @@ class Executor:
             try:
                 self.handle(cand)
                 self.attempts.pop(cand["id"], None)
+            except PlacementBusy as exc:
+                log.warning("%s %s: %s", cand["pair"], cand["id"][:8], exc)
+                return                          # every other candidate would wait for the same lock
             except Exception as exc:  # noqa: BLE001
                 log.exception("%s %s: execution attempt %d failed", cand["pair"], cand["id"][:8], n + 1)
                 self._handle_failed(cand, exc, n + 1)

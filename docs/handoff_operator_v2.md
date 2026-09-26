@@ -42,9 +42,9 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 ## 0b. Progress log (newest first — read this before §4)
 
 * **2026-09-27 — Phase 2 (P12.2, D-042) is DONE on branch `feat/instances` (it contains Phase 1 too; `main` is
-  still `7b5e5da`, production still runs the all-pairs system on `f01c86d`-era code).** 410 unit tests pass. Review:
+  still `7b5e5da`, production still runs the all-pairs system on `f01c86d`-era code).** 413 unit tests pass. Review:
   3 lenses (processes/concurrency, money safety, ops scripts + migration), each finding adversarially verified: 25 of
-  26 confirmed and fixed, then the fixes re-reviewed. What the user does (H14): `git merge --ff-only feat/instances`,
+  26 confirmed and fixed, then the fixes re-reviewed by an independent agent (6 more found and fixed). What the user does (H14): `git merge --ff-only feat/instances`,
   then `scripts\switch_to_pairs.bat` (optionally with pairs, e.g. `BTCUSDT` first — RAM: the all-pairs system uses
   ≈0.9 GB private and the laptop had 0.6 GB free with the Claude app, Chrome and ChatGPT open), then
   `scripts\start_recorder.bat`. Or stay on the all-pairs system: `scripts\restart.bat` after the merge.

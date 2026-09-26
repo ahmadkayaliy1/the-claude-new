@@ -14,7 +14,6 @@ import argparse
 import json
 import logging
 import os
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,13 +53,16 @@ def _parse(path: Path) -> dict:
 
 
 def _read(path: Path) -> dict:
-    """The recorded accounts. Only a missing file means "none yet"; a corrupt file falls back to the copy kept at
-    the previous write (``.bak``); anything else raises :class:`PeakFileError` (the gate then refuses — fail closed)."""
+    """The recorded accounts. Only a missing file means "none yet"; a corrupt file falls back to the identical copy
+    written with it (``.bak``); an unreadable file (locked, access denied) or a corrupt file without a usable copy
+    raises :class:`PeakFileError` (the gate then refuses — fail closed)."""
     try:
         return _parse(path)
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
+        raise PeakFileError(f"{path} cannot be read ({exc}) - retried") from exc
+    except ValueError as exc:
         bak = path.with_name(path.name + ".bak")
         try:
             doc = _parse(bak)
@@ -71,19 +73,24 @@ def _read(path: Path) -> dict:
         return doc
 
 
-def _write(path: Path, doc: dict) -> None:
-    """Crash-safe: the new content is flushed to disk before it replaces the file; the previous file is kept."""
+def _put(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(doc, indent=1, sort_keys=True))
+        fh.write(text)
         fh.flush()
         os.fsync(fh.fileno())
-    if path.exists():
-        try:
-            shutil.copyfile(path, path.with_name(path.name + ".bak"))
-        except OSError as exc:
-            log.warning("could not keep a backup of %s: %s", path, exc)
     os.replace(tmp, path)
+
+
+def _write(path: Path, doc: dict) -> None:
+    """Crash-safe: the content is flushed to disk before it replaces the file, and the same content is kept in
+    ``.bak`` (a trip is therefore in both; a corrupt main file never brings back an older state)."""
+    text = json.dumps(doc, indent=1, sort_keys=True)
+    _put(path, text)
+    try:
+        _put(path.with_name(path.name + ".bak"), text)
+    except OSError as exc:
+        log.warning("could not write the backup copy of %s: %s", path, exc)
 
 
 class AccountPeak:

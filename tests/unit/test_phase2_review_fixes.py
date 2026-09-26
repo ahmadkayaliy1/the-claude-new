@@ -76,9 +76,14 @@ def test_a_pair_without_its_own_history_is_refused_while_the_all_pairs_history_e
     btc = inst("BTCUSDT", tmp_path)
     state = btc.paths.state()
     assert control.unmigrated(btc, state) is None                 # fresh install: nothing to migrate
-    (tmp_path / "app.db").write_bytes(b"")
+    con = sqlite3.connect(tmp_path / "app.db")
+    con.executescript("CREATE TABLE ai_decisions (id TEXT, pair TEXT); INSERT INTO ai_decisions VALUES ('a','BTCUSDT');")
+    con.commit()
+    con.close()
+    eth = inst("ETHUSDT", tmp_path)
+    assert control.unmigrated(eth, eth.paths.state()) is None      # no ETH history: a pair added later just starts
     why = control.unmigrated(btc, state)
-    assert why and "switch_to_pairs.bat" in why and "migrate_instance.py BTCUSDT" in why
+    assert why and "switch_to_pairs.bat" in why and "migrate_instance.py BTCUSDT" in why and "1 records" in why
     monkeypatch.setattr(control, "instance_running", lambda name: False)
     monkeypatch.setattr(procs, "running_supervisors", lambda older_s=None: {})
     monkeypatch.setattr(control, "spawn_outside", lambda *a, **k: pytest.fail("must not start"))
@@ -140,15 +145,24 @@ def test_history_calls_stop_waiting_for_a_stuck_lock_holder(tmp_path, monkeypatc
 def test_a_corrupt_peak_file_falls_back_to_the_backup_and_keeps_the_trip(tmp_path):
     a = drawdown.AccountPeak(tmp_path, "mt5:demo:1", 25.0)
     a.update(100.0)
-    assert a.update(70.0).tripped
-    a.update(71.0)                                                  # a write after the trip: .bak holds the trip
+    assert a.update(70.0).tripped                                   # the trip is the last write (MT5 mode)
+    assert a.update(80.0).tripped                                   # recovered equity: no write, still tripped
     (tmp_path / drawdown.FILE).write_bytes(b"\x00" * 80)            # power loss / hand edit
-    st = a.update(72.0)
+    st = a.update(80.0)                                             # 20 % below the peak: only the record says tripped
     assert st.tripped and st.peak == 100.0
     (tmp_path / drawdown.FILE).write_bytes(b"{broken")
     (tmp_path / (drawdown.FILE + ".bak")).write_bytes(b"{also broken")
     with pytest.raises(drawdown.PeakFileError):
         a.update(72.0)                                              # the gate fails closed (retried, then rejected)
+
+
+def test_an_unreadable_peak_file_fails_closed(tmp_path):
+    a = drawdown.AccountPeak(tmp_path, "mt5:demo:1", 25.0)
+    a.update(100.0)
+    (tmp_path / drawdown.FILE).unlink()
+    (tmp_path / drawdown.FILE).mkdir()                              # reading it raises an OSError (like a locked file)
+    with pytest.raises(drawdown.PeakFileError, match="cannot be read"):
+        a.update(80.0)
 
 
 def test_a_busy_peak_lock_raises_instead_of_an_unrecorded_state(tmp_path):
@@ -194,12 +208,44 @@ def test_mt5_gate_and_placement_are_serialised_across_systems(tmp_path, monkeypa
     monkeypatch.setattr(ex, "MT5_SETTLE_MS", 0)
     other = FileLock(tmp_path / "shared" / "locks" / "mt5_placement.lock")
     assert other.acquire()
-    with pytest.raises(RuntimeError, match="placement lock busy"):
+    with pytest.raises(ex.PlacementBusy, match="placement lock busy"):
         e.handle({"id": "x"})
     assert calls == []
     other.release()
     e.handle({"id": "y"})
     assert calls == [{"id": "y"}]
+
+
+def test_a_busy_placement_lock_ends_the_pass_without_counting_a_failure(monkeypatch):
+    e = object.__new__(ex.Executor)
+    e.mt5_quiet_until, e.attempts = 0, {}
+    tried = []
+    e.candidates = lambda: [{"id": "a", "pair": "BTCUSDT"}, {"id": "b", "pair": "BTCUSDT"}]
+
+    def busy(cand):
+        tried.append(cand["id"])
+        raise ex.PlacementBusy("busy")
+
+    e.handle = busy
+    e._handle_failed = lambda *a: pytest.fail("a busy lock is not a failed attempt")
+    e.process_candidates()
+    assert tried == ["a"] and e.attempts == {}                      # one wait per pass, not one per candidate
+
+
+def test_settle_wait_also_after_a_placement_that_raised(tmp_path, monkeypatch):
+    e = object.__new__(ex.Executor)
+    e.s, e.mt5 = inst("ETHUSDT", tmp_path), object()
+    slept = []
+    monkeypatch.setattr(ex.time, "sleep", lambda s: slept.append(s))
+
+    def partly(cand):
+        e._placing = True                                           # order_send reached the broker ...
+        raise RuntimeError("... then the terminal dropped")
+
+    e._handle = partly
+    with pytest.raises(RuntimeError, match="terminal dropped"):
+        e.handle({"id": "z"})
+    assert slept == [ex.MT5_SETTLE_MS / 1000]
 
 
 # ------------------------------------------------------------------ money-5: the ratio uses this pair's AI cost
@@ -236,14 +282,22 @@ def test_symbol_map_skips_disabled_pairs_without_a_symbol(monkeypatch):
 
 
 # ------------------------------------------------------------------ proc-8 / ops-9: the report follows what runs
-def test_health_report_reports_the_running_systems(monkeypatch):
+def test_health_report_reports_the_running_systems_and_the_missing_ones(tmp_path, monkeypatch):
     hr = tool("health_report")
     a = NS(instance=None, all_pairs_system=False)
-    monkeypatch.delenv(INSTANCE_ENV, raising=False)
+    monkeypatch.setenv(INSTANCE_ENV, "")
+    monkeypatch.setattr(hr, "load_settings", lambda **kw: sv.with_data_dir(load_settings(**kw), str(tmp_path)))
     monkeypatch.setattr(hr.procs, "running_supervisors", lambda older_s=None: {5: None})
-    assert [s.paths.instance for s in hr.systems(a)] == [None]
-    monkeypatch.setattr(hr.procs, "running_supervisors", lambda older_s=None: {5: "XAUUSD", 6: "BTCUSDT"})
-    assert [s.paths.instance for s in hr.systems(a)] == ["BTCUSDT", "XAUUSD"]
+    assert [s.paths.instance for s in hr.systems(a)[0]] == [None]
+    for p in ("BTCUSDT", "ETHUSDT", "XAUUSD"):
+        (tmp_path / "instances" / p / "run").mkdir(parents=True)
+        (tmp_path / "instances" / p / "app.db").write_bytes(b"")
+    (tmp_path / "instances" / "XAUUSD" / "run" / "manual_stop").write_text("1", encoding="utf-8")   # stopped by the user
+    monkeypatch.setattr(hr.procs, "running_supervisors", lambda older_s=None: {6: "BTCUSDT", 7: "EURUSD"})
+    chosen, notes = hr.systems(a)
+    assert [s.paths.instance for s in chosen] == ["BTCUSDT", "ETHUSDT"]     # ETH should run: reported, not dropped
+    assert any("ETHUSDT" in n and "no supervisor runs" in n for n in notes)
+    assert any("EURUSD" in n and "not in config" in n for n in notes)
 
 
 # ------------------------------------------------------------------ ops-7: WAL-safe migration

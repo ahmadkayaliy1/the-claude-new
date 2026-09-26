@@ -5,8 +5,8 @@ tokens), executions (placed / gate rejections with reasons), broker outcomes and
 Built for a periodic check by a person or an agent: short, and every problem line starts with "!!".
 
 Which system (D-042): ``--instance PAIR`` one pair's system; ``--all-pairs-system`` the single all-pairs system;
-default: the systems that are running; when none runs, every pair's system that has its own
-``data/instances/<PAIR>/app.db``, else the all-pairs system.
+default: the all-pairs system when it runs; otherwise every running pair plus every pair that should run (its own
+``data/instances/<PAIR>/app.db``, not stopped by the user); when nothing applies, the all-pairs system.
 """
 from __future__ import annotations
 
@@ -29,19 +29,32 @@ from tradingsystem.supervisor import procs  # noqa: E402
 STALE_S = {"binance_backfill": 900, "mt5_backfill": 900}
 
 
-def systems(a: argparse.Namespace) -> list[Settings]:
+def systems(a: argparse.Namespace) -> tuple[list[Settings], list[str]]:
+    """(systems to report, problem lines). Default: the all-pairs system when it runs; otherwise every running pair
+    plus every pair that should run (own app.db, not stopped by the user) — a pair whose supervisor died is
+    reported (stale heartbeats), not silently left out."""
     if a.instance:
-        return [load_settings(extra_env={INSTANCE_ENV: a.instance.upper()})]
+        return [load_settings(extra_env={INSTANCE_ENV: a.instance.upper()})], []
     if a.all_pairs_system:
-        return [load_settings(extra_env={INSTANCE_ENV: ""})]
+        return [load_settings(extra_env={INSTANCE_ENV: ""})], []
     base = load_settings()
     if base.paths.instance:
-        return [base]
+        return [base], []
     running = set(procs.running_supervisors().values())
-    if running:                                     # what runs (the per-pair app.db files stay after a switch back)
-        return [load_settings(extra_env={INSTANCE_ENV: i or ""}) for i in sorted(running, key=lambda x: x or "")]
-    own = [p for p in base.instances if (base.paths.data() / "instances" / p / "app.db").exists()]
-    return [load_settings(extra_env={INSTANCE_ENV: p}) for p in own] or [base]
+    if None in running:                             # the all-pairs system runs (pairs cannot run next to it)
+        return [base], []
+    notes = [f"!! supervisor running for {p}, which is not in config 'instances:' — not reported"
+             for p in sorted(x for x in running if x not in base.instances)]
+    data = base.paths.data()
+    expected = {p for p in base.instances if (data / "instances" / p / "app.db").exists()
+                and not (data / "instances" / p / "run" / "manual_stop").exists()}
+    pairs = sorted((running & set(base.instances)) | expected)
+    for p in sorted(expected - running):
+        notes.append(f"!! {p}: its system should run (own app.db, not stopped by the user) but no supervisor runs "
+                     f"— scripts\\start.bat {p}")
+    if pairs:
+        return [load_settings(extra_env={INSTANCE_ENV: p}) for p in pairs], notes
+    return [base], notes
 
 
 def machine_report(s: Settings, now: float) -> list[str]:
@@ -187,10 +200,10 @@ def main() -> int:
     ap.add_argument("--all-pairs-system", action="store_true", help="the single all-pairs system")
     a = ap.parse_args()
     now = time.time() * 1000
-    chosen = systems(a)
+    chosen, notes = systems(a)
     s0 = chosen[0]
     out = [f"# report {time.strftime('%Y-%m-%d %H:%M', time.gmtime())} UTC — last {a.hours:g} h — AI {s0.ai.active_provider}"]
-    out += machine_report(s0, now)
+    out += machine_report(s0, now) + notes
     for s in chosen:
         out += system_report(s, a.hours, now)
     print("\n".join(out))

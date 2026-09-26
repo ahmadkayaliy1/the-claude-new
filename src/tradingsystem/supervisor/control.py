@@ -132,10 +132,36 @@ def unmigrated(s: Settings, data: Path) -> str | None:
     """A pair's system about to start without its own app.db while the all-pairs system's history exists: it would
     begin with an empty history, and the migration would then skip it (D-042) — refuse and say how to switch."""
     inst = s.paths.instance
-    if inst and not (Path(data) / "app.db").exists() and (s.paths.data() / "app.db").exists():
-        return (f"{inst} has no app.db of its own yet - switch with scripts\\switch_to_pairs.bat (it copies each "
-                f"pair's history first) or run tools\\migrate_instance.py {inst}")
-    return None
+    legacy = s.paths.data() / "app.db"
+    if not inst or (Path(data) / "app.db").exists() or not legacy.exists():
+        return None
+    rows = _history_rows(legacy, inst)
+    if rows == 0:
+        return None                     # nothing of this pair to carry over (e.g. a pair added after the switch)
+    return (f"{inst} has no app.db of its own yet but the all-pairs system's history has "
+            f"{'its' if rows is None else rows} records - switch with scripts\\switch_to_pairs.bat (it copies each "
+            f"pair's history first) or run tools\\migrate_instance.py {inst}")
+
+
+def _history_rows(db: Path, pair: str) -> int | None:
+    """Decisions + paper legs of ``pair`` in the all-pairs app.db (None when it cannot be read: assume there are)."""
+    try:
+        con = sqlite3.connect(f"file:{Path(db).as_posix()}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    try:
+        n = 0
+        for table in ("ai_decisions", "paper_legs"):
+            try:
+                n += con.execute(f"SELECT count(*) FROM {table} WHERE pair=?", (pair,)).fetchone()[0]
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc):
+                    return None
+        return n
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
 
 
 def conflict_message(instance: str | None, found: dict[int, str | None]) -> str:
