@@ -39,6 +39,27 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
   cadence is cut (Phase 1/4 below). Of 25 decisions: 23 NO_TRADE, 2 trade ideas, 1 gate rejection (SL too tight
   for Windsor's spread), 0 executed, 0 broker outcomes.
 
+## 0b. Progress log (newest first — read this before §4)
+
+* **2026-09-26 19:10 UTC — Phase 1 (P12.1) is DONE on branch `feat/phase1-operator-memory` (commits `c844318`,
+  `47e9e24`), 361 unit tests pass, reviewed by two independent agents, live-tested with one BTCUSDT call (18.0 k
+  input tokens, valid, operator notes fed back). NOT merged yet: `main` is still `f01c86d` and production runs
+  the old code. The user applies it with `git merge --ff-only feat/phase1-operator-memory` + `scripts\restart.bat`
+  (+ `scripts\start_recorder.bat`). `PROJECT_STATUS.md` on that branch has the M12 phase blocks (P12.1…P12.5)
+  and D-041.**
+* Deferred from the Phase 1 review (do in Phase 2): (a) an executor guard that refuses a same-pair, same-direction
+  candidate while a live order / position from a recent decision exists (today the prompt only *tells* the model
+  every BUY/SELL is a new order); (b) live account state in the payload — broker equity, open positions, pending
+  orders (the payload still carries the configured paper equity; the legend says so); (c) `history[].gate_reason`
+  strings are in the execution instrument's prices — say so or render "actual vs required".
+* Ops observed 2026-09-26 18:17–19:08 UTC: a **51-minute Binance outage** (DNS `getaddrinfo failed`, 121 WS
+  disconnects in 3 h) while MT5 stayed connected; the engine correctly skipped 6 cycles ("analysis price 150–700 s
+  old") and gap-fill healed every table afterwards. An **ExpressVPN TUN adapter is active** on the laptop
+  ("Local Area Connection 4"); VPN tunnel drops are the likely cause of the DNS bursts. Ask the user whether the
+  VPN is needed to reach Binance from their location; if not, run the trading laptop without it; if yes, the
+  supervisor/health report should show the VPN adapter state and the monitor should flag outages > 10 min.
+* The 3-hourly desktop monitor still depends on the app being open (Phase 4 moves it to Task Scheduler).
+
 ## 1. What the user decided (2026-09-26, verbatim intent)
 
 1. **Claude actually runs it**: Claude is the AI that analyses the market; Python fetches data, computes, and
