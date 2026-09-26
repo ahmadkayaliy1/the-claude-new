@@ -83,3 +83,23 @@ def test_rr_mismatch_flagged():
 def test_extra_fields_forbidden():
     with pytest.raises(ValidationError):
         Recommendation.model_validate(make(secret_sauce="x"))
+
+
+def test_overlong_prose_is_trimmed_not_rejected():
+    """D-035: a label/basis a few characters too long must not cost a whole repair round-trip."""
+    from tradingsystem.ai.contract import Recommendation
+    from tests.unit.test_orchestrator import rec_for
+    r = rec_for()
+    r["take_profits"][0]["label"] = "1h/5m liquidity, range low, previous day low cluster"
+    r["risk_management"]["sl_basis"] = "x" * 450
+    v = Recommendation.model_validate(r)
+    assert len(v.take_profits[0].label) == 40 and len(v.risk_management.sl_basis) == 300
+
+
+def test_no_trade_with_a_zero_risk_block_is_accepted_without_it():
+    from tradingsystem.ai.contract import Recommendation
+    from tests.unit.test_orchestrator import rec_for
+    r = rec_for(decision="NO_TRADE")
+    r["risk_management"] = {"risk_percent_suggested": 0, "risk_reward_ratio": 0, "invalidation_reason": "n/a",
+                            "sl_basis": "n/a"}
+    assert Recommendation.model_validate(r).risk_management is None

@@ -197,6 +197,8 @@ ai:
       api_key_env: CLAUDE_CODE_OAUTH_TOKEN   # optional long-lived token (`claude setup-token`); empty = CLI login
       effort: medium
       free_tier: true                  # flat subscription: no marginal USD cost per call
+      structured_output: prompt        # schema in the prompt, one turn (--json-schema costs ~4-5x: D-035)
+      max_concurrency: 2               # two pairs analysed at once (set 1 on 4 GB machines)
       rpm: 4
       rpd: 120                         # daily cap - keeps limits free for your own interactive use
       timeout_s: 180                  # serialized calls: keep a 3-pair batch within risk.max_recommendation_age_s

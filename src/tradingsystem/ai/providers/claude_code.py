@@ -4,7 +4,10 @@ per-token bill.
 Each call spawns ``claude -p`` (print mode):
 
 * our versioned system prompt replaces Claude Code's own (``--system-prompt-file``); the snapshot goes on stdin;
-* structured output with ``--json-schema`` (the contract is still validated client-side afterwards);
+* output format: with ``structured_output: prompt`` (default in config) the JSON Schema is appended to the system
+  prompt and the model answers in ONE turn; ``native`` uses ``--json-schema``, which makes the CLI run a tool
+  round-trip (measured 2026-09-26: ~4-5x the input tokens and minutes of latency per call). Either way the contract
+  is validated client-side afterwards;
 * pure analysis: ``--tools ""`` + ``--strict-mcp-config`` + ``--setting-sources ""`` in an empty working
   directory — the model cannot read files, run commands or reach MCP servers, and no CLAUDE.md, hooks or
   settings are loaded. Data collection, the risk gate and execution stay in our own code;
@@ -14,8 +17,8 @@ Each call spawns ``claude -p`` (print mode):
 
 Usage counts against the plan's shared 5-hour / weekly limits (the same pool as interactive Claude use). When
 the CLI reports a usage limit the provider cools down until the reset (or ``DEFAULT_COOLDOWN_MS``) and
-``unavailable_reason()`` lets the orchestrator route to ``ai.fallback_provider``. Calls are serialized — one CLI
-process at a time (RAM on 4 GB machines) — and a call that times out or is cancelled (cycle deadline, shutdown)
+``unavailable_reason()`` lets the orchestrator route to ``ai.fallback_provider``. At most ``max_concurrency`` CLI
+processes run at once (≈170 MB each — keep 1 on 4 GB machines) and a call that times out or is cancelled (cycle deadline, shutdown)
 kills its CLI process, so no orphan keeps spending the plan's limits.
 """
 from __future__ import annotations
@@ -111,7 +114,7 @@ class ClaudeCodeProvider(LLMProvider):
         self._auth_checked = float("-inf")
         self._auth_problem: str | None = None
         self._auth_refreshing = False
-        self._lock: asyncio.Lock | None = None
+        self._slots: asyncio.Semaphore | None = None
 
     # ------------------------------------------------------------------ availability
     def unavailable_reason(self) -> str | None:
@@ -159,24 +162,32 @@ class ClaudeCodeProvider(LLMProvider):
             args += ["--effort", self.cfg.effort]
         if self.cfg.fallback_model:
             args += ["--fallback-model", self.cfg.fallback_model]
-        if schema:
+        if schema and self.cfg.structured_output == "native":
             args += ["--json-schema", json.dumps(transport_schema(schema, "anthropic"), separators=(",", ":"))]
         return args
+
+    def system_text(self, system: str, schema: dict | None) -> str:
+        """The system prompt; in prompt mode followed by the output schema (static per role → cached by the CLI)."""
+        if not schema or self.cfg.structured_output == "native":
+            return system
+        return (f"{system}\n\n# Output format\nReply with ONLY one JSON object - no prose before or after it, no code "
+                "fences - that validates against this JSON Schema (respect every enum, maxLength and numeric bound):\n"
+                + json.dumps(schema, separators=(",", ":"), ensure_ascii=False))
 
     async def _call(self, system: str, user: str, schema: dict | None, schema_name: str,
                     max_output_tokens: int) -> LLMResult:
         why = self.unavailable_reason()
         if why:
             raise ProviderError(why, retryable=False, rate_limited=now_ms() < self.cooldown_until_ms)
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        async with self._lock:
+        if self._slots is None:
+            self._slots = asyncio.Semaphore(max(1, self.cfg.max_concurrency))
+        async with self._slots:
             why = self.unavailable_reason()          # another call may have hit the limit while we waited
             if why:
                 raise ProviderError(why, retryable=False, rate_limited=now_ms() < self.cooldown_until_ms)
             fd, system_file = tempfile.mkstemp(prefix="system_", suffix=".md", dir=self.workdir)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(system)
+                f.write(self.system_text(system, schema))
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *self.build_args(system_file, schema), stdin=asyncio.subprocess.PIPE,

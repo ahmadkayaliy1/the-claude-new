@@ -11,11 +11,26 @@ from __future__ import annotations
 
 import datetime as dt
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 CONTRACT_VERSION = "1.0"
+
+
+def _trim(n: int):
+    return BeforeValidator(lambda v: v[:n] if isinstance(v, (str, list)) else v)
+
+
+def Text(max_len: int, min_len: int = 0) -> Any:
+    """Model-written prose: an over-long text is trimmed, never a reason to reject (and re-pay for) a whole
+    recommendation — the limits only bound storage and the UI, and the schema still states them to the model."""
+    return Annotated[str, _trim(max_len), Field(min_length=min_len, max_length=max_len)]
+
+
+def Notes(max_items: int) -> Any:
+    """A list of notes: extra items are dropped instead of failing validation."""
+    return Annotated[list[str], _trim(max_items), Field(max_length=max_items)]
 
 
 class Decision(str, Enum):
@@ -75,7 +90,7 @@ class Entry(_M):
 class TakeProfit(_M):
     price: float = Field(gt=0)
     close_fraction: float = Field(gt=0, le=1, description="Fraction of the position closed at this target")
-    label: str | None = Field(None, max_length=40)
+    label: Text(40) | None = None
 
 
 class ManagementRule(_M):
@@ -83,27 +98,27 @@ class ManagementRule(_M):
     trigger: Literal["tp_hit", "price_reached", "r_multiple", "minutes_elapsed", "candle_close"]
     value: float | None = Field(None, description="TP index (1-based), price, R multiple or minutes, per trigger")
     params: dict[str, float] = Field(default_factory=dict, description="e.g. {'atr_mult': 1.5, 'fraction': 0.5}")
-    note: str | None = Field(None, max_length=200)
+    note: Text(200) | None = None
 
 
 class ReviewCondition(_M):
     kind: Literal["price_above", "price_below", "candle_close_above", "candle_close_below", "minutes_elapsed"]
     value: float = Field(description="Price level or minutes")
     timeframe: Literal["1m", "5m", "15m", "1h", "4h", "1d"] | None = None
-    note: str | None = Field(None, max_length=200)
+    note: Text(200) | None = None
 
 
 class NextReview(_M):
     in_minutes: int = Field(ge=1, le=1440)
-    conditions: list[ReviewCondition] = Field(default_factory=list, max_length=6)
-    or_condition: str = Field("", max_length=400, description="Free-text restatement for humans")
+    conditions: Annotated[list[ReviewCondition], _trim(6)] = Field(default_factory=list, max_length=6)
+    or_condition: Text(400) = Field("", description="Free-text restatement for humans")
 
 
 class RiskManagement(_M):
     risk_percent_suggested: float = Field(gt=0, le=10)
     risk_reward_ratio: float = Field(gt=0, description="Model's own RR (recomputed by the system)")
-    invalidation_reason: str = Field(min_length=5, max_length=500)
-    sl_basis: str = Field(min_length=5, max_length=300, description="Why the SL sits there (ATR / structure)")
+    invalidation_reason: Text(500, 5)
+    sl_basis: Text(300, 5) = Field(description="Why the SL sits there (ATR / structure)")
 
 
 class Recommendation(_M):
@@ -112,7 +127,7 @@ class Recommendation(_M):
     timestamp: dt.datetime
     valid_until: dt.datetime
     price_reference: str = Field(description="Venue:symbol whose price space the levels use, e.g. 'mt5:XAUUSD@'")
-    market_summary: str = Field(min_length=10, max_length=1500)
+    market_summary: Text(1500, 10)
     decision: Decision
     order_type: OrderType | None = None
     entry: Entry | None = None
@@ -120,11 +135,19 @@ class Recommendation(_M):
     stop_loss: float | None = Field(None, gt=0)
     risk_management: RiskManagement | None = None
     confidence: int = Field(ge=0, le=100)
-    instructions: str = Field("", max_length=1500)
+    instructions: Text(1500) = ""
     management: list[ManagementRule] = Field(default_factory=list, max_length=6)
     next_review: NextReview
-    reasoning_trace: str = Field(min_length=10, max_length=3000)
-    data_quality_notes: list[str] = Field(default_factory=list, max_length=10)
+    reasoning_trace: Text(3000, 10)
+    data_quality_notes: Notes(10) = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_trade_has_no_risk(cls, data: Any) -> Any:
+        """NO_TRADE carries no trade, so a risk block (often sent with risk 0) is dropped rather than rejected."""
+        if isinstance(data, dict) and data.get("decision") == Decision.NO_TRADE.value and data.get("risk_management"):
+            data = {**data, "risk_management": None}
+        return data
 
     @field_validator("timestamp", "valid_until")
     @classmethod
@@ -200,7 +223,7 @@ class KeyLevel(_M):
     price: float = Field(gt=0)
     kind: Literal["support", "resistance", "liquidity_high", "liquidity_low", "order_block", "fvg", "poc", "vwap",
                   "other"]
-    note: str | None = Field(None, max_length=160)
+    note: Text(160) | None = None
 
 
 class TimeframeAssessment(_M):
@@ -209,11 +232,11 @@ class TimeframeAssessment(_M):
     timeframe: Literal["1m", "5m", "15m", "1h", "4h", "1d", "1w"]
     bias: Literal["bullish", "bearish", "neutral", "unclear"]
     confidence: int = Field(ge=0, le=100)
-    structure: str = Field(max_length=800)
-    key_levels: list[KeyLevel] = Field(default_factory=list, max_length=12)
-    candidate_setups: list[str] = Field(default_factory=list, max_length=4)
-    risks: list[str] = Field(default_factory=list, max_length=6)
-    data_quality_notes: list[str] = Field(default_factory=list, max_length=6)
+    structure: Text(800)
+    key_levels: Annotated[list[KeyLevel], _trim(12)] = Field(default_factory=list, max_length=12)
+    candidate_setups: Notes(4) = Field(default_factory=list)
+    risks: Notes(6) = Field(default_factory=list)
+    data_quality_notes: Notes(6) = Field(default_factory=list)
 
 
 class RecommendationSet(_M):
@@ -229,7 +252,7 @@ class AssessmentSet(_M):
 class RiskReview(_M):
     """risk_reviewer output (agent_per_pair_with_risk_reviewer)."""
     verdict: Literal["approve", "modify", "reject"]
-    issues: list[str] = Field(default_factory=list, max_length=10)
+    issues: Notes(10) = Field(default_factory=list)
     final_recommendation: Recommendation
 
     @model_validator(mode="after")

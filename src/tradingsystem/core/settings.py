@@ -244,6 +244,7 @@ class AIProviderCfg(_Model):
     max_output_tokens: int = 4096
     free_tier: bool = False
     cli_path: str | None = None            # claude_code: the Claude Code executable (default: found on PATH)
+    max_concurrency: int = 1               # claude_code: CLI processes at once (~170 MB each)
     temperature: float | None = None      # sampling temperature; None = the model default (Gemini 3.x wants that)
     quota_reset_tz: str | None = None      # daily-quota reset time zone (Gemini: America/Los_Angeles); None = UTC
 

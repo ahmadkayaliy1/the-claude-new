@@ -278,3 +278,18 @@ def test_auth_refresh_after_the_first_check_runs_in_the_background(prov, monkeyp
     assert prov.unavailable_reason() is None                             # returns at once (cached answer)
     assert started.wait(5) and prov._auth_refreshing
     release.set()
+
+
+def test_prompt_mode_sends_the_schema_in_the_system_prompt_not_as_json_schema(tmp_path, monkeypatch):
+    """D-035: --json-schema makes the CLI run a tool round-trip (~4-5x tokens); prompt mode answers in one turn."""
+    exe = tmp_path / "claude.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(cc.tempfile, "gettempdir", lambda: str(tmp_path))
+    cfg = AIProviderCfg(kind="claude_code", model="sonnet", free_tier=True, cli_path=str(exe),
+                        structured_output="prompt", max_concurrency=2)
+    p = cc.ClaudeCodeProvider("claude_code", cfg, "sonnet", None)
+    schema = {"type": "object", "properties": {"label": {"type": "string", "maxLength": 40}}, "required": ["label"]}
+    assert "--json-schema" not in p.build_args("sys.md", schema)
+    text = p.system_text("RULES", schema)
+    assert text.startswith("RULES") and '"maxLength":40' in text and "ONLY one JSON object" in text
+    assert p.system_text("RULES", None) == "RULES"
