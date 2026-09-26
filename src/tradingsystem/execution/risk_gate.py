@@ -140,5 +140,13 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
         f"group {group}: {corr:.2f}% open+new SL risk (≤ {risk.max_correlated_risk_pct}%)")
     day = (ctx.realized_pnl_today_usd + ctx.unrealized_pnl_usd) / ctx.equity * 100
     add("daily_loss_limit", day > -risk.max_daily_loss_pct, f"today {day:.2f}% (limit −{risk.max_daily_loss_pct}%)")
+    # worst case: every open position / pending order and this new trade stop out today — the day may still not
+    # lose more than the limit (so the limit holds even when several trades fail together; gaps beyond SL excepted)
+    realised = ctx.realized_pnl_today_usd / ctx.equity * 100
+    open_risk = sum(ctx.open_risk_pct_by_pair.values())
+    worst = realised - open_risk - (size.risk_pct if size.ok else 0)
+    add("daily_loss_worst_case", worst >= -risk.max_daily_loss_pct,
+        f"realised today {realised:.2f}% − open SL risk {open_risk:.2f}% − this trade "
+        f"{size.risk_pct if size.ok else 0:.2f}% = {worst:.2f}% (≥ −{risk.max_daily_loss_pct}%)")
     approved = all(ok for _, ok, _ in checks)
     return GateResult(approved, checks, entry, size, rr)

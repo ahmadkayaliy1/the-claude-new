@@ -102,3 +102,12 @@ def test_translation_preserves_distances_and_basis_check():
     assert check_basis(84000, 83984, [-15, -17, -16], 0.15).ok
     bad = check_basis(84000, 83700, [-15, -17, -16], 0.15)
     assert not bad.ok and "deviates" in bad.reason
+
+
+def test_daily_worst_case_counts_open_risk_and_the_new_trade():
+    """D-036: at a 10 % daily limit, realised −6 % + open SL risk 3 % + this trade must stay ≥ −10 % (the new trade risks 0.48 %)."""
+    r = RiskCfg(risk_per_trade_pct=1.0, max_risk_per_trade_pct=3.0, max_daily_loss_pct=10.0, max_correlated_risk_pct=10)
+    ok = evaluate(rec(), "XAUUSD", ctx(realized_pnl_today_usd=-600, open_risk_pct_by_pair={"BTCUSDT": 3.0}), r, [])
+    assert ok.approved, ok.failures()                                           # −6 − 3 − 0.48 = −9.5 %
+    bad = evaluate(rec(), "XAUUSD", ctx(realized_pnl_today_usd=-600, open_risk_pct_by_pair={"BTCUSDT": 4.0}), r, [])
+    assert [c for c, okc, _ in bad.checks if not okc] == ["daily_loss_worst_case"]  # −6 − 4 − 0.48 < −10 %

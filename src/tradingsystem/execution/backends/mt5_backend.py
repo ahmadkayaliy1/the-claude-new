@@ -210,3 +210,62 @@ class MT5Backend:
     def cancel_order(self, ticket: int) -> dict:
         res = self.mt5.order_send({"action": self.mt5.TRADE_ACTION_REMOVE, "order": ticket, "magic": self.magic})
         return {"ok": getattr(res, "retcode", None) in SUCCESS, "meaning": describe(getattr(res, "retcode", None))}
+
+    def close_position(self, ticket: int) -> dict:
+        """Market-close one of our positions at the current bid/ask (demo tests, manual flatten)."""
+        m = self.mt5
+        pos = next(iter(m.positions_get(ticket=ticket) or ()), None)
+        if pos is None:
+            return {"ok": False, "meaning": f"position {ticket} not found"}
+        q = m.symbol_info_tick(pos.symbol)
+        buy = pos.type == m.POSITION_TYPE_BUY
+        res = m.order_send({"action": m.TRADE_ACTION_DEAL, "position": ticket, "symbol": pos.symbol,
+                            "volume": pos.volume, "type": m.ORDER_TYPE_SELL if buy else m.ORDER_TYPE_BUY,
+                            "price": q.bid if buy else q.ask, "magic": self.magic, "comment": pos.comment[:31],
+                            "type_filling": self._filling(self.specs(pos.symbol))})
+        code = getattr(res, "retcode", None)
+        return {"ok": code in SUCCESS, "retcode": code, "meaning": describe(code), "price": getattr(res, "price", None)}
+
+    # ------------------------------------------------------------------ outcomes (P9.6)
+    def _ask(self, what: str, value):
+        """None from the terminal is an error unless last_error says Success (an empty answer)."""
+        if value is None:
+            err = self.mt5.last_error()
+            if not (isinstance(err, tuple) and err and err[0] == 1):
+                raise RuntimeError(f"MT5 could not list {what} ({err})")
+            return ()
+        return value
+
+    def decision_result(self, decision_id: str, since_s: int) -> dict | None:
+        """A decision's real result from the broker's own records: None while any of its legs is still a pending
+        order or an open position (or its orders are not in the history yet); else ``filled`` (any leg entered),
+        ``pnl_usd`` (profit + commission + swap + fee of every deal of its positions), ``move`` (volume-weighted
+        price move in the trade's favour) and ``volume``. Raises when the terminal cannot be asked."""
+        m, prefix = self.mt5, f"ts:{decision_id[:20]}:"
+        until_s = int(time.time()) + 86_400
+        pending = self._ask("orders", m.orders_get())
+        open_pos = self._ask("positions", m.positions_get())
+        hist = self._ask("history orders", m.history_orders_get(since_s, until_s))
+        placed = [o for o in hist if o.magic == self.magic and o.comment.startswith(prefix)]
+        pids = {o.position_id for o in placed if getattr(o, "position_id", 0)}
+        if any(o.comment.startswith(prefix) for o in pending) or \
+                any(p.identifier in pids or p.comment.startswith(prefix) for p in open_pos):
+            return None
+        if not placed:
+            return None
+        pnl, move_vol, vol_out = 0.0, 0.0, 0.0
+        for pid in pids:
+            deals = self._ask(f"deals of position {pid}", m.history_deals_get(position=pid))
+            pnl += sum(d.profit + d.commission + d.swap + getattr(d, "fee", 0.0) for d in deals)
+            ins = [d for d in deals if d.entry == m.DEAL_ENTRY_IN]
+            outs = [d for d in deals if d.entry in (m.DEAL_ENTRY_OUT, m.DEAL_ENTRY_OUT_BY)]
+            if not ins or not outs:
+                continue
+            buy = ins[0].type == m.DEAL_TYPE_BUY
+            p_in = sum(d.price * d.volume for d in ins) / sum(d.volume for d in ins)
+            v = sum(d.volume for d in outs)
+            p_out = sum(d.price * d.volume for d in outs) / v
+            move_vol += ((p_out - p_in) if buy else (p_in - p_out)) * v
+            vol_out += v
+        return {"filled": bool(pids), "pnl_usd": round(pnl, 2), "legs": len(placed),
+                "move": move_vol / vol_out if vol_out else None, "volume": vol_out}

@@ -16,6 +16,7 @@ range unverified: no ``known_gaps`` row, no cached earliest bar, no tick day mar
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import itertools
 import logging
 import multiprocessing as mp
@@ -92,6 +93,12 @@ class MT5Backfill:
 
     def status(self, state: str = "backfilling", error: str | None = None) -> None:
         self.appdb.set_status(COLLECTOR, state, error=error, detail=self.progress)
+        self._beat_at = now_ms()
+
+    def _beat(self) -> None:
+        """Heartbeat inside long steps (a multi-year 1m pass takes many minutes between units)."""
+        if now_ms() - getattr(self, "_beat_at", 0) >= 30_000:
+            self.status()
 
     # ------------------------------------------------------------------ terminal etiquette
     def _live_healthy(self) -> bool:
@@ -182,14 +189,14 @@ class MT5Backfill:
         return r
 
     # ------------------------------------------------------------------ rates
-    def candles(self, inst: Instrument, hot: SQLiteHotStore) -> None:
+    def candles(self, inst: Instrument, hot: SQLiteHotStore, tfs: list | None = None) -> None:
         start = inst.start_ms("candles")
         if start is None:
             return
         cal = calendar_for(inst.venue, inst.symbol, self.s.pairs[inst.pair].asset_class)
         now_srv = self._now_srv(inst.symbol)
         failed: dict[str, BaseException] = {}
-        for tf in inst.timeframes:
+        for tf in (inst.timeframes if tfs is None else tfs):
             spec = spec_for(inst, "candles", tf)
             try:
                 self._candles_tf(inst, hot, spec, tf, start, cal, now_srv)
@@ -234,6 +241,7 @@ class MT5Backfill:
         for g in gaps:
             for c0 in range(g.start, g.end + tf.ms, chunk):
                 c1 = min(c0 + chunk, g.end + tf.ms)
+                self._beat()
                 self._yield_to_live()
                 r = self._rates(inst.symbol, tfc, c0, c1)
                 if r is None:
@@ -253,6 +261,7 @@ class MT5Backfill:
         candidates = [g for g in left if not any(a <= g.end and g.start < b for a, b in unverified)]
         confirmed = []
         for g in candidates[:MAX_GAP_VERIFY]:
+            self._beat()
             self._yield_to_live()
             r = self._rates(inst.symbol, tfc, g.start, g.end, retries=2)     # copy_rates_range: both ends inclusive
             if r is None:
@@ -332,6 +341,7 @@ class MT5Backfill:
             for h in range(24):
                 a = self.model.utc_to_server(lo_utc + h * HOUR_MS)
                 b = self.model.utc_to_server(lo_utc + (h + 1) * HOUR_MS)
+                self._beat()
                 self._yield_to_live()
                 chunk = self._call("copy_ticks_range", mt5.copy_ticks_range, inst.symbol, int(a // 1000),
                                    int(b // 1000) + 1, mt5.COPY_TICKS_ALL)
@@ -390,8 +400,13 @@ class MT5Backfill:
                 hot = SQLiteHotStore(inst.hot_db_path(self.data), cache_mb=self.s.resource.sqlite_cache_mb)
                 hots[inst.key] = hot
                 hot.ensure_tables([*table_specs(inst), *system_specs()])
-            for unit, step, inst in [(f"{st.__name__} {i.key}", st, i) for st in (self.candles, self.ticks)
-                                     for i in self.instruments]:
+            # what the analysis needs first: 1h..1w candles of every instrument (the engine's data gate wants 4h/1d
+            # history), then the lower timeframes, ticks last — one instrument's multi-year 1m history or tick
+            # archive must never starve another instrument's 4h/1d bars
+            work = [(f"candles {i.key} {name}", functools.partial(self.candles, tfs=[tf for tf in i.timeframes if pick(tf)]), i)
+                    for name, pick in (("1h-1w", lambda tf: tf.ms >= 3_600_000), ("1m-15m", lambda tf: tf.ms < 3_600_000))
+                    for i in self.instruments] + [(f"ticks {i.key}", self.ticks, i) for i in self.instruments]
+            for unit, step, inst in work:
                 # the link dropped (previous unit failed, terminal re-syncing): reconnect with backoff, or end the
                 # pass (retried within minutes) instead of failing every remaining unit on a dead link
                 if not (self.term.connected and self.term.healthy()) and not self._connect(res):
@@ -404,7 +419,7 @@ class MT5Backfill:
                     res.add(unit, exc, transient=False)
                     break
                 except Exception as exc:  # noqa: BLE001
-                    log.exception("mt5 backfill %s failed for %s", step.__name__, inst.key)
+                    log.exception("mt5 backfill %s failed", unit)
                     self.appdb.add_event(COLLECTOR, "error", f"{unit}: {exc!r}"[:300])
                     res.add(unit, exc, is_transient(exc))
             finish_pass(self.appdb, COLLECTOR, res)

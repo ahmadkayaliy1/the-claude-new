@@ -301,7 +301,7 @@ def test_connect_gives_up_after_the_window_and_account_mismatch_is_permanent(bf)
 def test_pass_reconnects_between_units_and_ends_early_when_the_terminal_stays_away(bf):
     calls = []
 
-    def candles(inst, hot):
+    def candles(inst, hot, tfs=None):
         calls.append(inst.key)
         bf.term.mt5.connected = False                                        # link lost mid-step
         bf.term.connect_errors = [MT5Unavailable("initialize failed")] * 1000
@@ -313,7 +313,7 @@ def test_pass_reconnects_between_units_and_ends_early_when_the_terminal_stays_aw
     bf.candles, bf.ticks = candles, ticks
     res = bf.run()
     assert calls == [bf.instruments[0].key]                                   # no futile attempts on a dead link
-    assert not res.ok and f"candles {bf.instruments[0].key}" in res.transient and "connect" in res.transient
+    assert not res.ok and f"candles {bf.instruments[0].key} 1h-1w" in res.transient and "connect" in res.transient
     db = AppDB(bf.data / "app.db")
     row = next(r for r in db.statuses() if r["collector"] == mt5bf.COLLECTOR)
     assert row["state"] == "reconnecting"
@@ -324,9 +324,23 @@ def test_pass_reconnects_between_units_and_ends_early_when_the_terminal_stays_aw
 
 
 def test_clean_pass_records_done(bf):
-    bf.candles = bf.ticks = lambda inst, hot: None
+    bf.candles = lambda inst, hot, tfs=None: None
+    bf.ticks = lambda inst, hot: None
     res = bf.run()
     assert res.ok
     db = AppDB(bf.data / "app.db")
     row = next(r for r in db.statuses() if r["collector"] == mt5bf.COLLECTOR)
     assert row["state"] == "stopped" and row["last_error"] is None
+
+
+def test_higher_timeframes_of_every_instrument_come_first(bf):
+    """1h-1w candles of all instruments (what the engine's data gate needs), then 1m-15m, then ticks: a multi-year
+    1m history or tick archive of one symbol never starves another symbol's 4h/1d bars."""
+    order = []
+    bf.candles = lambda inst, hot, tfs=None: order.append(("c", inst.key, min(tf.ms for tf in tfs)))
+    bf.ticks = lambda inst, hot: order.append(("t", inst.key, 0))
+    assert bf.run().ok
+    n = len(bf.instruments)
+    assert all(kind == "c" and low >= 3_600_000 for kind, _, low in order[:n])
+    assert all(kind == "c" and low < 3_600_000 for kind, _, low in order[n:2 * n])
+    assert [k for k, _, _ in order[2 * n:]] == ["t"] * n

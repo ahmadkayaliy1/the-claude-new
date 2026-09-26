@@ -142,10 +142,10 @@ pairs:
         datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics]
         start: {candles: "2025-12-11", agg_trades: "2025-12-11", funding: "2025-12-11", metrics: "2025-12-11"}
 
-risk:                                  # proposed defaults — user to confirm (H8)
-  risk_per_trade_pct: 0.5
-  max_risk_per_trade_pct: 1.0
-  max_daily_loss_pct: 2.0
+risk:                                  # D-036 (user, 2026-09-26): never lose more than 10 % in a day ($100 account)
+  risk_per_trade_pct: 1.0              # target; with $100 the 0.01-lot minimum usually sets the size
+  max_risk_per_trade_pct: 3.0          # a trade whose smallest size risks more is skipped (gold usually)
+  max_daily_loss_pct: 10.0             # also enforced as a worst case: realised + all open SL risk + new trade
   min_rr: 1.5
   max_open_positions: 3
   max_effective_leverage: 10
@@ -155,7 +155,7 @@ risk:                                  # proposed defaults — user to confirm (
   max_recommendation_age_s: 300
   max_data_staleness_s: 120
   correlated_groups: [[BTCUSDT, ETHUSDT]]
-  max_correlated_risk_pct: 1.0
+  max_correlated_risk_pct: 4.0          # BTC+ETH together (or repeat trades on one pair)
   allow_high_risk_display: true
 
 execution:

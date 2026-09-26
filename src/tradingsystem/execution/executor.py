@@ -366,6 +366,38 @@ class Executor:
             self.store.set_outcome(did, outcome, round(pnl, 2), round(pnl / self.paper.start_equity * 100, 3),
                                    round(pips, 1) if pips is not None else None)
 
+    def _settle_mt5_outcomes(self) -> None:
+        """P9.6: executed decisions whose legs are all closed / expired at the broker get their real outcome (profit
+        + commission + swap from the deal history). A terminal that cannot be asked settles nothing (retried)."""
+        con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True, timeout=10)
+        try:
+            rows = con.execute("SELECT id, ts, pair FROM ai_decisions WHERE execution_state='executed' AND outcome IS NULL "
+                               "AND ts>=?", (now_ms() - 14 * 86_400_000,)).fetchall()
+        finally:
+            con.close()
+        for did, ts, pair in rows:
+            try:
+                r = self.mt5.decision_result(did, since_s=ts // 1000 - 86_400)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("outcome of %s not readable yet: %s", did[:8], exc)
+                continue
+            if r is None:
+                continue
+            if not r["filled"]:
+                self.store.set_outcome(did, "not_filled", 0.0, 0.0, 0.0)
+                self.appdb.add_event("executor", "outcome", f"{pair} {did[:8]}: not filled (expired/cancelled)")
+                continue
+            pnl = r["pnl_usd"]
+            balance = self.mt5.t.account().balance
+            base = balance - pnl if balance - pnl > 0 else balance
+            pcfg = self.s.pairs.get(pair)
+            pips = r["move"] / pcfg.pip_size if r["move"] is not None and pcfg else None
+            outcome = "closed_profit" if pnl > 0 else "closed_loss" if pnl < 0 else "closed_breakeven"
+            self.store.set_outcome(did, outcome, pnl, round(pnl / base * 100, 3) if base else None,
+                                   round(pips, 1) if pips is not None else None)
+            self.appdb.add_event("executor", "outcome", f"{pair} {did[:8]}: {outcome} {pnl:+.2f} USD")
+            log.info("%s %s settled at the broker: %s %+.2f USD", pair, did[:8], outcome, pnl)
+
     def virtual_outcomes(self) -> None:
         """P9.8: would the idea have reached TP1 before its SL? Evaluated on real 1m bars of the analysis instrument."""
         con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True)
@@ -399,6 +431,11 @@ class Executor:
             self.advance_paper()
         self.process_candidates()
         if housekeeping:
+            if self.mt5:
+                try:
+                    self._settle_mt5_outcomes()
+                except Exception:  # noqa: BLE001
+                    log.exception("MT5 outcome settlement failed")
             try:
                 self.virtual_outcomes()
             except Exception:  # noqa: BLE001

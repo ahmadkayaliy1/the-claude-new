@@ -19,9 +19,9 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 | H3 | Allow one close/reopen of the MT5 terminal during the multi-client probe | P1.9 | ✅ |
 | H4 | Put `GOOGLE_API_KEY` in `.env` and copy the actual free-tier RPM/RPD limits from AI Studio into config (since D-030 Gemini is the *fallback* provider, used while Claude is unavailable) | P8.2 | ⏳ |
 | H5 | Review the price-matching decision (Binance vs Windsor execution for BTC/ETH) | P7.2 | ⏳ |
-| H6 | Approve demo-account test orders (0.01 lot) | P9.5 | ⏳ |
+| H6 | Approve demo-account orders | P9.5 | ✅ user 2026-09-26: run automatically on the MT5 demo account and monitor (D-036) |
 | H7 | Start the system yourself with `scripts\start.bat` (then `scripts\start_recorder.bat`); optional autostart: `scripts\install_autostart.bat` (try `-DryRun` first); time sync per `docs/ops_windows.md` | P5.3 | ⏳ |
-| H8 | Confirm/adjust default risk parameters (0.5%/trade, 2% daily loss, RR ≥ 1.5, max 3 open). Since the audit fixes: pending orders count toward max open, one pair's stacked exposure is capped at `max_correlated_risk_pct` (1 %), crossed pending orders are rejected, and `max_recommendation_age_s` (300 s) must cover Claude's serialized calls (timeout 180 s) | P9.1 | ⏳ |
+| H8 | Risk parameters | P9.1 | ✅ user 2026-09-26: never lose more than 10 %/day — D-036 (1 % target / 3 % max per trade / 10 % daily incl. worst case / 4 % correlated / 3 open) |
 | H9 | Any switch to LIVE trading is the user's decision only | P9.7 / P11.4 | ⏳ |
 | H10 | Demo balance vs intended live capital | P9.5 | ✅ user's intended live capital ≈ $100 (all 3 pairs); the current demo (≈$158) is close enough for realistic tests |
 | H11 | Sign the Claude Code CLI in with your Claude subscription once: `claude auth login` in a terminal (or `claude setup-token` and put the token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`) | P8.9 | ⏳ |
@@ -75,6 +75,8 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - [2026-09-26] **D-033** AI call rationing (protects the shared subscription limits): a pending review is consumed only by an answered cycle and re-fires no sooner than `review_floor_minutes` (5); failures back off up to `max_backoff_minutes` (120); a cycle has a deadline (`cycle_deadline_s` 600); the heartbeat runs independently of AI calls; per-pair failure isolation; the recommendation timestamp/valid_until are set by the system from the cycle (never trusted from the model); a data gate stores 'skipped' (no call) when the decision bar is missing or the history is too short (XAUUSD until the MT5 4h/1d backfill fills).
 - [2026-09-26] **D-034** Execution: paper tick cursors persist per leg (SL/TP hits during downtime are replayed); bounded tick reads; per-decision isolation with reconciliation (an unreachable MT5 terminal is 'unknown', never 'nothing placed'); risk gate: pending orders count toward max open, a single pair's stacked exposure is capped at `max_correlated_risk_pct`, crossed pending orders rejected (`pending_price_valid`); API Host-header allow-list (DNS rebinding). Awaits the user's H8 confirmation.
 - [2026-09-26] **D-035** Claude Code output mode = schema in the prompt (`structured_output: prompt`), not `--json-schema`: measured on the first live cycle, `--json-schema` made the CLI run a tool round-trip (≈50 k input tokens and 2.5–4.5 min per attempt) and the strict text-length limits forced a repair call (BTC SELL / ETH NO_TRADE took 6–7 min, so they were already past `max_recommendation_age_s`). Prompt mode on the same real BTC payload: 1 turn, 21.8 k in / 4.9 k out, 79 s, valid first time. Free-text fields are now trimmed instead of rejected and a NO_TRADE risk block is dropped (the SL/side/TP/RR rules stay strict); two CLI calls may run at once (`max_concurrency: 2`, set 1 on 4 GB machines).
+- [2026-09-26] **D-036** (user) Automatic execution on the MT5 **demo** account (`EXECUTION_MODE=demo`, `EXECUTION_TRIGGER=auto` in `.env`), monitored by the agent. Risk with the $100 demo balance: target 1 %, max 3 % per trade (the 0.01-lot minimum sets the size: BTC/ETH usually 1.5–3 %, gold usually skipped), daily loss ≤ 10 % enforced as a worst case (realised today + every open SL risk + the new trade), BTC+ETH group ≤ 4 %, ≤ 3 open. Emergency stop: `scripts\kill_switch_on.bat`.
+- [2026-09-26] **D-037** MT5 history backfill order: 1h–1w candles of every instrument first, then 1m–15m, then ticks (a multi-year BTC 1m re-scan was starving the XAUUSD/ETHUSD 4h/1d history the engine's data gate needs); in-step heartbeats every 30 s.
 
 ## Phases
 
@@ -791,11 +793,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P9.5: Demo tests 👤
-- Status: ⏳ Not Started
-- Description: every order type at min volume; forced errors; learn commission from deals.
-- Affected files: `docs/exploration/mt5_demo_orders.md`
-- What was done: — · Why this way: — · Notes/open issues: H6.
-- The exact next step: after P9.4.
+- Status: ✅ Completed
+- Description: every order path on the demo account at the minimum size; real costs.
+- Affected files: `tools/demo_order_test.py`
+- What was done: 2026-09-26 01:19 UTC, ETHUSD@ 0.01 through the production `MT5Backend`: BUY_LIMIT 7 % below the market with SL/TP and a 30-min expiry (server time +3 h verified) → found at the broker with magic + tag → cancelled → settled "not filled"; MARKET BUY → filled at the requested price (no slippage), SL/TP attached → closed → deals read: −$0.22 = the spread, commission 0, swap 0. Executor smoke test in demo mode: account seen by the gate (balance 99.78, realised today −0.22).
+- Why this way: H6 approved by the user (D-036).
+- Notes/open issues: BTC/XAU paths not exercised separately (same code; different contract sizes).
+- The exact next step: —
 
 ### Phase P9.6: Executor service
 - Status: 🔄 In Progress
