@@ -34,6 +34,7 @@ from pathlib import Path
 import psutil
 
 from ..core.filelock import FileLock, locks_dir
+from ..core.instruments import InstrumentRegistry
 from ..core.logsetup import get_redactor, setup_from_settings, setup_logging
 from ..core.settings import PROJECT_ROOT, Settings, load_settings
 from ..core.timeutil import now_ms
@@ -51,6 +52,7 @@ SERVICES = {
     "executor": (["executor"], ["executor"], 90),
     "api": (["api"], [], 0),
 }
+VENUE_BEATS = frozenset({"binance_spot", "binance_usdm", "mt5"})   # heartbeats that exist only with instruments
 STARTUP_GRACE_S = 180
 RESUME_GRACE_S = 180            # after a suspend / clock jump / stall: network, MT5 and disks need time to recover
 LOOP_S = 5.0
@@ -98,8 +100,12 @@ class Supervisor:
         self.state = self.s.paths.state()                   # this system's app.db, run/, STOP_ALL
         self.state.mkdir(parents=True, exist_ok=True)
         self.app_db = self.state / "app.db"
-        self.children = {n: Child(n, SERVICES[n][0] + (["--data-dir", str(self.data)] if data_dir and n.startswith("ingest") else []),
-                                  SERVICES[n][1], SERVICES[n][2]) for n in services}
+        venues = {i.venue for i in InstrumentRegistry.from_settings(self.s).all()}
+        self.children = {}
+        for n in services:
+            beats, stale = service_beats(n, venues)
+            self.children[n] = Child(n, SERVICES[n][0] + (["--data-dir", str(self.data)] if data_dir and n.startswith("ingest") else []),
+                                     beats, stale)
         self.job = JobObject()
         self.stop = False
         self.clock, self.sleep = sample_clock, time.sleep     # injectable (tests)
@@ -439,6 +445,15 @@ class Supervisor:
             self.shutdown()
             if awake:
                 keep_awake(False)
+
+
+def service_beats(name: str, venues: set[str]) -> tuple[list[str], int]:
+    """The heartbeat collectors of ``name`` that this system's instruments feed: a venue with no instrument here
+    (one system per pair, D-042 — XAUUSD has no Binance spot) never beats and must not be watched. Without any
+    beat left, the child is not judged stale (restarted only when it exits)."""
+    beats, stale = SERVICES[name][1], SERVICES[name][2]
+    beats = [b for b in beats if b not in VENUE_BEATS or b in venues]
+    return beats, (stale if beats else 0)
 
 
 def with_data_dir(s: Settings, data_dir: str | None) -> Settings:

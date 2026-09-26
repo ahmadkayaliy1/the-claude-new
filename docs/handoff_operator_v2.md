@@ -41,6 +41,17 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-09-27 \01:20 local (2026-09-26 22:20 UTC) — the user ran `switch_to_pairs.bat` (all three pairs) + the
+  recorder; production now runs `82fdafa` as three per-pair systems (BTCUSDT 8766, ETHUSDT 8767, XAUUSD 8768).**
+  Migration: BTC 28 decisions, ETH 24, XAU 0; ledger 48 rows. First cycles fine; BTC placed a demo BUY 0.01 at
+  84343 (SL 84095, TP 85255, conf 60) at 22:17 UTC. Live findings: (1) XAUUSD's ingest-binance was killed by the
+  watchdog every \2 min (its Binance *spot* row stayed "starting": no spot instrument) — fixed on the branch
+  (`service_beats`, spot row "stopped"); needs a merge + `restart.bat XAUUSD`. (2) RAM: the three systems use
+  ≈2.5 GB private (≈0.8 GB each); the laptop had 0.42 GB free, pagefile 3.3 GB, CPU 100 % during the start-up
+  backfill pass (three backfill workers). Advice given: stop XAUUSD over the weekend (gold closed until Sunday
+  22:00 UTC), close ChatGPT/Chrome while trading, consider a 16 GB RAM upgrade. (3) Tokens: a cycle is now ≈19–23 k
+  input (cache created once per prompt version); CLI-reported API-equivalent ≈ $0.13–0.17 per call.
+
 * **2026-09-27 — Phase 2 (P12.2, D-042) is DONE on branch `feat/instances` (it contains Phase 1 too; `main` is
   still `7b5e5da`, production still runs the all-pairs system on `f01c86d`-era code).** 413 unit tests pass. Review:
   3 lenses (processes/concurrency, money safety, ops scripts + migration), each finding adversarially verified: 25 of

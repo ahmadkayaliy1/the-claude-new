@@ -462,8 +462,9 @@ class BinanceLiveService:
                 delay = min(delay * 2, 60.0)
 
     async def run(self) -> None:
-        for venue in MARKETS:
-            self.appdb.set_status(venue, "starting")
+        active = {i.venue for i in self.instruments}
+        for venue in MARKETS:            # a venue with no instrument in this system stays "stopped" (D-042)
+            self.appdb.set_status(venue, "starting" if venue in active else "stopped")
         for venue, rest in self.rest.items():
             await self._sync_clock_until_ok(venue, rest)
         if self.stop.is_set():

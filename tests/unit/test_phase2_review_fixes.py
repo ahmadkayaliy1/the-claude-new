@@ -314,3 +314,21 @@ def test_migration_removes_a_stale_wal_next_to_the_new_file(tmp_path):
     m.copy_for_pair(src, dst, "BTCUSDT")
     assert not Path(str(dst) + "-wal").exists()
     assert sqlite3.connect(dst).execute("SELECT count(*) FROM ai_decisions").fetchone()[0] == 1
+
+
+# ------------------------------------------------------------------ live finding 2026-09-27: XAUUSD has no Binance spot
+def test_watchdog_only_watches_the_venues_this_system_feeds():
+    assert sv.service_beats("ingest-binance", {"binance_usdm", "mt5"}) == (["binance_usdm"], 120)   # XAUUSD
+    assert sv.service_beats("ingest-binance", {"binance_spot", "binance_usdm", "mt5"}) == (["binance_spot", "binance_usdm"], 120)
+    assert sv.service_beats("ingest-binance", {"mt5"}) == ([], 0)                 # nothing to watch: never judged stale
+    assert sv.service_beats("engine", {"mt5"}) == (["engine"], 120)               # service beats are not venue-bound
+    assert sv.service_beats("api", set()) == ([], 0)
+
+
+def test_a_xau_supervisor_does_not_watch_the_spot_heartbeat(monkeypatch):
+    monkeypatch.setenv(INSTANCE_ENV, "XAUUSD")
+    monkeypatch.setattr(sv.Supervisor, "_terminal_paths", lambda self: {})
+    monkeypatch.setattr(sv, "JobObject", lambda: NS(handle=None, add=lambda pid: None, pids=lambda: [],
+                                                    keep_members_on_close=lambda: False))
+    s = sv.Supervisor(["ingest-binance", "ingest-mt5"], None)
+    assert s.children["ingest-binance"].beats == ["binance_usdm"] and s.children["ingest-mt5"].beats == ["mt5"]
