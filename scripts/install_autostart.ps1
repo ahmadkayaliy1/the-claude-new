@@ -94,6 +94,12 @@ Register-ScheduledTask -TaskName "TradingSystem" -Action $tsAction -Trigger @($l
     -Principal $principal -Settings $tsSettings -Force `
     -Description "Trading system: start/keep the supervisor running; paused by scripts\stop.bat (docs\ops_windows.md)" | Out-Null
 
-Get-ScheduledTask -TaskName "TradingSystem*" | Format-Table TaskName, State -AutoSize
+# schtasks, not Get-ScheduledTask: PowerShell 5.1 cannot read back a trigger that repeats indefinitely
+# (0x80041318 "incorrectly formatted or out of range") although the task is valid and runs
+foreach ($name in @("TradingSystem-MT5", "TradingSystem")) {
+    if ($NoMT5Task -and $name -eq "TradingSystem-MT5") { continue }
+    $q = schtasks /Query /TN $name /FO LIST 2>$null | Select-String "Status|Next Run"
+    Write-Host ("registered: {0}  {1}" -f $name, (($q | ForEach-Object { $_.Line.Trim() }) -join " | "))
+}
 Write-Host "Done. The keep-alive starts the system within $KeepAliveMinutes min unless you stopped it with stop.bat"
 Write-Host "(then run scripts\start.bat). Check: scripts\status.bat  |  remove: scripts\uninstall_autostart.bat"

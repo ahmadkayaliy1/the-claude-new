@@ -20,6 +20,15 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
   protection is on but has not removed it. This is why the machine has 0.2–0.4 GB free, why `claude auth status`
   took 55 s, and why the ≤ 1.5 GB RAM budget was impossible. **Only the user removes it (system/security
   change); the agent never kills or deletes it.** Until it is gone, plan RAM as if only ~1 GB were available.
+* **Open ops issue (check in Phase 1):** since the user installed autostart (2026-09-26 16:57 UTC) the supervisor
+  logs `terminal_in_job` for the MT5 terminal it launched itself via `cmd start` (events 16:57:28 terminal_started
+  → 16:57:44 / 16:58:30 terminal_in_job, two different terminal pids). Either `spawn_outside()`'s
+  CREATE_BREAKAWAY_FROM_JOB is refused when the supervisor runs under Task Scheduler / the detached launcher (the
+  terminal then inherits that job), or `_check_terminal_job()` / `winops.in_job()` test "any job" instead of our
+  job (a `JobObject.handle` of 0 is falsy-but-not-None and `IsProcessInJob(h, NULL)` means any job). Verify which,
+  fix, and make sure a supervisor crash cannot close the terminal (that is the whole point of OPS-04).
+* The `install_autostart.ps1` final listing used `Get-ScheduledTask`, which fails with 0x80041318 on a trigger
+  that repeats indefinitely (PowerShell 5.1 bug; the task itself is valid and runs) — replaced by `schtasks`.
 * Everything in `PROJECT_STATUS.md` up to D-037 is merged on `main` (HEAD `6fa8c4d` + branch
   `fix/report-tz` = `b9ff160`, a 1-line report fix, not yet merged by the user). 334 unit tests pass.
 * Live numbers (data/app.db, 25 real Claude calls today): input **~23 k tokens/call** (4.9 k cached; the
