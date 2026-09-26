@@ -7,7 +7,7 @@
 ## Overview
 - **Started:** 2026-09-25. **Approx. completion:** 76%.
 - **Current milestone:** Audit fixes integrated; waiting on the user: start (H7), power settings (H2), Claude sign-in (H11)
-- **Summary:** M0–M4, M6, M8, M10 essentially complete; M9 paper execution complete (MT5 demo sends await H6). A 57-finding readiness audit was fixed and integrated on 2026-09-26 (D-031…D-034): backfill robustness, suspend-aware supervisor started detached by the user (scripts\\start.bat), AI call rationing, executor cursors/isolation. AI brain = Claude via the user's subscription (D-030, P8.9) with Gemini free as fallback. Next: user starts the system + recorder, applies power settings, signs in Claude (H11) → first live decisions → paper run; P1.11 / P7.1 once enough data; P6.15; P9.6.
+- **Summary:** M0–M4, M6, M8, M10 essentially complete; M9 paper execution complete (MT5 demo sends await H6). A 57-finding readiness audit was fixed and integrated on 2026-09-26 (D-031…D-034): backfill robustness, suspend-aware supervisor started detached by the user (scripts\start.bat), AI call rationing, executor cursors/isolation. AI brain = Claude via the user's subscription (D-030, P8.9) with Gemini free as fallback. Next: user starts the system + recorder, applies power settings, signs in Claude (H11) → first live decisions → paper run; P1.11 / P7.1 once enough data; P6.15; P9.6.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
