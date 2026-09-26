@@ -102,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
         "engine": "quantitative analysis + AI decision engine",
         "executor": "risk gate + execution service",
         "api": "dashboard backend (FastAPI) + web UI",
-        "run": "supervisor: run everything with one command (`run all`)",
+        "run": "supervisor: run everything with one command (`run all`; --detach | --stop | --status, scripts/*.bat)",
     }
     for name, text in helps.items():
         sp = sub.add_parser(name, help=text, add_help=False)

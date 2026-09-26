@@ -12,6 +12,7 @@ import logging.handlers
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Iterable
 
@@ -127,7 +128,45 @@ def setup_logging(
 
     for noisy in ("httpx", "httpcore", "websockets", "urllib3", "asyncio"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    logging.captureWarnings(True)        # warnings → redacting handlers, not raw stderr
+    _install_excepthooks(process_name, note_stderr=not console)
     return logging.getLogger(process_name)
+
+
+def _install_excepthooks(process_name: str, *, note_stderr: bool) -> None:
+    """Uncaught exceptions (main thread + threads) are logged through the redacting handlers (OPS-06/F8).
+
+    ``note_stderr`` (no console handler, e.g. a supervised child whose stderr is ``logs/<service>.stderr.log``):
+    also write one redacted line there, so the supervisor's exit event says why; the traceback is in the .jsonl.
+    """
+    crash = logging.getLogger("uncaught")
+
+    def note(t: type, v: BaseException, where: str = "") -> None:
+        if note_stderr and sys.stderr is not None:
+            try:
+                line = f"uncaught {t.__name__}{where}: {v} (traceback in logs/{process_name}.jsonl)"
+                sys.stderr.write(_REDACTOR(line) + "\n")
+                sys.stderr.flush()
+            except (OSError, ValueError):
+                pass
+
+    def hook(t, v, tb) -> None:  # noqa: ANN001
+        if issubclass(t, KeyboardInterrupt):
+            sys.__excepthook__(t, v, tb)
+            return
+        crash.critical("uncaught %s", t.__name__, exc_info=(t, v, tb))
+        note(t, v)
+
+    def thread_hook(a: threading.ExceptHookArgs) -> None:
+        if a.exc_type is SystemExit:
+            return
+        name = getattr(a.thread, "name", "?")
+        crash.critical("uncaught %s in thread %s", a.exc_type.__name__, name,
+                       exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
+        note(a.exc_type, a.exc_value, f" in thread {name}")
+
+    sys.excepthook = hook
+    threading.excepthook = thread_hook
 
 
 def setup_from_settings(process_name: str, settings) -> logging.Logger:  # noqa: ANN001 (avoid import cycle)
@@ -138,6 +177,7 @@ def setup_from_settings(process_name: str, settings) -> logging.Logger:  # noqa:
         level=lc.level,
         max_bytes=lc.max_bytes,
         backups=lc.backups,
-        console=lc.console,
+        # TS_LOG_CONSOLE=0: set by the supervisor for its children (their stderr is a file; the .jsonl has it all)
+        console=lc.console and os.environ.get("TS_LOG_CONSOLE", "").strip() != "0",
         secret_env_names=settings.secret_env_names(),
     )
