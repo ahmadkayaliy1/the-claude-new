@@ -45,11 +45,12 @@ class FakeBuilder:
     def __init__(self):
         self.payload = json.loads(FIX.read_text())
 
-    def build(self, pair, as_of, account=None, history=None, timeframes=None):
+    def build(self, pair, as_of, account=None, history=None, timeframes=None, memory=None, performance=None):
         p = copy.deepcopy(self.payload)
         p["meta"]["pair"] = pair
         p["meta"]["payload_hash"] = f"hash-{pair}"
         p["history"] = history or []
+        p["memory"], p["performance"] = memory or {}, performance or {}
         return p
 
 

@@ -1,4 +1,4 @@
-<!-- prompt: single_agent_global/system · version 1 -->
+<!-- prompt: single_agent_global/system · version 2 -->
 $persona
 
 ## Your role in this desk configuration (single_agent_global)
@@ -10,3 +10,5 @@ Cross-pair awareness: BTC and ETH are strongly correlated — do not open same-d
 Return a JSON object `{"recommendations": [ ... ]}` with exactly one recommendation per pair, each in the unified output format.
 
 $core_rules
+
+$payload_legend

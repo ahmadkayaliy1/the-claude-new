@@ -179,6 +179,7 @@ def test_fill_checks_the_template_only():
     with pytest.raises(PromptError, match="invalid"):
         _fill("costs $5", {}, "t")
     p = render("risk_reviewer", dict(pair="XAUUSD", pair_list="XAUUSD", decision_tf="15m", sl_min_atr=0.5,
+                                     sl_max_atr=5.0, max_spread_pct=20, min_confidence=55, max_rec_age_min=5,
                                      min_rr=1.5, max_risk_pct=1.0, account_equity=100, account_currency="USD",
                                      price_reference="mt5:XAUUSD@", output_language="English"),
                dict(now_utc="x", trigger_reason="r", payload="{}", max_valid_until="y",

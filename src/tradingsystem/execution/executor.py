@@ -224,7 +224,8 @@ class Executor:
             open_positions=acct["open_positions"], open_risk_pct_by_pair=acct.get("open_risk_pct_by_pair", {}),
             realized_pnl_today_usd=acct.get("realized_today_usd", 0.0), unrealized_pnl_usd=acct.get("unrealized_usd", 0.0),
             kill_switch=(self.s.paths.data() / "KILL_SWITCH").exists(), basis_ok=basis_ok, basis_reason=basis_reason)
-        gate = evaluate(rec_x, pair, ctx, self.s.risk, self.s.risk.correlated_groups)
+        gate = evaluate(rec_x, pair, ctx, self.s.risk, self.s.risk.correlated_groups,
+                        min_confidence=self.s.risk.min_confidence)
         detail = {"gate": [{"check": n, "ok": ok, "detail": d} for n, ok, d in gate.checks],
                   "executed_levels": {"entry": gate.entry, "stop_loss": rec_x["stop_loss"],
                                       "take_profits": [t["price"] for t in rec_x["take_profits"]]},

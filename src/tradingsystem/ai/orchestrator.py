@@ -33,6 +33,7 @@ from ..core.timeutil import iso, now_ms, parse_date_spec
 from .budget import CostGovernor, RateLimiter, UsageStore
 from .contract import (AssessmentSet, Decision, Recommendation, RecommendationSet, RiskReview,
                        TimeframeAssessment)
+from .model_view import view
 from .prompts import render
 from .providers import LLMProvider, ProviderError, make_provider
 from .repair import Generation, generate_validated
@@ -123,7 +124,8 @@ class Orchestrator:
     def payload(self, pair: str, as_of: int, account: dict | None = None) -> dict:
         """The snapshot the model receives for ``pair`` at ``as_of`` (account block + recent decisions)."""
         return self.builder.build(pair, as_of, account=account or self.default_account(),
-                                  history=self.store.recent(pair))
+                                  history=self.store.recent(pair), memory=self.store.memory(pair),
+                                  performance=self.store.performance(pair))
 
     def horizon_ms(self, pair: str | None) -> int:
         """Latest allowed ``valid_until`` after the cycle time: 4 decision bars."""
@@ -135,7 +137,9 @@ class Orchestrator:
         return {
             "pair": pair or ", ".join(pairs), "pair_list": ", ".join(pairs),
             "decision_tf": (self.s.pairs[pair].decision_timeframe.value if pair else "15m"),
-            "sl_min_atr": r.sl_atr_min_mult, "min_rr": r.min_rr, "max_risk_pct": r.max_risk_per_trade_pct,
+            "sl_min_atr": r.sl_atr_min_mult, "sl_max_atr": r.sl_atr_max_mult, "min_rr": r.min_rr,
+            "max_risk_pct": r.max_risk_per_trade_pct, "max_spread_pct": round(r.max_spread_to_sl_ratio * 100),
+            "min_confidence": r.min_confidence, "max_rec_age_min": round(r.max_recommendation_age_s / 60),
             "account_equity": int(round(float(account.get("equity", self.s.execution.paper_equity)) / 10) * 10),
             "account_currency": account.get("currency", "USD"),
             "price_reference": self.reg.primary(pair).key if pair else "each pair's meta.price_reference",
@@ -445,7 +449,8 @@ class Orchestrator:
 
     async def _coordinate(self, pair: str, payload: dict, reason: str, as_of: int, account: dict,
                           assessments: list[dict], subs: list[dict], prov: LLMProvider, mode: str) -> DecisionRecord:
-        compact = {k: payload[k] for k in ("meta", "account", "market", "capabilities", "levels", "confluence", "history")}
+        compact = {k: payload[k] for k in ("meta", "account", "market", "capabilities", "levels", "confluence", "history",
+                                           "memory", "performance") if k in payload}
         pr = render("coordinator", self._system_vars(pair, account),
                     self._user_vars(pair, as_of, reason, _dump(compact), assessments=json.dumps(assessments)))
         if not assessments:
@@ -505,7 +510,8 @@ def aggregate_consensus(recs: list[dict], n_members: int, pair: str, as_of: int)
 
 
 def _dump(obj) -> str:
-    return json.dumps(obj, separators=(",", ":"), default=str, ensure_ascii=False)
+    """The text the model reads: payloads go through the compact model view (the stored payload is unchanged)."""
+    return json.dumps(view(obj), separators=(",", ":"), default=str, ensure_ascii=False)
 
 
 async def _as_list(coro) -> list[DecisionRecord]:

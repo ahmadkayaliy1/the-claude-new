@@ -66,6 +66,7 @@ def render(role: str, system_vars: dict[str, object], user_vars: dict[str, objec
     base = dict(system_vars)
     base.setdefault("persona", _fill(_read("shared/trader_persona.md"), system_vars, "persona"))
     base.setdefault("core_rules", _fill(_read("shared/core_rules.md"), system_vars, "core_rules"))
+    base.setdefault("payload_legend", _fill(_read("shared/payload_legend.md"), system_vars, "payload_legend"))
     system = _fill(_read(sys_file), base, sys_file)
     user = _fill(_read(user_file), {**system_vars, **user_vars}, user_file)
     return RenderedPrompt(role, system, user)

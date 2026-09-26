@@ -75,11 +75,14 @@ def test_min_position_risk_block(payload):
     s = load_settings(env_path=Path("nope.env"))
     reg = InstrumentRegistry.from_settings(s)
     b = SnapshotBuilder(s, reg)
-    acc = b._account({"equity": 100, "currency": "USD"}, reg.with_role("XAUUSD", "execution")[0],
-                     payload["timeframes"]["15m"], 2)
-    m = acc["min_position_risk"]
+    execu = reg.with_role("XAUUSD", "execution")[0]
+    atr = payload["timeframes"]["15m"]["indicators"]["atr14"]
+    m = b._account({"equity": 100, "currency": "USD"}, execu, atr, None, 2)["min_position_risk"]
     assert m["usd_per_price_unit_at_min_lot"] == 1.0                      # 0.01 lot × 100 oz
     assert m["min_stop_distance"] == pytest.approx(s.risk.sl_atr_min_mult * 6.97, abs=0.01)
     assert m["risk_pct_at_min_lot_and_min_stop"] == pytest.approx(m["min_stop_distance"], abs=0.01)
     assert m["max_stop_distance_at_min_lot_within_max_risk"] == pytest.approx(s.risk.max_risk_per_trade_pct)
-    assert b._account(None, reg.with_role("XAUUSD", "execution")[0], payload["timeframes"]["15m"], 2) == {}
+    # the gate's real minimum (market.execution.costs.min_stop_distance) wins over the ATR floor when given
+    m = b._account({"equity": 100, "currency": "USD"}, execu, atr, 4.8, 2)["min_position_risk"]
+    assert m["min_stop_distance"] == 4.8 and m["risk_pct_at_min_lot_and_min_stop"] == pytest.approx(4.8)
+    assert b._account(None, execu, atr, None, 2) == {}

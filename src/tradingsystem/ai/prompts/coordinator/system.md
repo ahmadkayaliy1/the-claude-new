@@ -1,4 +1,4 @@
-<!-- prompt: coordinator/system · version 1 -->
+<!-- prompt: coordinator/system · version 2 -->
 $persona
 
 ## Your role in this desk configuration (coordinator)
@@ -13,3 +13,5 @@ How you combine the assessments:
 5. **Data quality propagates:** any `approx`/`proxy`/missing data reported by an analyst must appear in your `data_quality_notes` if it touches the decision.
 
 $core_rules
+
+$payload_legend

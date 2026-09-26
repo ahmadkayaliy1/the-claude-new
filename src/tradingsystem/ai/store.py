@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.settings import PROJECT_ROOT
-from ..core.timeutil import now_ms
+from ..core.timeutil import MS_PER_DAY, now_ms
 from ..storage.sqlite_store import connect
 
 _DDL = [
@@ -141,17 +141,56 @@ class DecisionStore:
         with self._lock:     # 'skipped' rows never reached the model (data gate) — not part of its history
             rows = self._con.execute(
                 "SELECT ts, status, decision, order_type, confidence, recommendation, execution_state, outcome, "
-                "outcome_pnl_pct, virtual_outcome FROM ai_decisions WHERE pair=? AND status!='skipped' "
+                "outcome_pnl_pct, virtual_outcome, execution_detail FROM ai_decisions WHERE pair=? AND status!='skipped' "
                 "ORDER BY ts DESC LIMIT ?", (pair, limit)).fetchall()
         out = []
-        for ts, status, dec, ot, conf, rec, ex, outc, pnl, vo in rows:
+        for ts, status, dec, ot, conf, rec, ex, outc, pnl, vo, det in rows:
             r = json.loads(rec) if rec else {}
-            out.append({"time": _iso(ts), "status": status, "decision": dec, "order_type": ot, "confidence": conf,
-                        "entry": r.get("entry"), "stop_loss": r.get("stop_loss"),
-                        "take_profits": [tp.get("price") for tp in r.get("take_profits", [])],
-                        "summary": (r.get("market_summary") or "")[:200], "execution_state": ex, "outcome": outc,
-                        "outcome_pnl_pct": pnl, "virtual_outcome": vo})
+            h = {"time": _iso(ts), "status": status, "decision": dec, "order_type": ot, "confidence": conf,
+                 "entry": r.get("entry"), "stop_loss": r.get("stop_loss"),
+                 "take_profits": [tp.get("price") for tp in r.get("take_profits", [])],
+                 "summary": (r.get("market_summary") or "")[:200], "execution_state": ex, "outcome": outc,
+                 "outcome_pnl_pct": pnl, "virtual_outcome": vo}
+            if ex == "rejected" and det:
+                try:
+                    h["gate_reason"] = (json.loads(det).get("reason") or "")[:160] or None
+                except (ValueError, AttributeError):
+                    pass
+            out.append(h)
         return out
+
+    def memory(self, pair: str) -> dict[str, Any]:
+        """The model's own notes from its latest valid decision on ``pair`` (Phase 1 operator memory)."""
+        with self._lock:
+            r = self._con.execute("SELECT ts, decision, execution_state, recommendation FROM ai_decisions "
+                                  "WHERE pair=? AND status='valid' ORDER BY ts DESC LIMIT 1", (pair,)).fetchone()
+        if not r or not r[3]:
+            return {}
+        notes = (json.loads(r[3]).get("operator_notes") or "").strip()
+        return {"time": _iso(r[0]), "decision": r[1], "execution_state": r[2], "notes": notes} if notes else {}
+
+    def performance(self, pair: str, days: int = 30, now: int | None = None) -> dict[str, Any]:
+        """The model's record on ``pair`` over ``days``: cycles, answers, trade ideas, gate results, broker and
+        virtual outcomes (every idea is scored on real prices, executed or not)."""
+        since = (now or now_ms()) - days * MS_PER_DAY
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT status, decision, execution_state, outcome, outcome_pnl_usd, virtual_outcome, virtual_r "
+                "FROM ai_decisions WHERE pair=? AND ts>=? AND status!='skipped'", (pair, since)).fetchall()
+        if not rows:
+            return {}
+        ideas = [r for r in rows if r[0] == "valid" and r[1] in ("BUY", "SELL")]
+        vo = [r for r in ideas if r[5]]
+        closed = [r for r in ideas if r[3] in ("closed_profit", "closed_loss", "closed_breakeven")]
+        rs = [r[6] for r in vo if r[5] in ("tp1_first", "sl_first") and r[6] is not None]
+        return {
+            "days": days, "cycles": len(rows), "answered": sum(r[0] in ("valid", "invalid", "refused") for r in rows),
+            "no_trade": sum(r[0] == "valid" and r[1] == "NO_TRADE" for r in rows), "trade_ideas": len(ideas),
+            "gate_rejected": sum(r[2] == "rejected" for r in ideas), "executed": sum(r[2] == "executed" for r in ideas),
+            "virtual": {k: sum(r[5] == k for r in vo) for k in ("tp1_first", "sl_first", "not_triggered", "unresolved_24h")}
+            | ({"mean_r": round(sum(rs) / len(rs), 2)} if rs else {}),
+            "broker": {"closed": len(closed), "pnl_usd": round(sum(r[4] or 0.0 for r in closed), 2)} if closed else {},
+        }
 
     def last_decision(self, pair: str) -> dict | None:
         with self._lock:

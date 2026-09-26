@@ -138,11 +138,18 @@ class BinanceCfg(_Model):
 
 # --------------------------------------------------------------------------- pairs/instruments
 class ContractCfg(_Model):
-    """Execution contract facts (measured from MT5 symbol_info, P1.5; re-validated by the executor at runtime)."""
+    """Execution contract facts (measured from MT5 symbol_info, P1.5; re-validated by the executor at runtime).
+    The cost fields feed ``market.execution.costs`` in the snapshot so the model plans with the venue's real limits."""
     contract_size: float
     volume_min: float
     volume_step: float
     tick_size: float
+    stops_level_points: int | None = None            # SYMBOL_TRADE_STOPS_LEVEL (× tick_size = min SL/TP distance)
+    swap_long: float | None = None                   # per night, unit given by swap_mode
+    swap_short: float | None = None
+    swap_mode: Literal["points", "annual_pct"] | None = None
+    triple_swap_weekday: Literal["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] | None = None
+    commission_per_lot: float = 0.0                  # USD per lot per side (measured 0 on the demo, P9.5)
 
 
 class InstrumentCfg(_Model):
@@ -199,6 +206,7 @@ class RiskCfg(_Model):
     sl_atr_min_mult: float = 0.5
     sl_atr_max_mult: float = 5.0
     max_spread_to_sl_ratio: float = 0.2
+    min_confidence: int = Field(55, ge=50, le=90)     # the gate executes nothing below this confidence
     max_recommendation_age_s: int = 300
     max_data_staleness_s: int = 120
     correlated_groups: list[list[str]] = Field(default_factory=lambda: [["BTCUSDT", "ETHUSDT"]])

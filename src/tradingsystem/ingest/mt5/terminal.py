@@ -30,17 +30,23 @@ class MT5Unavailable(RuntimeError):
 
 
 NO_LAUNCH_ENV = "TS_MT5_NO_LAUNCH"    # set by the supervisor when it owns the terminal (OPS-04)
+# a terminal that has just been started is not attachable yet; initialize(path) then launches a SECOND copy as our
+# child (observed 2026-09-26 16:57: it landed in the supervisor's job). Attach only to a terminal this old.
+NO_LAUNCH_MIN_AGE_S = 30.0
 
 
-def terminal_running(path: str) -> bool:
-    """Is the terminal at ``path`` running (any user-visible process with that exe)?"""
+def terminal_running(path: str, min_age_s: float = 0.0) -> bool:
+    """Is the terminal at ``path`` running (any user-visible process with that exe), for at least ``min_age_s``?"""
+    import time
+
     import psutil
     want = os.path.normcase(os.path.abspath(path))
-    for p in psutil.process_iter(["name"]):
+    for p in psutil.process_iter(["name", "create_time"]):
         if (p.info.get("name") or "").lower() not in ("terminal64.exe", "terminal.exe"):
             continue
         try:
-            if os.path.normcase(os.path.abspath(p.exe())) == want:
+            if os.path.normcase(os.path.abspath(p.exe())) == want and \
+                    time.time() - (p.info.get("create_time") or 0.0) >= min_age_s:
                 return True
         except (psutil.Error, OSError):
             continue
@@ -71,8 +77,10 @@ class MT5Terminal:
     def connect(self) -> AccountSnapshot:
         # under the supervisor, never let initialize(path) launch a closed terminal as *our* child (it would sit
         # in the supervisor's job and die with a watchdog kill): the supervisor starts it outside (OPS-04)
-        if os.environ.get(NO_LAUNCH_ENV) == "1" and not terminal_running(self.profile.terminal_path):
-            raise MT5Unavailable("MT5 terminal is not running — waiting for the supervisor to start it")
+        if os.environ.get(NO_LAUNCH_ENV) == "1" and \
+                not terminal_running(self.profile.terminal_path, min_age_s=NO_LAUNCH_MIN_AGE_S):
+            raise MT5Unavailable("MT5 terminal is not running (or started less than "
+                                 f"{NO_LAUNCH_MIN_AGE_S:.0f} s ago) — waiting for the supervisor's terminal")
         kwargs: dict[str, Any] = {"path": self.profile.terminal_path}
         if self.use_credentials and self.profile.login_env and os.environ.get(self.profile.login_env):
             kwargs.update(login=int(os.environ[self.profile.login_env]),

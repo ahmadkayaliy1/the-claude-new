@@ -54,6 +54,11 @@ _LOGIN_RE = re.compile(r"not logged in|please run /login|invalid (api key|bearer
 _LIMIT_RE = re.compile(r"usage limit|hit your limit|limit reached|limit will reset|out of (extra )?usage|"
                        r"rate[ _-]?limit", re.I)
 _EPOCH_RE = re.compile(r"\|(\d{10})\b")
+# two CLI processes refreshing the OAuth token at the same moment (observed 2026-09-26 after a reboot: one lost the
+# race, the next call got "403 Request not allowed"): transient — retried after a pause, never a sign-out
+_REFRESH_RACE_RE = re.compile(r"another claude code process is refreshing|failed to refresh oauth token|"
+                              r"403 request not allowed", re.I)
+START_STAGGER_S = 15.0           # minimum gap between two CLI starts of this process (token refresh happens at start)
 
 
 
@@ -89,6 +94,14 @@ def limit_reset_ms(message: str, now: int) -> int:
     return now + DEFAULT_COOLDOWN_MS
 
 
+
+def _without_titles(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {k: _without_titles(v) for k, v in node.items() if k != "title" or not isinstance(v, str)}
+    if isinstance(node, list):
+        return [_without_titles(v) for v in node]
+    return node
+
 def auth_problem(name: str, status: dict[str, Any]) -> str | None:
     """Interpret ``claude auth status --json``: only a subscription sign-in is accepted — any sign of an API key
     (``authMethod`` naming a key, or an ``apiKeySource`` other than none) is refused."""
@@ -122,6 +135,8 @@ class ClaudeCodeProvider(LLMProvider):
         self._auth_ok_once = False
         self._auth_refreshing = False
         self._slots: asyncio.Semaphore | None = None
+        self._start_lock: asyncio.Lock | None = None
+        self._last_start = float("-inf")
 
     # ------------------------------------------------------------------ availability
     def unavailable_reason(self) -> str | None:
@@ -183,12 +198,23 @@ class ClaudeCodeProvider(LLMProvider):
         return args
 
     def system_text(self, system: str, schema: dict | None) -> str:
-        """The system prompt; in prompt mode followed by the output schema (static per role → cached by the CLI)."""
+        """The system prompt; in prompt mode followed by the output schema (static per role → cached by the CLI).
+        Schema ``title`` keys only repeat the field names and are left out."""
         if not schema or self.cfg.structured_output == "native":
             return system
         return (f"{system}\n\n# Output format\nReply with ONLY one JSON object - no prose before or after it, no code "
                 "fences - that validates against this JSON Schema (respect every enum, maxLength and numeric bound):\n"
-                + json.dumps(schema, separators=(",", ":"), ensure_ascii=False))
+                + json.dumps(_without_titles(schema), separators=(",", ":"), ensure_ascii=False))
+
+    async def _staggered_start(self) -> None:
+        """Keep CLI starts of this process at least ``START_STAGGER_S`` apart (the OAuth refresh race)."""
+        if self._start_lock is None:
+            self._start_lock = asyncio.Lock()
+        async with self._start_lock:
+            wait = self._last_start + START_STAGGER_S - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_start = time.monotonic()
 
     async def _call(self, system: str, user: str, schema: dict | None, schema_name: str,
                     max_output_tokens: int) -> LLMResult:
@@ -201,6 +227,7 @@ class ClaudeCodeProvider(LLMProvider):
             why = self.unavailable_reason()          # another call may have hit the limit while we waited
             if why:
                 raise ProviderError(why, retryable=False, rate_limited=now_ms() < self.cooldown_until_ms)
+            await self._staggered_start()
             fd, system_file = tempfile.mkstemp(prefix="system_", suffix=".md", dir=self.workdir)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(self.system_text(system, schema))
@@ -266,6 +293,9 @@ class ClaudeCodeProvider(LLMProvider):
 
     def _error(self, message: str, status: Any) -> ProviderError:
         now = now_ms()
+        if _REFRESH_RACE_RE.search(message):
+            return ProviderError(f"{self.name}: sign-in token refresh race ({message[:120]}) — retried", retryable=True,
+                                 rate_limited=True)
         if _LOGIN_RE.search(message):
             self.cool_down(now + LOGIN_COOLDOWN_MS, f"{self.name}: not signed in ({message[:120]})")
             self._auth_checked = 0.0                      # re-check (in the background) after the cooldown

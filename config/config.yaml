@@ -97,7 +97,9 @@ pairs:
         symbol_by_profile: {demo: "BTCUSD@", live: "BTCUSD@"}   # validated against the server at startup
         roles: [execution, quote_reference]
         datatypes: [candles, ticks]
-        contract: {contract_size: 1, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01}   # P1.5
+        contract: {contract_size: 1, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01,   # P1.5
+                   stops_level_points: 2500, swap_long: -15, swap_short: -15, swap_mode: annual_pct,
+                   triple_swap_weekday: Wed, commission_per_lot: 0}
         start: {candles: earliest, ticks: "-90d"}
 
   ETHUSDT:
@@ -120,7 +122,9 @@ pairs:
         symbol_by_profile: {demo: "ETHUSD@", live: "ETHUSD@"}
         roles: [execution, quote_reference]
         datatypes: [candles, ticks]
-        contract: {contract_size: 10, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01}  # P1.5
+        contract: {contract_size: 10, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01,  # P1.5
+                   stops_level_points: 200, swap_long: -15, swap_short: -15, swap_mode: annual_pct,
+                   triple_swap_weekday: Wed, commission_per_lot: 0}
         start: {candles: earliest, ticks: "-90d"}
 
   XAUUSD:
@@ -134,7 +138,9 @@ pairs:
         symbol_by_profile: {demo: "XAUUSD@", live: "XAUUSD@"}
         roles: [analysis_primary, execution]
         datatypes: [candles, ticks]
-        contract: {contract_size: 100, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01}  # P1.5
+        contract: {contract_size: 100, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01,  # P1.5
+                   stops_level_points: 25, swap_long: -37.2, swap_short: 21.15, swap_mode: points,
+                   triple_swap_weekday: Wed, commission_per_lot: 0}
         start: {candles: earliest, ticks: earliest}
       - venue: binance_usdm            # real trade flow proxy for gold — used only if P1.11 approves
         symbol: XAUUSDT
@@ -152,6 +158,7 @@ risk:                                  # D-036 (user, 2026-09-26): never lose mo
   sl_atr_min_mult: 0.5
   sl_atr_max_mult: 5.0
   max_spread_to_sl_ratio: 0.2
+  min_confidence: 55                   # the gate executes nothing below this (was hard-coded)
   max_recommendation_age_s: 300
   max_data_staleness_s: 120
   correlated_groups: [[BTCUSDT, ETHUSDT]]

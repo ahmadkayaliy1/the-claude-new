@@ -16,7 +16,7 @@ import numpy as np
 
 from ..core.instruments import Instrument, InstrumentRegistry
 from ..core.sessions import SessionCalendar, calendar_for
-from ..core.settings import Settings
+from ..core.settings import RiskCfg, Settings
 from ..core.timeframes import Timeframe
 from ..core.timeutil import MS_PER_HOUR, MS_PER_MINUTE, iso
 from ..storage.reader import InstrumentReader
@@ -30,7 +30,7 @@ from .registry import capability_matrix
 from .structure import analyze_structure, premium_discount
 from .zones import fair_value_gaps, nearest_active, order_blocks, update_mitigation
 
-PAYLOAD_VERSION = "2"
+PAYLOAD_VERSION = "3"
 HTF_GATE = ("4h", "1d")         # decision context: without enough history here the AI is not asked (F11)
 RECENT_GAP_BARS = 16            # a gap this close to the decision bar blocks the AI call; older ones are warnings
 # timeframe → (bars analysed, recent candles shown)
@@ -47,6 +47,46 @@ def _r(x, d: int):
     except TypeError:
         return x
     return round(float(x), d)
+
+
+def execution_costs(contract: dict, bid: float, ask: float, spreads_1h: np.ndarray, spreads_24h: np.ndarray,
+                    atr: float | None, risk: RiskCfg, d: int) -> dict:
+    """What executing on this venue costs and the stop distances the risk gate will accept — the same rule as
+    ``risk_gate.evaluate``: a stop must be at least max(stops level + spread, sl_atr_min_mult × ATR, spread /
+    max_spread_to_sl_ratio) from the entry and at most sl_atr_max_mult × ATR. The spread used is the larger of the
+    current and the 1-hour median (a momentarily tight quote must not invite a stop the gate rejects later).
+    Distances are the same in the analysis and the execution price space (levels are translated by the basis)."""
+    tick = float(contract.get("tick_size") or 0.01)
+    spread_now = float(ask - bid)
+    med_1h = float(np.median(spreads_1h)) if len(spreads_1h) else None
+    spread = max(spread_now, med_1h or 0.0)
+    stops = float(contract.get("stops_level_points") or 0) * tick
+    parts = {"stops_level_plus_spread": stops + spread}
+    if risk.max_spread_to_sl_ratio > 0:
+        parts["spread_rule"] = spread / risk.max_spread_to_sl_ratio
+    if atr:
+        parts["atr_floor"] = risk.sl_atr_min_mult * atr
+    min_stop = max(parts.values())
+    out = {
+        "spread_now": _r(spread_now, d), "spread_median_1h": _r(med_1h, d),
+        "spread_p95_24h": _r(float(np.percentile(spreads_24h, 95)), d) if len(spreads_24h) else None,
+        "spread_max_24h": _r(float(spreads_24h.max()), d) if len(spreads_24h) else None,
+        "stops_level": _r(stops, d),
+        "min_stop_distance": _r(min_stop, d), "min_stop_set_by": max(parts, key=parts.get),
+        "max_stop_distance": _r(risk.sl_atr_max_mult * atr, d) if atr else None,
+        "max_spread_pct_of_stop": round(risk.max_spread_to_sl_ratio * 100),
+        "commission_per_lot_per_side": contract.get("commission_per_lot") or 0.0,
+    }
+    vol, cs, mode = contract.get("volume_min"), contract.get("contract_size"), contract.get("swap_mode")
+    if mode and vol and cs and contract.get("swap_long") is not None:
+        mid = (bid + ask) / 2
+
+        def per_night(v: float) -> float:
+            return v * tick * cs * vol if mode == "points" else mid * cs * vol * v / 100 / 360
+        out["swap_per_night_at_min_lot_usd"] = {"long": round(per_night(contract["swap_long"]), 3),
+                                               "short": round(per_night(contract["swap_short"]), 3),
+                                               "triple_on": contract.get("triple_swap_weekday")}
+    return out
 
 
 class SnapshotBuilder:
@@ -68,7 +108,8 @@ class SnapshotBuilder:
 
     # ------------------------------------------------------------------ public
     def build(self, pair: str, as_of: int, *, account: dict | None = None, history: list[dict] | None = None,
-              timeframes: list[str] | None = None) -> dict:
+              timeframes: list[str] | None = None, memory: dict | None = None,
+              performance: dict | None = None) -> dict:
         pcfg = self.s.pairs[pair]
         primary = self.reg.primary(pair)
         execu = self.reg.with_role(pair, "execution")[0]
@@ -81,12 +122,15 @@ class SnapshotBuilder:
         frames = {t: load_frame(rd, primary, Timeframe.parse(t), TF_PLAN[t][0], as_of, cal) for t in tfs}
         per_tf = {t: self._analyze_tf(frames[t], d, TF_PLAN[t][1], primary.venue == "mt5") for t in tfs}
         dec_tf = pcfg.decision_timeframe.value
+        dec_atr = ((per_tf.get(dec_tf) or {}).get("indicators") or {}).get("atr14")
+        market = self._market(pair, primary, execu, frames.get("1m"), as_of, exec_cal, d, dec_atr)
         payload = {
             "meta": {"pair": pair, "as_of": iso(as_of), "decision_timeframe": dec_tf,
                      "price_reference": primary.key, "execution_instrument": execu.key,
                      "payload_version": PAYLOAD_VERSION, "config_hash": self.s.config_hash},
-            "account": self._account(account, execu, per_tf.get(pcfg.decision_timeframe.value), d),
-            "market": self._market(pair, primary, execu, frames.get("1m"), as_of, exec_cal, d),
+            "account": self._account(account, execu, dec_atr,
+                                     ((market.get("execution") or {}).get("costs") or {}).get("min_stop_distance"), d),
+            "market": market,
             "capabilities": {k: {"quality": v.quality, "reason": v.reason} for k, v in caps.items()},
             "levels": self._levels(frames.get("1h"), as_of, pcfg.asset_class, d),
             "timeframes": per_tf,
@@ -96,6 +140,8 @@ class SnapshotBuilder:
             "orderflow": self._orderflow(pair, primary, frames, caps, as_of, pcfg, d),
             "derivatives": self._derivatives(pair, caps, as_of, d),
             "history": history or [],
+            "memory": memory or {},
+            "performance": performance or {},
         }
         payload["meta"]["data_warnings"] = [
             f"{t}: {f.quality.get('status')}" + (f" ({len(f)} bars)" if f.quality.get("short_history") else "")
@@ -171,17 +217,17 @@ class SnapshotBuilder:
         return out
 
     # ------------------------------------------------------------------ blocks
-    def _account(self, account: dict | None, execu: Instrument, dec: dict | None, d: int) -> dict:
+    def _account(self, account: dict | None, execu: Instrument, atr: float | None, min_stop: float | None,
+                 d: int) -> dict:
         """The account state passed in, plus what the minimum executable position risks (rule 8): the execution
-        instrument's minimum lot at the minimum stop distance (``risk.sl_atr_min_mult`` × decision-TF ATR)."""
+        instrument's minimum lot at the minimum stop distance the gate accepts (``market.execution.costs``)."""
         if not account:
             return {}
         out = dict(account)
         eq, spec = account.get("equity"), execu.contract
-        atr = ((dec or {}).get("indicators") or {}).get("atr14")
-        if eq and spec and atr and "USD" in execu.symbol.upper():
+        if eq and spec and (min_stop or atr) and "USD" in execu.symbol.upper():
             per_unit = spec["volume_min"] * spec["contract_size"]          # USD per 1.0 price move at the min lot
-            sl = self.s.risk.sl_atr_min_mult * atr
+            sl = min_stop or self.s.risk.sl_atr_min_mult * atr
             out["min_position_risk"] = {
                 "instrument": execu.key, "volume_min": spec["volume_min"], "contract_size": spec["contract_size"],
                 "usd_per_price_unit_at_min_lot": round(per_unit, 4), "min_stop_distance": _r(sl, d),
@@ -205,8 +251,23 @@ class SnapshotBuilder:
                 return {"ts": int(c["time_msc"][-1]), "bid": float(c["bid"][-1]), "ask": float(c["ask"][-1])}
         return None
 
+    def _spreads(self, inst: Instrument, as_of: int) -> tuple[np.ndarray, np.ndarray]:
+        """(spreads of the last hour, of the last 24 h) from the stored quotes — causal (<= as_of)."""
+        dt = "ticks" if "ticks" in inst.datatypes else "book_ticker" if "book_ticker" in inst.datatypes else None
+        if dt is None:
+            return np.array([]), np.array([])
+        tcol = "time_msc" if dt == "ticks" else "ts"
+        c = self.reader(inst).read_range(spec_for(inst, dt), as_of - 24 * MS_PER_HOUR, as_of + 1, [tcol, "bid", "ask"])
+        if not len(c[tcol]):
+            return np.array([]), np.array([])
+        s = np.asarray(c["ask"], dtype=float) - np.asarray(c["bid"], dtype=float)
+        ok = s >= 0
+        t = np.asarray(c[tcol])[ok]
+        s = s[ok]
+        return s[t >= as_of - MS_PER_HOUR], s
+
     def _market(self, pair: str, primary: Instrument, execu: Instrument, m1: Frame | None, as_of: int,
-                exec_cal: SessionCalendar, d: int) -> dict:
+                exec_cal: SessionCalendar, d: int, dec_atr: float | None = None) -> dict:
         pq, eq = self.quote_at(primary, as_of), self.quote_at(execu, as_of)
         out: dict = {"session": ctx.sessions(as_of), "execution_market_open": exec_cal.is_open(as_of)}
         if pq:
@@ -218,6 +279,10 @@ class SnapshotBuilder:
             spread = eq["ask"] - eq["bid"] if eq["ask"] and eq["bid"] else None
             out["execution"] = {"instrument": execu.key, "bid": _r(eq["bid"], d), "ask": _r(eq["ask"], d),
                                 "spread": _r(spread, d), "age_s": max(0.0, round((as_of - eq["ts"]) / 1000, 1))}
+            if execu.contract and spread is not None:
+                s1h, s24h = self._spreads(execu, as_of)
+                out["execution"]["costs"] = execution_costs(execu.contract, eq["bid"], eq["ask"], s1h, s24h, dec_atr,
+                                                            self.s.risk, d)
             if pq and primary.key != execu.key:
                 basis = (eq["bid"] + eq["ask"]) / 2 - (pq["bid"] + pq["ask"]) / 2
                 out["basis_exec_minus_analysis"] = _r(basis, d)

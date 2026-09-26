@@ -1,0 +1,114 @@
+"""The model's view of a snapshot payload (Phase 1): the same information in fewer tokens.
+
+The internal payload — stored, hashed, and read by the trigger policy, the data gate and the dashboard — is not
+changed; only the text the model reads is compacted:
+
+* timestamps ``MM-DD HH:MM`` (UTC, the year of ``meta.as_of``; another year is written in full);
+* one ``data`` status per timeframe instead of the full quality record (details only when not ok);
+* column tables for zones and structure events (the column names are in the cached system prompt);
+* fewer raw candles on the higher timeframes (structure, zones and indicators summarise the analysed history);
+* capability flags grouped by quality; null fields omitted; fixed explanations moved to
+  ``prompts/shared/payload_legend.md`` (part of the cached system prompt).
+
+``VIEW_VERSION`` changes whenever the rendering does (it is part of what the model saw, next to the payload hash).
+"""
+from __future__ import annotations
+
+import re
+from typing import Any
+
+VIEW_VERSION = "1"
+RECENT = {"1w": 4, "1d": 6, "4h": 8, "1h": 8, "15m": 16, "5m": 12, "1m": 10}
+ZONE_COLS = ("dir", "top", "bottom", "formed", "fill_pct", "touched", "strength_atr", "age_bars")
+EVENT_COLS = ("time", "kind", "dir", "level")
+QUALITY_KEEP = ("status", "coverage", "last_bar_end_lag_s", "stale", "missing_last_bar", "short_history", "gaps")
+HISTORY_SUMMARY_CHARS = 140
+_ISO = re.compile(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::\d\d(?:\.\d+)?)?Z$")
+
+
+def short_time(s: str, year: str) -> str:
+    m = _ISO.match(s)
+    if not m:
+        return s
+    y, mo, d, h, mi = m.groups()
+    return f"{mo}-{d} {h}:{mi}" if y == year else f"{y}-{mo}-{d} {h}:{mi}"
+
+
+def _compact(obj: Any, year: str) -> Any:
+    """Short timestamps everywhere; null dict fields dropped (positions inside rows are kept)."""
+    if isinstance(obj, dict):
+        return {k: _compact(v, year) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_compact(v, year) for v in obj]
+    if isinstance(obj, str):
+        return short_time(obj, year)
+    return obj
+
+
+def _row(d: dict, cols: tuple[str, ...]) -> list:
+    return [(int(d[c]) if isinstance(d.get(c), bool) else d.get(c)) for c in cols]
+
+
+def _timeframe(tf: str, t: dict) -> dict:
+    t = dict(t)
+    q = t.pop("quality", None) or {}
+    t.pop("recent_columns", None)
+    if q.get("status", "ok") == "ok":
+        t["data"] = "ok"
+    else:
+        t["data"] = {k: q[k] for k in QUALITY_KEEP if q.get(k) not in (None, False, [], {})}
+    if "recent" in t and tf in RECENT:
+        t["recent"] = t["recent"][-RECENT[tf]:]
+    st = t.get("structure")
+    if isinstance(st, dict) and st.get("events"):
+        t["structure"] = {**st, "events": [_row(e, EVENT_COLS) for e in st["events"]]}
+    z = t.get("zones")
+    if isinstance(z, dict):
+        t["zones"] = {k: [_row(x, ZONE_COLS) for x in v] for k, v in z.items()}
+    return t
+
+
+def _capabilities(caps: dict) -> dict:
+    out: dict[str, Any] = {}
+    for name, v in caps.items():
+        q = (v or {}).get("quality")
+        if q == "real":
+            out.setdefault("real", []).append(name)
+        else:
+            out.setdefault(q or "unknown", {})[name] = (v or {}).get("reason")
+    return out
+
+
+def model_view(payload: dict) -> dict:
+    """The compact rendering of one payload (or of a partial one, e.g. a timeframe slice)."""
+    meta = dict(payload.get("meta") or {})
+    as_of = str(meta.get("as_of") or "")
+    year = as_of[:4]
+    meta["view_version"] = VIEW_VERSION
+    out: dict[str, Any] = {}
+    for k, v in payload.items():
+        if k == "meta":
+            continue
+        if k in ("timeframes", "timeframe") and isinstance(v, dict):
+            v = {tf: (_timeframe(tf, t) if isinstance(t, dict) else t) for tf, t in v.items()}
+        elif k == "capabilities" and isinstance(v, dict):
+            v = _capabilities(v)
+        elif k == "account" and isinstance(v, dict):
+            v = {a: b for a, b in v.items() if a != "equity_source"}
+        elif k == "market" and isinstance(v, dict):
+            v = {a: b for a, b in v.items() if a != "note"}
+        elif k == "history" and isinstance(v, list):
+            v = [{**h, "summary": (h.get("summary") or "")[:HISTORY_SUMMARY_CHARS]} if isinstance(h, dict) else h
+                 for h in v]
+        out[k] = _compact(v, year)
+    meta_view = _compact({a: b for a, b in meta.items() if a != "as_of"}, year)
+    return {"meta": {"as_of": as_of, **meta_view}, **out} if payload.get("meta") is not None else out
+
+
+def view(obj: Any) -> Any:
+    """``model_view`` for a payload-like dict or a list of them; anything else unchanged."""
+    if isinstance(obj, dict) and ("meta" in obj or "timeframes" in obj or "timeframe" in obj):
+        return model_view(obj)
+    if isinstance(obj, list):
+        return [view(x) for x in obj]
+    return obj

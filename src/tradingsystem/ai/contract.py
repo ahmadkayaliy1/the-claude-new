@@ -140,6 +140,9 @@ class Recommendation(_M):
     next_review: NextReview
     reasoning_trace: Text(3000, 10)
     data_quality_notes: Notes(10) = Field(default_factory=list)
+    operator_notes: Text(600) = Field("", description="Notes to yourself for the next cycle on this pair: what you "
+                                                      "are watching, the plan for a pending order or open trade, what "
+                                                      "would change your mind, the levels that matter")
 
     @model_validator(mode="before")
     @classmethod

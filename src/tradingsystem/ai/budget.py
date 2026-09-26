@@ -41,6 +41,9 @@ class BudgetExceeded(RuntimeError):
     """A call was refused by the rate limiter or the Cost Governor (the cycle must fall back to NO_TRADE)."""
 
 
+EXTRA_COLUMNS = (("api_equivalent_usd", "REAL"), ("num_turns", "INTEGER"), ("cache_creation_tokens", "INTEGER"))
+
+
 class UsageStore:
     def __init__(self, app_db: Path) -> None:
         self._con = connect(app_db, cache_mb=2)
@@ -48,16 +51,27 @@ class UsageStore:
         with self._lock:
             for s in _DDL:
                 self._con.execute(s)
+            have = {r[1] for r in self._con.execute("PRAGMA table_info(ai_usage)")}
+            for col, typ in EXTRA_COLUMNS:      # added in Phase 1; several services open the store concurrently
+                if col not in have:
+                    try:
+                        self._con.execute(f"ALTER TABLE ai_usage ADD COLUMN {col} {typ}")
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column" not in str(exc):
+                            raise
 
     def record(self, res: LLMResult | None, *, provider: str, model: str, purpose: str, pair: str | None,
                ok: bool, error: str | None = None) -> None:
+        x = (res.extra if res else None) or {}
         with self._lock:
             self._con.execute(
                 "INSERT INTO ai_usage(ts, provider, model, purpose, pair, input_tokens, output_tokens, cached_tokens, "
-                "cost_usd, latency_ms, ok, error, request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "cost_usd, latency_ms, ok, error, request_id, api_equivalent_usd, num_turns, cache_creation_tokens) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (now_ms(), provider, model, purpose, pair, res.input_tokens if res else 0, res.output_tokens if res else 0,
                  res.cached_input_tokens if res else 0, res.cost_usd if res else 0.0, res.latency_ms if res else 0,
-                 int(ok), error, res.request_id if res else None))
+                 int(ok), error, res.request_id if res else None, x.get("api_equivalent_usd"), x.get("num_turns"),
+                 x.get("cache_creation_input_tokens")))
 
     def count_since(self, provider: str, since_ms: int) -> int:
         with self._lock:
