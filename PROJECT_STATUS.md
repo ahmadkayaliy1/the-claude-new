@@ -6,8 +6,8 @@
 
 ## Overview
 - **Started:** 2026-09-25. **Approx. completion:** 76%.
-- **Current milestone:** Audit fixes integrated; waiting on the user: start (H7), power settings (H2), Claude sign-in (H11)
-- **Summary:** M0–M4, M6, M8, M10 essentially complete; M9 paper execution complete (MT5 demo sends await H6). A 57-finding readiness audit was fixed and integrated on 2026-09-26 (D-031…D-034): backfill robustness, suspend-aware supervisor started detached by the user (scripts\start.bat), AI call rationing, executor cursors/isolation. AI brain = Claude via the user's subscription (D-030, P8.9) with Gemini free as fallback. Next: user starts the system + recorder, applies power settings, signs in Claude (H11) → first live decisions → paper run; P1.11 / P7.1 once enough data; P6.15; P9.6.
+- **Current milestone:** v2 hand-off written (docs/handoff_operator_v2.md); system STOPPED since 2026-09-26 08:42 UTC after reboots (H13); malware found (H12)
+- **Summary:** M0–M10 built; demo/auto execution with Claude via the user's subscription (D-030…D-037). 2026-09-26: target v2 decided (D-038…D-040) — Claude as operator with memory and learning within bounds, one instance per pair, chart images, richer snapshot; full design, phases and acceptance tests in docs/handoff_operator_v2.md (Phase 0 = user: remove the miner H12, autostart H13, Gemini key H4, restart). The laptop was rebooted twice today and nothing auto-starts, so the system is down until the user runs scripts\\start.bat.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
@@ -25,6 +25,8 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 | H9 | Any switch to LIVE trading is the user's decision only | P9.7 / P11.4 | ⏳ |
 | H10 | Demo balance vs intended live capital | P9.5 | ✅ user's intended live capital ≈ $100 (all 3 pairs); the current demo (≈$158) is close enough for realistic tests |
 | H11 | Sign the Claude Code CLI in with your Claude subscription once: `claude auth login` in a terminal (or `claude setup-token` and put the token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`) | P8.9 | ⏳ |
+| H12 | **Remove the crypto-miner** found on the laptop (2026-09-26): `C:\ProgramData\WindowsTask\` (MicrosoftHost.exe, AppHost.exe, audiodg.exe, WinRing0x64.sys, winlogon.bat/new.xml), persistence `HKLM\...\Run "Realtek HD Audio" = C:\ProgramData\ReaItekHD\taskhostw.exe` and the Startup shortcut `WindowsFormsApp10 - Shortcut.lnk`; 2.1 GB RSS, 50 % CPU. Defender full/offline scan as administrator, remove the entries, reboot, change passwords (Windows, e-mail, broker, Claude). The agent never touches it | all | ⏳ |
+| H13 | After every reboot nothing auto-starts: run `scripts\start.bat` + `scripts\start_recorder.bat`, or install autostart once with `scripts\install_autostart.bat` (`-DryRun` first) | P5.3 | ⏳ |
 
 ## Environment facts (observed 2026-09-25, read-only probes)
 - Windows 11 Pro; CPU i3-1005G1 (2C/4T); RAM 7.7 GB; ~59 GB free on C:. Local TZ **"Middle East Standard Time"** (UTC+3 now).
@@ -77,6 +79,9 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - [2026-09-26] **D-035** Claude Code output mode = schema in the prompt (`structured_output: prompt`), not `--json-schema`: measured on the first live cycle, `--json-schema` made the CLI run a tool round-trip (≈50 k input tokens and 2.5–4.5 min per attempt) and the strict text-length limits forced a repair call (BTC SELL / ETH NO_TRADE took 6–7 min, so they were already past `max_recommendation_age_s`). Prompt mode on the same real BTC payload: 1 turn, 21.8 k in / 4.9 k out, 79 s, valid first time. Free-text fields are now trimmed instead of rejected and a NO_TRADE risk block is dropped (the SL/side/TP/RR rules stay strict); two CLI calls may run at once (`max_concurrency: 2`, set 1 on 4 GB machines).
 - [2026-09-26] **D-036** (user) Automatic execution on the MT5 **demo** account (`EXECUTION_MODE=demo`, `EXECUTION_TRIGGER=auto` in `.env`), monitored by the agent. Risk with the $100 demo balance: target 1 %, max 3 % per trade (the 0.01-lot minimum sets the size: BTC/ETH usually 1.5–3 %, gold usually skipped), daily loss ≤ 10 % enforced as a worst case (realised today + every open SL risk + the new trade), BTC+ETH group ≤ 4 %, ≤ 3 open. Emergency stop: `scripts\kill_switch_on.bat`.
 - [2026-09-26] **D-037** MT5 history backfill order: 1h–1w candles of every instrument first, then 1m–15m, then ticks (a multi-year BTC 1m re-scan was starving the XAUUSD/ETHUSD 4h/1d history the engine's data gate needs); in-step heartbeats every 30 s.
+- [2026-09-26] **D-038** (user) Target v2 — *Claude as operator*: Claude analyses and decides, Python fetches/computes/executes; Claude keeps reviewing errors and results and improves within bounds; one fully independent system instance per pair (`start.bat BTCUSDT`); comprehensive per-pair analysis incl. **candle-chart images**. Design and phases: `docs/handoff_operator_v2.md`.
+- [2026-09-26] **D-039** (user) Learning autonomy: prompts/playbook and soft parameters change automatically only inside code-enforced bounds (tools/tune.py, logged, expiring, revertible); code, risk limits and execution logic change only through proposals the user approves. Daily loss limit **10 % per pair instance** (user's choice) + an account-wide drawdown stop of 25 % from the high-water mark (lead's safety floor).
+- [2026-09-26] **D-040** Operator session model: the user asked for a persistent Claude session; it is built as persistent *memory* (`operator_notes` fed back per pair) with event-driven single-turn calls by default, and a true persistent stream-json session as a measured, switchable second mode — a session polling 24/7 would exhaust the shared subscription limits within hours. Measured: ~23 k input / 3–5 k output tokens and ~50 s per call; ~1.1 M tokens/day per pair at today's cadence → one instance first.
 
 ## Phases
 
