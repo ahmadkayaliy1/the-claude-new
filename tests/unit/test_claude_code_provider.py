@@ -2,6 +2,7 @@
 orchestrator's fallback routing (D-030). The error envelopes are real CLI captures (fixtures/real/PROVENANCE.md)."""
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -203,6 +204,7 @@ def fake_cli(prov, monkeypatch):
         return procs[-1]
     monkeypatch.setattr(cc.asyncio, "create_subprocess_exec", spawn)
     prov.api_key = "token"                                   # auth trusted → no `claude auth status` process
+    prov._auth_problem, prov._auth_checked = None, time.monotonic()   # (set after construction: mark it checked)
     return procs
 
 
@@ -274,6 +276,7 @@ def test_auth_checks_never_block_and_a_failed_check_keeps_a_verified_sign_in(pro
             raise a
         return a
     monkeypatch.setattr(prov, "check_auth", check)
+    monkeypatch.setattr(cc, "START_STAGGER_S", 0.0)                 # the refresh counts as a CLI start
 
     def settle():
         assert done.wait(5)

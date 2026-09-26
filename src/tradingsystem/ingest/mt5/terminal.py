@@ -45,9 +45,9 @@ def terminal_running(path: str, min_age_s: float = 0.0) -> bool:
         if (p.info.get("name") or "").lower() not in ("terminal64.exe", "terminal.exe"):
             continue
         try:
-            if os.path.normcase(os.path.abspath(p.exe())) == want and \
-                    time.time() - (p.info.get("create_time") or 0.0) >= min_age_s:
-                return True
+            age = time.time() - (p.info.get("create_time") or 0.0)
+            if os.path.normcase(os.path.abspath(p.exe())) == want and (age >= min_age_s or age < 0):
+                return True                                # age < 0: the wall clock stepped back — not "young"
         except (psutil.Error, OSError):
             continue
     return False

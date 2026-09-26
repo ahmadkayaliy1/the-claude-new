@@ -73,7 +73,7 @@ def test_executor_uses_broker_specs_and_mt5_account(tmp_path, monkeypatch):
     assert ex.mt5.pair_by_symbol == {"BTCUSD@": "BTCUSDT", "ETHUSD@": "ETHUSDT", "XAUUSD@": "XAUUSD"}
     now = now_ms()
     monkeypatch.setattr(ex, "latest_quote", lambda key, max_age_ms=None: Tick(now - 500, 2400.0, 2400.3, now * 1000))
-    monkeypatch.setattr(ex, "atr", lambda pair: 7.0)
+    monkeypatch.setattr(ex, "atr", lambda pair, as_of=None: 7.0)
     monkeypatch.setattr(ex_mod, "calendar_for", lambda *a: NS(is_open=lambda t: False))    # closed → never places
     r = {"pair": "XAUUSD", "timestamp": iso(now - 5_000), "valid_until": iso(now + 3_600_000), "decision": "BUY",
          "order_type": "BUY_LIMIT", "entry": {"price": 2390.0}, "stop_loss": 2380.0,

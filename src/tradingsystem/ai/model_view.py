@@ -17,12 +17,17 @@ from __future__ import annotations
 import re
 from typing import Any
 
-VIEW_VERSION = "1"
+from ..core.timeutil import iso
+
+VIEW_VERSION = "2"
 RECENT = {"1w": 4, "1d": 6, "4h": 8, "1h": 8, "15m": 16, "5m": 12, "1m": 10}
 ZONE_COLS = ("dir", "top", "bottom", "formed", "fill_pct", "touched", "strength_atr", "age_bars")
 EVENT_COLS = ("time", "kind", "dir", "level")
 QUALITY_KEEP = ("status", "coverage", "last_bar_end_lag_s", "stale", "missing_last_bar", "short_history", "gaps")
 HISTORY_SUMMARY_CHARS = 140
+# null in these fields means "nothing detected", not "unknown": rendered as "none" instead of being dropped
+NONE_MEANS_NOTHING = frozenset({"divergence", "absorption", "killzone", "last_swing_high", "last_swing_low",
+                                "last_bar", "prev_bar", "sweep", "regime"})
 _ISO = re.compile(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::\d\d(?:\.\d+)?)?Z$")
 
 
@@ -37,7 +42,8 @@ def short_time(s: str, year: str) -> str:
 def _compact(obj: Any, year: str) -> Any:
     """Short timestamps everywhere; null dict fields dropped (positions inside rows are kept)."""
     if isinstance(obj, dict):
-        return {k: _compact(v, year) for k, v in obj.items() if v is not None}
+        return {k: ("none" if v is None else _compact(v, year)) for k, v in obj.items()
+                if v is not None or k in NONE_MEANS_NOTHING}
     if isinstance(obj, list):
         return [_compact(v, year) for v in obj]
     if isinstance(obj, str):
@@ -49,15 +55,19 @@ def _row(d: dict, cols: tuple[str, ...]) -> list:
     return [(int(d[c]) if isinstance(d.get(c), bool) else d.get(c)) for c in cols]
 
 
-def _timeframe(tf: str, t: dict) -> dict:
+def _timeframe(tf: str, t: dict, trim: bool = True) -> dict:
     t = dict(t)
     q = t.pop("quality", None) or {}
     t.pop("recent_columns", None)
     if q.get("status", "ok") == "ok":
         t["data"] = "ok"
     else:
-        t["data"] = {k: q[k] for k in QUALITY_KEEP if q.get(k) not in (None, False, [], {})}
-    if "recent" in t and tf in RECENT:
+        t["data"] = {k: q[k] for k in QUALITY_KEEP
+                     if not (q.get(k) is None or q.get(k) is False or q.get(k) == [] or q.get(k) == {})}
+        if isinstance(t["data"].get("gaps"), list):          # [start_ms, missing_bars] -> [time, missing_bars]
+            t["data"]["gaps"] = [[iso(int(g[0])), g[1]] if isinstance(g, (list, tuple)) and g else g
+                                 for g in t["data"]["gaps"]]
+    if "recent" in t and tf in RECENT and trim:
         t["recent"] = t["recent"][-RECENT[tf]:]
     st = t.get("structure")
     if isinstance(st, dict) and st.get("events"):
@@ -89,8 +99,8 @@ def model_view(payload: dict) -> dict:
     for k, v in payload.items():
         if k == "meta":
             continue
-        if k in ("timeframes", "timeframe") and isinstance(v, dict):
-            v = {tf: (_timeframe(tf, t) if isinstance(t, dict) else t) for tf, t in v.items()}
+        if k in ("timeframes", "timeframe") and isinstance(v, dict):   # a single-TF analyst slice keeps its candles
+            v = {tf: (_timeframe(tf, t, trim=k == "timeframes") if isinstance(t, dict) else t) for tf, t in v.items()}
         elif k == "capabilities" and isinstance(v, dict):
             v = _capabilities(v)
         elif k == "account" and isinstance(v, dict):

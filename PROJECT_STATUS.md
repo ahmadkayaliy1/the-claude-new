@@ -5,9 +5,9 @@
 > Spec: `AI_Trading_System_Spec_EN.md`. Approved plan (Arabic): see Decision Log D-001.
 
 ## Overview
-- **Started:** 2026-09-25. **Approx. completion:** 76%.
-- **Current milestone:** v2 hand-off written (docs/handoff_operator_v2.md); system STOPPED since 2026-09-26 08:42 UTC after reboots (H13); malware found (H12)
-- **Summary:** M0–M10 built; demo/auto execution with Claude via the user's subscription (D-030…D-037). 2026-09-26: target v2 decided (D-038…D-040) — Claude as operator with memory and learning within bounds, one instance per pair, chart images, richer snapshot; full design, phases and acceptance tests in docs/handoff_operator_v2.md (Phase 0 = user: remove the miner H12, autostart H13, Gemini key H4, restart). The laptop was rebooted twice today and nothing auto-starts, so the system is down until the user runs scripts\\start.bat.
+- **Started:** 2026-09-25. **Approx. completion:** 78%.
+- **Current milestone:** v2 Phase 1 (P12.1) done on branch feat/phase1-operator-memory — awaiting the user's merge + restart; next P12.2 instances
+- **Summary:** M0–M10 built; demo/auto execution with Claude via the user's subscription (D-030…D-037). v2 target (D-038…D-040, docs/handoff_operator_v2.md): Phase 1 (P12.1) complete — venue costs and the gate's stop bounds in the snapshot and prompt, compact model view (−37 %), operator memory, gate reasons and a 30-day record per pair; live call 18.0 k input tokens (was ~22.9 k). Next: P12.2 one instance per pair (BTCUSDT first), then charts/5-min screening (P12.3), learning loop (P12.4).
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
@@ -82,6 +82,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - [2026-09-26] **D-038** (user) Target v2 — *Claude as operator*: Claude analyses and decides, Python fetches/computes/executes; Claude keeps reviewing errors and results and improves within bounds; one fully independent system instance per pair (`start.bat BTCUSDT`); comprehensive per-pair analysis incl. **candle-chart images**. Design and phases: `docs/handoff_operator_v2.md`.
 - [2026-09-26] **D-039** (user) Learning autonomy: prompts/playbook and soft parameters change automatically only inside code-enforced bounds (tools/tune.py, logged, expiring, revertible); code, risk limits and execution logic change only through proposals the user approves. Daily loss limit **10 % per pair instance** (user's choice) + an account-wide drawdown stop of 25 % from the high-water mark (lead's safety floor).
 - [2026-09-26] **D-040** Operator session model: the user asked for a persistent Claude session; it is built as persistent *memory* (`operator_notes` fed back per pair) with event-driven single-turn calls by default, and a true persistent stream-json session as a measured, switchable second mode — a session polling 24/7 would exhaust the shared subscription limits within hours. Measured: ~23 k input / 3–5 k output tokens and ~50 s per call; ~1.1 M tokens/day per pair at today's cadence → one instance first.
+- [2026-09-26] **D-041** The model reads a compact *view* of the snapshot (`ai/model_view.py`, legend in the cached system prompt) instead of the stored payload (−37 % tokens, nothing dropped); the stored/hashed payload stays the source of truth for triggers, the data gate and the dashboard. The snapshot states the execution venue's costs and the stop bounds exactly as the risk gate computes them, and the model keeps per-pair operator notes that are fed back on the next cycle (v2 Phase 1).
 
 ## Phases
 
@@ -932,3 +933,44 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - Affected files: `docs/go_live_checklist.md`
 - What was done: — · Why this way: — · Notes/open issues: H9.
 - The exact next step: after P11.3.
+
+### M12 — v2: Claude as operator (docs/handoff_operator_v2.md, D-038…D-040)
+
+### Phase P12.1: Operator memory, venue costs, compact model view (v2 Phase 1)
+- Status: ✅ Completed
+- Description: the model plans with the venue's real limits and costs, remembers its own plan per pair, sees its gate rejections and track record, and reads a compact view of the snapshot.
+- Affected files: `src/tradingsystem/analysis/snapshot.py` (`execution_costs`, `_spreads`), `src/tradingsystem/ai/model_view.py` (new), `ai/orchestrator.py`, `ai/store.py` (`memory`, `performance`, `gate_reason`), `ai/contract.py` (`operator_notes`), `ai/budget.py` (usage extras), `ai/providers/claude_code.py`, `ai/prompts/shared/{core_rules,payload_legend}.md` + every `system.md`, `core/settings.py` (ContractCfg costs, `risk.min_confidence`), `execution/executor.py`, `ingest/mt5/terminal.py`, `config/config.yaml`, tests `test_phase1_operator.py`, `test_execution_costs.py`, `test_prompts.py`, `test_mt5_no_launch.py`
+- What was done: `market.execution.costs` (spread now / 1-h median / 24-h p95 / max from stored ticks, stops level, swaps per night at the minimum lot, commission, and the min/max stop distance computed exactly like the risk gate: max(stops level + spread, 0.5 × ATR, spread / 20 %) … 5 × ATR); `account.min_position_risk` uses it. The model reads `model_view(payload)` (short UTC times, column tables for zones and structure events, one data status per timeframe, fewer raw higher-TF candles, grouped capabilities, nulls dropped): −37 % on real payloads, while the stored payload, the trigger policy, the data gate and the dashboard are untouched; a legend in the cached system prompt explains the format. `core_rules` v3: the gate's stop bounds, realistic (p95) spread, swaps, pending-order validity, minimum confidence, maximum recommendation age, gate reasons, and rule 13 (memory). `operator_notes` (≤ 600 chars) is fed back as `memory` on the next cycle; `performance` (30-day record incl. virtual outcomes) and `history.gate_reason` are in every payload. `ai_usage` stores api-equivalent USD, turns and cache writes. Claude CLI starts are staggered 15 s and the OAuth-refresh race / 403 is retried instead of failing the pair (observed after the 2026-09-26 reboot). Services attach only to an MT5 terminal running ≥ 30 s (a loading terminal made `initialize()` launch a second copy inside the supervisor job, 2026-09-26 16:57). **Live acceptance (one call, BTCUSDT, DB copy): valid, 17,996 input tokens (was ~22,900; target ≤ 19,000), 2,501 output, 36 s, 1 turn; NO_TRADE conf 30 with concrete operator notes that were fed back.** 356 unit tests pass.
+- Why this way: D-041.
+- Notes/open issues: the stop-bound check could not be exercised live (the call returned NO_TRADE); it is covered by unit tests with Windsor's real specs. Cache: the first call writes the prompt cache (17,994 tokens); later calls read the system part.
+- The exact next step: —
+
+### Phase P12.2: One instance per pair (v2 Phase 2)
+- Status: ⏳ Not Started
+- Description: `start.bat BTCUSDT` runs a fully independent system for one pair (own data dir, logs, port, magic); 10 %/day per instance + 25 % account drawdown stop; sibling-aware supervisor; global MT5/CLI guards; shared AI ledger; migration script.
+- Affected files: see `docs/handoff_operator_v2.md` §3.3
+- What was done: —
+- Why this way: D-038/D-039.
+- Notes/open issues: start with BTCUSDT only (usage: ~1.1 M tokens/day per pair before Phase 1).
+- The exact next step: implement §3.3 on a worktree branch `feat/instances`.
+
+### Phase P12.3: Charts, 5-minute screening, cheap enrichments (v2 Phase 3)
+- Status: ⏳ Not Started
+- Description: candle-chart images (1w…5m, 720×400, levels drawn) sent with the text; Python screens every 5m close and calls Claude only on change; HTF reference levels, derivatives history (OI nulls fix), depth imbalance, BTC–ETH correlation.
+- Affected files: see handoff §3.2 items 4–6
+- What was done: — · Why this way: D-038 (images requested by the user). · Notes/open issues: —
+- The exact next step: after P12.2.
+
+### Phase P12.4: Learning loop and operator sessions (v2 Phase 4)
+- Status: ⏳ Not Started
+- Description: feedback metrics, bounded tuning (`tools/tune.py`, playbooks, adaptive.yaml), review packs, daily/weekly review and 3-hourly monitor from Task Scheduler, usage gauge.
+- Affected files: see handoff §3.4–3.5
+- What was done: — · Why this way: D-039. · Notes/open issues: —
+- The exact next step: after P12.3.
+
+### Phase P12.5: Persistent session mode, bounded tools, position management (v2 Phase 5)
+- Status: ⏳ Not Started
+- Description: stream-json persistent session (measured, behind a switch), ≤ 3 read-only MCP tools, P9.6 MT5 position management, news blackout, gold-proxy study, profile tables.
+- Affected files: see handoff §3.1, §3.4
+- What was done: — · Why this way: D-040. · Notes/open issues: —
+- The exact next step: after P12.4.

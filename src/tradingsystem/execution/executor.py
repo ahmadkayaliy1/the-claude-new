@@ -161,10 +161,13 @@ class Executor:
                 out.append((eq["bid"][j] + eq["ask"][j]) / 2 - (pq["bid"][i] + pq["ask"][i]) / 2)
         return out
 
-    def atr(self, pair: str) -> float:
+    def atr(self, pair: str, as_of: int | None = None) -> float:
+        """Decision-TF ATR14 exactly as the snapshot computed it for the model (same bar count, as of the
+        recommendation's cycle time), so the stop bounds the model was shown are the ones the gate checks."""
+        from ..analysis.snapshot import TF_PLAN
         prim = self.reg.primary(pair)
         tf = self.s.pairs[pair].decision_timeframe
-        fr = load_frame(self.reader(prim.key), prim, tf, 60, now_ms())
+        fr = load_frame(self.reader(prim.key), prim, tf, TF_PLAN.get(tf.value, (60, 0))[0], as_of or now_ms())
         a = ind.atr(fr.high, fr.low, fr.close)
         return float(a[-1]) if len(a) and not np.isnan(a[-1]) else float("nan")
 
@@ -218,7 +221,7 @@ class Executor:
             spec = {**spec, **{k: live[k] for k in ("contract_size", "volume_min", "volume_step")}}
         ctx = ExecContext(
             now_ms=now_ms(), bid=eq.bid, ask=eq.ask, quote_age_s=max(0.0, (now_ms() - eq.time_msc) / 1000),
-            market_open=calendar_for(exe.venue, exe.symbol, pcfg.asset_class).is_open(now_ms()), atr=self.atr(pair),
+            market_open=calendar_for(exe.venue, exe.symbol, pcfg.asset_class).is_open(now_ms()), atr=self.atr(pair, _rec_as_of(rec)),
             stops_level_price=stops, contract_size=spec["contract_size"],
             volume_min=spec["volume_min"], volume_step=spec["volume_step"], volume_max=vmax, equity=acct["equity"],
             open_positions=acct["open_positions"], open_risk_pct_by_pair=acct.get("open_risk_pct_by_pair", {}),
@@ -545,6 +548,13 @@ def evaluate_virtual(rec: dict, reader: InstrumentReader, inst) -> tuple[str | N
         if t > horizon:
             return "unresolved_24h", 0.0
     return None, None
+
+
+def _rec_as_of(rec: dict) -> int | None:
+    try:
+        return parse_date_spec(rec["timestamp"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:

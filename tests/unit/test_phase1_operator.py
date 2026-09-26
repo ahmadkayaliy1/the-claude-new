@@ -99,9 +99,16 @@ def test_memory_returns_the_latest_valid_notes(store):
 def test_history_carries_the_gate_reason(store):
     rec = DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=rec_for())
     store.save(rec)
-    store.set_execution_state(rec.id, "rejected", {"reason": "spread_vs_sl: spread 2.16 > 20% of SL distance 9.69"})
+    store.set_execution_state(rec.id, "rejected", {"gate": [{"check": "spread_vs_sl", "ok": False}],
+                                                   "reason": "spread_vs_sl: spread 2.16 > 20% of SL distance 9.69"})
     h = store.recent("XAUUSD")[0]
-    assert h["gate_reason"].startswith("spread_vs_sl")
+    assert h["rejected_by"] == "gate" and h["gate_reason"].startswith("spread_vs_sl")
+    rec2 = DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=rec_for(), ts=rec.ts + 1)
+    store.save(rec2)
+    store.set_execution_state(rec2.id, "rejected", {"gate": [], "backend": {"ok": False,
+                                                    "reason": "order_send ts:x:1: 10016 Invalid stops"}})
+    h = store.recent("XAUUSD")[0]
+    assert h["rejected_by"] == "broker" and "10016" in h["reject_reason"] and "gate_reason" not in h
 
 
 def test_performance_counts(store):
@@ -112,12 +119,13 @@ def test_performance_counts(store):
         r["decision"] = dec
         rec = DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=r, ts=now - 3600_000)
         store.save(rec)
-        store._con.execute("UPDATE ai_decisions SET execution_state=?, virtual_outcome=?, virtual_r=? WHERE id=?",
-                           (ex, vo, vr, rec.id))
+        detail = json.dumps({"gate": [{"check": "rr_after_costs", "ok": False}]}) if ex == "rejected" else None
+        store._con.execute("UPDATE ai_decisions SET execution_state=?, execution_detail=?, virtual_outcome=?, "
+                           "virtual_r=? WHERE id=?", (ex, detail, vo, vr, rec.id))
     store.save(DecisionRecord("XAUUSD", "agent_per_pair", "t", "skipped", ts=now))
     p = store.performance("XAUUSD", now=now)
     assert p["cycles"] == 3 and p["trade_ideas"] == 2 and p["no_trade"] == 1
-    assert p["gate_rejected"] == 1 and p["executed"] == 1
+    assert p["gate_rejected"] == 1 and p["executed"] == 1 and p["not_placed"] == 0 and p["expired"] == 0
     assert p["virtual"]["tp1_first"] == 1 and p["virtual"]["sl_first"] == 1 and p["virtual"]["mean_r"] == 0.2
     assert store.performance("BTCUSDT", now=now) == {}
 
@@ -145,13 +153,56 @@ def prov(tmp_path, monkeypatch):
     return cc.ClaudeCodeProvider("claude_code", cfg, "sonnet", None)
 
 
-@pytest.mark.parametrize("msg", [
-    "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh.",
-    "Failed to authenticate. API Error: 403 Request not allowed",
-])
-def test_token_refresh_race_is_retried_not_a_sign_out(prov, msg):
-    e = prov._error(msg, None)
-    assert e.retryable and e.rate_limited and prov.cooldown_until_ms == 0
+def test_token_refresh_race_is_retried_not_a_sign_out(prov):
+    """Review: retryable (the repair loop retries it after a short back-off), NOT rate_limited (that returns at once)."""
+    e = prov._error("Failed to refresh OAuth token: another Claude Code process is refreshing it or exited "
+                    "mid-refresh.", None)
+    assert e.retryable and not e.rate_limited and prov.cooldown_until_ms == 0
+
+
+def test_auth_refusal_is_retried_and_triggers_a_sign_in_recheck(prov):
+    prov._auth_checked = time.monotonic()
+    e = prov._error("Failed to authenticate. API Error: 403 Request not allowed", None)
+    assert e.retryable and not e.rate_limited and prov._auth_checked == 0.0 and prov.cooldown_until_ms == 0
+
+
+def test_a_long_lived_token_is_ready_without_a_status_check(tmp_path, monkeypatch):
+    exe = tmp_path / "claude.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(cc.tempfile, "gettempdir", lambda: str(tmp_path))
+    cfg = AIProviderCfg(kind="claude_code", model="sonnet", free_tier=True, cli_path=str(exe))
+    assert cc.ClaudeCodeProvider("claude_code", cfg, "sonnet", "oat-token").unavailable_reason() is None
+
+
+def test_memory_keeps_the_latest_notes_when_a_later_decision_has_none(store):
+    r = rec_for()
+    r["operator_notes"] = "Plan A"
+    store.save(DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=r, ts=1_000))
+    store.save(DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=rec_for(), ts=2_000))
+    assert store.memory("XAUUSD")["notes"] == "Plan A"
+
+
+def test_view_semantic_nulls_and_gaps(payload):
+    import copy
+    p = copy.deepcopy(payload)
+    p["orderflow"]["divergence_test"] = None
+    p["market"]["session"]["killzone"] = None
+    tf = next(iter(p["timeframes"]))
+    p["timeframes"][tf]["quality"] = {"status": "stale", "coverage": 0.0, "gaps": [[1790334600000, 2]], "stale": True}
+    v = model_view(p)
+    assert v["market"]["session"]["killzone"] == "none"                  # nothing detected, said explicitly
+    assert "divergence_test" not in v["orderflow"]                       # unknown → omitted
+    from tradingsystem.core.timeutil import iso
+    assert v["timeframes"][tf]["data"] == {"status": "stale", "coverage": 0.0, "stale": True,
+                                           "gaps": [[short_time(iso(1790334600000), v["meta"]["as_of"][:4]), 2]]}
+
+
+def test_analyst_slice_keeps_its_candles(payload):
+    tf = next(k for k in ("1h", "4h", "15m") if payload["timeframes"][k].get("recent"))
+    t = payload["timeframes"][tf]
+    assert len(t["recent"]) > RECENT.get(tf, 0) or tf == "15m"
+    v = model_view({"meta": payload["meta"], "timeframe": {tf: t}})
+    assert len(v["timeframe"][tf]["recent"]) == len(t["recent"])
 
 
 def test_cli_starts_are_staggered(prov, monkeypatch):

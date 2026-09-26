@@ -49,31 +49,40 @@ def _r(x, d: int):
     return round(float(x), d)
 
 
+STOP_BOUND_MARGIN = 1.10      # the model's bounds are 10 % inside the gate's: spread and ATR move before execution
+
+
 def execution_costs(contract: dict, bid: float, ask: float, spreads_1h: np.ndarray, spreads_24h: np.ndarray,
                     atr: float | None, risk: RiskCfg, d: int) -> dict:
-    """What executing on this venue costs and the stop distances the risk gate will accept — the same rule as
-    ``risk_gate.evaluate``: a stop must be at least max(stops level + spread, sl_atr_min_mult × ATR, spread /
-    max_spread_to_sl_ratio) from the entry and at most sl_atr_max_mult × ATR. The spread used is the larger of the
-    current and the 1-hour median (a momentarily tight quote must not invite a stop the gate rejects later).
-    Distances are the same in the analysis and the execution price space (levels are translated by the basis)."""
+    """What executing on this venue costs and the stop distances the risk gate will accept. The gate's rule
+    (``risk_gate.evaluate``): a stop at least max(stops level + spread, sl_atr_min_mult × ATR, spread /
+    max_spread_to_sl_ratio) and at most sl_atr_max_mult × ATR from the fill, with the LIVE spread at execution time.
+    Measured on real ticks (review 2026-09-26) the spread 1–2.5 min later exceeds the current one in up to 24 % of
+    cases, so the bounds given to the model use a conservative spread (max of now, the 1-hour p90 and the 24-hour p95)
+    and a 10 % margin: min rounded up, max rounded down. Distances are the same in the analysis and the execution
+    price space (levels are translated by the basis)."""
     tick = float(contract.get("tick_size") or 0.01)
     spread_now = float(ask - bid)
     med_1h = float(np.median(spreads_1h)) if len(spreads_1h) else None
-    spread = max(spread_now, med_1h or 0.0)
+    p90_1h = float(np.percentile(spreads_1h, 90)) if len(spreads_1h) else 0.0
+    p95_24h = float(np.percentile(spreads_24h, 95)) if len(spreads_24h) else 0.0
+    spread = max(spread_now, p90_1h, p95_24h)
     stops = float(contract.get("stops_level_points") or 0) * tick
     parts = {"stops_level_plus_spread": stops + spread}
     if risk.max_spread_to_sl_ratio > 0:
         parts["spread_rule"] = spread / risk.max_spread_to_sl_ratio
     if atr:
         parts["atr_floor"] = risk.sl_atr_min_mult * atr
-    min_stop = max(parts.values())
+    step = max(tick, 10.0 ** -d)
+    min_stop = np.ceil(max(parts.values()) * STOP_BOUND_MARGIN / step - 1e-9) * step        # tolerance: float noise
+    max_stop = np.floor(risk.sl_atr_max_mult * atr / STOP_BOUND_MARGIN / step + 1e-9) * step if atr else None
     out = {
         "spread_now": _r(spread_now, d), "spread_median_1h": _r(med_1h, d),
-        "spread_p95_24h": _r(float(np.percentile(spreads_24h, 95)), d) if len(spreads_24h) else None,
+        "spread_p95_24h": _r(p95_24h, d) if len(spreads_24h) else None,
         "spread_max_24h": _r(float(spreads_24h.max()), d) if len(spreads_24h) else None,
         "stops_level": _r(stops, d),
         "min_stop_distance": _r(min_stop, d), "min_stop_set_by": max(parts, key=parts.get),
-        "max_stop_distance": _r(risk.sl_atr_max_mult * atr, d) if atr else None,
+        "max_stop_distance": _r(max_stop, d) if max_stop is not None else None,
         "max_spread_pct_of_stop": round(risk.max_spread_to_sl_ratio * 100),
         "commission_per_lot_per_side": contract.get("commission_per_lot") or 0.0,
     }
@@ -95,6 +104,7 @@ class SnapshotBuilder:
         self.reg = registry
         self.data = settings.paths.data()
         self._readers: dict[str, InstrumentReader] = {}
+        self._spread_cache: dict[str, tuple[int, np.ndarray, np.ndarray]] = {}   # key -> (as_of, times, spreads)
 
     def reader(self, inst: Instrument) -> InstrumentReader:
         if inst.key not in self._readers:
@@ -251,20 +261,28 @@ class SnapshotBuilder:
                 return {"ts": int(c["time_msc"][-1]), "bid": float(c["bid"][-1]), "ask": float(c["ask"][-1])}
         return None
 
+    def _read_spreads(self, inst: Instrument, dt: str, a: int, b: int) -> tuple[np.ndarray, np.ndarray]:
+        tcol = "time_msc" if dt == "ticks" else "ts"
+        c = self.reader(inst).read_range(spec_for(inst, dt), a, b, [tcol, "bid", "ask"])
+        if not len(c[tcol]):
+            return np.array([], dtype=np.int64), np.array([])
+        s = np.asarray(c["ask"], dtype=float) - np.asarray(c["bid"], dtype=float)
+        ok = s >= 0
+        return np.asarray(c[tcol])[ok], s[ok]
+
     def _spreads(self, inst: Instrument, as_of: int) -> tuple[np.ndarray, np.ndarray]:
-        """(spreads of the last hour, of the last 24 h) from the stored quotes — causal (<= as_of)."""
+        """(spreads of the last hour, of the last 24 h) from the stored quotes — causal (<= as_of). The 24-h read
+        (~300 k MT5 ticks, ~4 s) is cached per instrument for 10 minutes; the last hour is always read fresh."""
         dt = "ticks" if "ticks" in inst.datatypes else "book_ticker" if "book_ticker" in inst.datatypes else None
         if dt is None:
             return np.array([]), np.array([])
-        tcol = "time_msc" if dt == "ticks" else "ts"
-        c = self.reader(inst).read_range(spec_for(inst, dt), as_of - 24 * MS_PER_HOUR, as_of + 1, [tcol, "bid", "ask"])
-        if not len(c[tcol]):
-            return np.array([]), np.array([])
-        s = np.asarray(c["ask"], dtype=float) - np.asarray(c["bid"], dtype=float)
-        ok = s >= 0
-        t = np.asarray(c[tcol])[ok]
-        s = s[ok]
-        return s[t >= as_of - MS_PER_HOUR], s
+        h1 = self._read_spreads(inst, dt, as_of - MS_PER_HOUR, as_of + 1)[1]
+        hit = self._spread_cache.get(inst.key)
+        if hit is None or not (0 <= as_of - hit[0] <= 10 * MS_PER_MINUTE):
+            t, s = self._read_spreads(inst, dt, as_of - 24 * MS_PER_HOUR, as_of + 1)
+            self._spread_cache[inst.key] = hit = (as_of, t, s)
+        _, t, s = hit
+        return h1, s[t >= as_of - 24 * MS_PER_HOUR]
 
     def _market(self, pair: str, primary: Instrument, execu: Instrument, m1: Frame | None, as_of: int,
                 exec_cal: SessionCalendar, d: int, dec_atr: float | None = None) -> dict:

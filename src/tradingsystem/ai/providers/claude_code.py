@@ -56,8 +56,9 @@ _LIMIT_RE = re.compile(r"usage limit|hit your limit|limit reached|limit will res
 _EPOCH_RE = re.compile(r"\|(\d{10})\b")
 # two CLI processes refreshing the OAuth token at the same moment (observed 2026-09-26 after a reboot: one lost the
 # race, the next call got "403 Request not allowed"): transient — retried after a pause, never a sign-out
-_REFRESH_RACE_RE = re.compile(r"another claude code process is refreshing|failed to refresh oauth token|"
-                              r"403 request not allowed", re.I)
+_REFRESH_RACE_RE = re.compile(r"another claude code process is refreshing", re.I)
+# may follow a lost race, or be a real sign-in problem: retried once, and the sign-in is re-checked in the background
+_AUTH_TRANSIENT_RE = re.compile(r"403 request not allowed|failed to refresh oauth token", re.I)
 START_STAGGER_S = 15.0           # minimum gap between two CLI starts of this process (token refresh happens at start)
 
 
@@ -137,22 +138,27 @@ class ClaudeCodeProvider(LLMProvider):
         self._slots: asyncio.Semaphore | None = None
         self._start_lock: asyncio.Lock | None = None
         self._last_start = float("-inf")
+        if self.api_key:                    # a long-lived token is trusted until a call fails: nothing to check
+            self._auth_problem, self._auth_ok_once, self._auth_checked = None, True, time.monotonic()
 
     # ------------------------------------------------------------------ availability
-    def unavailable_reason(self) -> str | None:
+    def unavailable_reason(self, refresh: bool = True) -> str | None:
         """Cooldown, else the cached login check. Every check runs in a background thread — ``claude auth status``
         can take ~1 min on a cold, busy machine (measured 55 s) and the engine's event loop (heartbeat) must never
-        wait on it; until the first answer the provider reports "checking"."""
+        wait on it; until the first answer the provider reports "checking". ``refresh=False`` (inside a call) never
+        starts a check, so a status command and a model call are not started together (OAuth refresh race)."""
         why = super().unavailable_reason()
         if why:
             return why
-        if time.monotonic() - self._auth_checked > AUTH_CHECK_TTL_S and not self._auth_refreshing:
+        if refresh and time.monotonic() - self._auth_checked > AUTH_CHECK_TTL_S and not self._auth_refreshing \
+                and time.monotonic() - self._last_start >= START_STAGGER_S:
             self._auth_refreshing = True
             threading.Thread(target=self._refresh_auth, name="claude-auth-status", daemon=True).start()
         return self._auth_problem
 
     def _refresh_auth(self) -> None:
         now = time.monotonic()
+        self._last_start = now                          # the next model call waits START_STAGGER_S after this CLI start
         try:
             problem = self.check_auth()
         except AuthCheckFailed as exc:
@@ -218,13 +224,13 @@ class ClaudeCodeProvider(LLMProvider):
 
     async def _call(self, system: str, user: str, schema: dict | None, schema_name: str,
                     max_output_tokens: int) -> LLMResult:
-        why = self.unavailable_reason()
+        why = self.unavailable_reason(refresh=False)
         if why:
             raise ProviderError(why, retryable=False, rate_limited=now_ms() < self.cooldown_until_ms)
         if self._slots is None:
             self._slots = asyncio.Semaphore(max(1, self.cfg.max_concurrency))
         async with self._slots:
-            why = self.unavailable_reason()          # another call may have hit the limit while we waited
+            why = self.unavailable_reason(refresh=False)   # another call may have hit the limit while we waited
             if why:
                 raise ProviderError(why, retryable=False, rate_limited=now_ms() < self.cooldown_until_ms)
             await self._staggered_start()
@@ -294,8 +300,10 @@ class ClaudeCodeProvider(LLMProvider):
     def _error(self, message: str, status: Any) -> ProviderError:
         now = now_ms()
         if _REFRESH_RACE_RE.search(message):
-            return ProviderError(f"{self.name}: sign-in token refresh race ({message[:120]}) — retried", retryable=True,
-                                 rate_limited=True)
+            return ProviderError(f"{self.name}: sign-in token refresh race ({message[:120]})", retryable=True)
+        if _AUTH_TRANSIENT_RE.search(message):
+            self._auth_checked = 0.0                      # a real sign-out shows up in the background re-check
+            return ProviderError(f"{self.name}: sign-in refused ({message[:120]})", retryable=True)
         if _LOGIN_RE.search(message):
             self.cool_down(now + LOGIN_COOLDOWN_MS, f"{self.name}: not signed in ({message[:120]})")
             self._auth_checked = 0.0                      # re-check (in the background) after the cooldown
