@@ -1,12 +1,12 @@
 # Read-only check: is the miner (H12) gone? Safe to run any time, no administrator needed for most checks.
-$BAD = @('C:\ProgramData\WindowsTask', 'C:\ProgramData\ReaItekHD')
-function IsBad($p) { if (-not $p) { return $false }; foreach ($b in $BAD) { if ($p -like "$b*") { return $true } }; return $false }
+$MINER_DIRS = @('C:\ProgramData\WindowsTask', 'C:\ProgramData\ReaItekHD')
+function IsBad($p) { if (-not $p) { return $false }; foreach ($b in $MINER_DIRS) { if ($p -like "$b*") { return $true } }; return $false }
 $bad = 0
 Write-Host "== processes from the miner folders"
 $p = @(Get-CimInstance Win32_Process | Where-Object { (IsBad $_.ExecutablePath) -or ($_.CommandLine -match 'stratum\+tcp') })
 if ($p.Count -gt 0) { foreach ($x in $p) { Write-Host "  !! $($x.ProcessId) $($x.ExecutablePath)  $($x.CommandLine)" -ForegroundColor Red; $bad++ } } else { Write-Host "  ok none" -ForegroundColor Green }
 Write-Host "== folders"
-foreach ($b in $BAD) { if (Test-Path $b) { Write-Host "  !! still present: $b" -ForegroundColor Red; $bad++ } else { Write-Host "  ok gone: $b" -ForegroundColor Green } }
+foreach ($b in $MINER_DIRS) { if (Test-Path $b) { Write-Host "  !! still present: $b" -ForegroundColor Red; $bad++ } else { Write-Host "  ok gone: $b" -ForegroundColor Green } }
 Write-Host "== autostart registry entries"
 $hit = $false
 foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce') {

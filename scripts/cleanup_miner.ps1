@@ -8,12 +8,12 @@
 # the folders, 5) updates Defender and starts a full scan, 6) prints what is left. It does NOT touch KMSAuto
 # (see the end of the output) and does NOT delete your own programs.
 $ErrorActionPreference = 'Continue'
-$BAD = @('C:\ProgramData\WindowsTask', 'C:\ProgramData\ReaItekHD')
+$MINER_DIRS = @('C:\ProgramData\WindowsTask', 'C:\ProgramData\ReaItekHD')
 $root = Split-Path -Parent $PSScriptRoot
 $log = Join-Path $root 'logs\cleanup_miner.log'
 New-Item -ItemType Directory -Force (Split-Path $log) | Out-Null
 function Say($m) { $line = "{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m; Write-Host $line; Add-Content $log $line }
-function IsBad($p) { if (-not $p) { return $false }; foreach ($b in $BAD) { if ($p -like "$b*") { return $true } }; return $false }
+function IsBad($p) { if (-not $p) { return $false }; foreach ($b in $MINER_DIRS) { if ($p -like "$b*") { return $true } }; return $false }
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "This must run as administrator: right-click scripts\cleanup_miner.bat -> Run as administrator" -ForegroundColor Red
@@ -22,7 +22,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 Say "=== cleanup start (admin) ==="
 
 # 1. stop the miner processes (matched by PATH, never by name: audiodg.exe / taskhost.exe also exist legitimately)
-$procs = Get-CimInstance Win32_Process | Where-Object { IsBad $_.ExecutablePath }
+$procs = @(Get-CimInstance Win32_Process | Where-Object { (IsBad $_.ExecutablePath) -or ($_.CommandLine -match 'stratum\+tcp|WindowsTask|ReaItekHD') })
 foreach ($p in $procs) {
     try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; Say "STOPPED  pid $($p.ProcessId) $($p.ExecutablePath)" }
     catch { Say "FAILED to stop pid $($p.ProcessId) $($p.ExecutablePath): $($_.Exception.Message)" }
@@ -55,9 +55,9 @@ foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOF
 
 # 3b. scheduled tasks whose actions run from the miner folders (all tasks are visible as admin)
 foreach ($t in Get-ScheduledTask) {
-    $bad = $false
-    foreach ($a in $t.Actions) { if ((IsBad $a.Execute) -or (IsBad $a.Arguments) -or ($a.Arguments -match 'WindowsTask|ReaItekHD')) { $bad = $true } }
-    if ($bad) { Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -Confirm:$false; Say "REMOVED scheduled task $($t.TaskPath)$($t.TaskName)" }
+    $hit = $false
+    foreach ($a in $t.Actions) { if ((IsBad $a.Execute) -or (IsBad $a.Arguments) -or ($a.Arguments -match 'WindowsTask|ReaItekHD')) { $hit = $true } }
+    if ($hit) { Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -Confirm:$false; Say "REMOVED scheduled task $($t.TaskPath)$($t.TaskName)" }
 }
 
 # 3c. services and drivers installed from the miner folders (e.g. the WinRing0 driver)
@@ -68,7 +68,7 @@ foreach ($f in Get-ChildItem "$env:SystemRoot\System32\drivers" -Filter 'WinRing
 # 4. quarantine the folders (move, not delete)
 $q = "C:\ProgramData\_quarantine_$(Get-Date -Format 'yyyyMMdd_HHmm')"
 New-Item -ItemType Directory -Force $q | Out-Null
-foreach ($b in $BAD) {
+foreach ($b in $MINER_DIRS) {
     if (Test-Path $b) {
         try { Move-Item $b (Join-Path $q (Split-Path $b -Leaf)) -Force -ErrorAction Stop; Say "QUARANTINED $b -> $q" }
         catch {
@@ -88,9 +88,9 @@ try { Start-MpScan -ScanType FullScan -AsJob | Out-Null; Say "Defender FULL scan
 
 # 6. what is left
 Say "--- verification ---"
-$left = Get-CimInstance Win32_Process | Where-Object { IsBad $_.ExecutablePath }
+$left = @(Get-CimInstance Win32_Process | Where-Object { (IsBad $_.ExecutablePath) -or ($_.CommandLine -match 'stratum\+tcp') })
 if ($left) { foreach ($p in $left) { Say "STILL RUNNING pid $($p.ProcessId) $($p.ExecutablePath)" } } else { Say "OK no miner process running" }
-foreach ($b in $BAD) { if (Test-Path $b) { Say "STILL PRESENT $b" } else { Say "OK folder gone $b" } }
+foreach ($b in $MINER_DIRS) { if (Test-Path $b) { Say "STILL PRESENT $b" } else { Say "OK folder gone $b" } }
 $os = Get-CimInstance Win32_OperatingSystem
 Say ("free RAM now: {0} MB of {1} MB" -f [int]($os.FreePhysicalMemory/1024), [int]($os.TotalVisibleMemorySize/1024))
 if (Test-Path 'C:\ProgramData\KMSAuto') {
