@@ -1,6 +1,6 @@
 # Read-only check: is the miner (H12) gone? Safe to run any time, no administrator needed for most checks.
 $MINER_DIRS = @('C:\ProgramData\WindowsTask', 'C:\ProgramData\ReaItekHD')
-function IsBad($p) { if (-not $p) { return $false }; foreach ($b in $MINER_DIRS) { if ($p -like "$b*") { return $true } }; return $false }
+function IsBad($p) { if (-not $p) { return $false }; $p = ([string]$p).Trim('"', ' '); foreach ($b in $MINER_DIRS) { if ($p -like "*$b*") { return $true } }; return $false }
 $bad = 0
 Write-Host "== processes from the miner folders"
 $p = @(Get-CimInstance Win32_Process | Where-Object { (IsBad $_.ExecutablePath) -or ($_.CommandLine -match 'stratum\+tcp') })

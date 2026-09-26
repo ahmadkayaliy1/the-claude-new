@@ -13,7 +13,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $log = Join-Path $root 'logs\cleanup_miner.log'
 New-Item -ItemType Directory -Force (Split-Path $log) | Out-Null
 function Say($m) { $line = "{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m; Write-Host $line; Add-Content $log $line }
-function IsBad($p) { if (-not $p) { return $false }; foreach ($b in $MINER_DIRS) { if ($p -like "$b*") { return $true } }; return $false }
+function IsBad($p) { if (-not $p) { return $false }; $p = ([string]$p).Trim('"', ' '); foreach ($b in $MINER_DIRS) { if ($p -like "*$b*") { return $true } }; return $false }
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "This must run as administrator: right-click scripts\cleanup_miner.bat -> Run as administrator" -ForegroundColor Red
