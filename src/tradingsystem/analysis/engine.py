@@ -114,12 +114,15 @@ class Engine:
                  policy: str | None = None) -> tuple[bool, list[str], str]:
         last = self.store.last_decision(pair)
         attempt = self.store.last_attempt_ts(pair)
+        answered = self.store.last_attempt_ts(pair, answered=True)
         rr: list[str] = []
-        if last and not (attempt is not None and attempt > last["ts"]):   # a review fires once per decision
+        if last and not (answered is not None and answered > last["ts"]):  # a review is consumed by one answer
             closed = {tf: t["recent"][-1][4] for tf, t in ((payload or {}).get("timeframes") or {}).items()
                       if t.get("recent")}
             rr = review_due(last, now, self._review_mid(pair, last, now), closed)
-        last_call = max((x for x in (self.last_call.get(pair), attempt) if x is not None), default=None)
+        # spacing counts from the dispatch (a row's ts is when the answer was stored — a slow call must not push
+        # the next decision-bar close out of reach); the DB row only stands in after a restart
+        last_call = self.last_call.get(pair, attempt)
         d = decide(policy or self._policy(), payload, last_call_ms=last_call, now=now,
                    min_spacing_min=self.s.ai.min_minutes_between_calls, max_idle_min=self.s.ai.max_idle_minutes,
                    review_reasons=rr, at_close=at_close, review_floor_min=self.s.ai.review_floor_minutes,

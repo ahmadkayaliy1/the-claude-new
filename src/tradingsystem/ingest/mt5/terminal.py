@@ -29,6 +29,24 @@ class MT5Unavailable(RuntimeError):
     pass
 
 
+NO_LAUNCH_ENV = "TS_MT5_NO_LAUNCH"    # set by the supervisor when it owns the terminal (OPS-04)
+
+
+def terminal_running(path: str) -> bool:
+    """Is the terminal at ``path`` running (any user-visible process with that exe)?"""
+    import psutil
+    want = os.path.normcase(os.path.abspath(path))
+    for p in psutil.process_iter(["name"]):
+        if (p.info.get("name") or "").lower() not in ("terminal64.exe", "terminal.exe"):
+            continue
+        try:
+            if os.path.normcase(os.path.abspath(p.exe())) == want:
+                return True
+        except (psutil.Error, OSError):
+            continue
+    return False
+
+
 @dataclass
 class AccountSnapshot:
     login: int
@@ -51,6 +69,10 @@ class MT5Terminal:
         self.connected = False
 
     def connect(self) -> AccountSnapshot:
+        # under the supervisor, never let initialize(path) launch a closed terminal as *our* child (it would sit
+        # in the supervisor's job and die with a watchdog kill): the supervisor starts it outside (OPS-04)
+        if os.environ.get(NO_LAUNCH_ENV) == "1" and not terminal_running(self.profile.terminal_path):
+            raise MT5Unavailable("MT5 terminal is not running — waiting for the supervisor to start it")
         kwargs: dict[str, Any] = {"path": self.profile.terminal_path}
         if self.use_credentials and self.profile.login_env and os.environ.get(self.profile.login_env):
             kwargs.update(login=int(os.environ[self.profile.login_env]),

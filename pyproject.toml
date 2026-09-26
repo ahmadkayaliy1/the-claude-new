@@ -18,6 +18,7 @@ dependencies = [
     "psutil",
     "tenacity",
     "MetaTrader5; sys_platform == 'win32'",
+    "tzdata",                                   # ZoneInfo on Windows (no system tz database)
 ]
 
 [project.optional-dependencies]

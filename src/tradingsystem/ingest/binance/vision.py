@@ -77,6 +77,14 @@ class VisionMissing(RuntimeError):
     """A listed object answered 403/404 — skipped this pass, never recorded as done or as a source gap."""
 
 
+class VisionCorrupt(RuntimeError):
+    """The object never matches its published CHECKSUM (``MISMATCH_PASSES`` passes in a row) — permanent: retried
+    only in the daily pass, not every few minutes."""
+
+
+MISMATCH_PASSES = 3
+
+
 class VisionBadResponse(RuntimeError):
     """A 200 response whose body is not a valid listing / CHECKSUM (captive portal, truncation) — retried."""
 
@@ -274,13 +282,22 @@ class VisionClient:
                 return path
             path.unlink()
         part = path.with_name(path.name + ".part")
+        strikes = path.with_name(path.name + ".mismatch")          # passes that ended in a mismatch (persisted)
         for attempt in (1, 2):
             self._stream_to(f"{self.base}/{f.key}", part, f.key)
             if _sha256(part) == expected:
                 os.replace(part, path)
+                strikes.unlink(missing_ok=True)
                 return path
             log.warning("CHECKSUM mismatch for %s (attempt %d) — refetching", f.key, attempt)
             part.unlink(missing_ok=True)
+        try:
+            n = int(strikes.read_text() or 0) + 1 if strikes.exists() else 1
+        except (OSError, ValueError):
+            n = 1
+        strikes.write_text(str(n))
+        if n >= MISMATCH_PASSES:
+            raise VisionCorrupt(f"CHECKSUM mismatch for {f.key} in {n} passes")
         raise VisionTransientError(f"CHECKSUM mismatch for {f.key} twice")
 
     def _stream_to(self, url: str, part: Path, what: str) -> None:

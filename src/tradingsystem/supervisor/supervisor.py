@@ -134,6 +134,8 @@ class Supervisor:
         # children log to logs/<name>.jsonl only; raw stdout/stderr (tracebacks before logging is set up, native
         # faults via PYTHONFAULTHANDLER) go to logs/<name>.stderr.log instead of the void (F8/OPS-06)
         env = {**os.environ, "TS_LOG_CONSOLE": "0", "PYTHONFAULTHANDLER": "1", "PYTHONUNBUFFERED": "1"}
+        if self.cfg.manage_mt5_terminal:
+            env["TS_MT5_NO_LAUNCH"] = "1"          # services never launch the terminal themselves (OPS-04)
         c.log_path = self.s.paths.logs() / f"{c.name}.stderr.log"
         fh = procs.open_rotating(c.log_path, self.cfg.child_log_max_bytes, self.cfg.child_log_backups)
         try:

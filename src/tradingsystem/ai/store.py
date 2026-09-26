@@ -161,11 +161,14 @@ class DecisionStore:
             return None
         return {"id": r[0], "ts": r[1], "recommendation": json.loads(r[2]) if r[2] else None}
 
-    def last_attempt_ts(self, pair: str) -> int | None:
-        """Time of the latest stored cycle for ``pair`` in any status (spacing / review bookkeeping survive restarts
-        and failed cycles count — F1)."""
+    def last_attempt_ts(self, pair: str, *, answered: bool = False) -> int | None:
+        """Time of the latest stored cycle for ``pair`` in any status (spacing survives restarts and failed cycles
+        count — F1); ``answered``: only cycles where the model answered (valid / invalid / refused) — those consume
+        a pending review, a failed call or a data-gate skip does not."""
+        q = "SELECT max(ts) FROM ai_decisions WHERE pair=?" + (
+            " AND status IN ('valid','invalid','refused')" if answered else "")
         with self._lock:
-            r = self._con.execute("SELECT max(ts) FROM ai_decisions WHERE pair=?", (pair,)).fetchone()
+            r = self._con.execute(q, (pair,)).fetchone()
         return int(r[0]) if r and r[0] is not None else None
 
     def realised_since(self, since_ms: int) -> tuple[float, int]:

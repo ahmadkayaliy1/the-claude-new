@@ -102,12 +102,17 @@ class MT5Backend:
         return abs(p) if p else 0.0
 
     def existing(self, decision_id: str) -> dict:
+        """Orders / positions / deals carrying this decision's tag. The terminal answers None when it cannot be
+        asked (link down) — that is *unknown*, never "nothing placed": raise so the caller retries later."""
         prefix = f"ts:{decision_id[:20]}:"
-        orders = [o for o in (self.mt5.orders_get() or []) if o.comment.startswith(prefix)]
-        positions = [p for p in (self.mt5.positions_get() or []) if p.comment.startswith(prefix)]
-        deals = [d for d in (self.mt5.history_deals_get(int(time.time()) - 7 * 86_400, int(time.time()) + 86_400) or [])
-                 if d.comment.startswith(prefix)]
-        return {"orders": orders, "positions": positions, "deals": deals}
+        got = {"orders": self.mt5.orders_get(), "positions": self.mt5.positions_get(),
+               "deals": self.mt5.history_deals_get(int(time.time()) - 7 * 86_400, int(time.time()) + 86_400)}
+        missing = [k for k, v in got.items() if v is None]
+        if missing:
+            err = self.mt5.last_error()
+            if not (isinstance(err, tuple) and err and err[0] == 1):      # (1, 'Success'): an empty answer
+                raise RuntimeError(f"MT5 could not list {', '.join(missing)} ({err}) — state unknown")
+        return {k: [x for x in (v or ()) if x.comment.startswith(prefix)] for k, v in got.items()}
 
     # ------------------------------------------------------------------ placing
     def _filling(self, spec: dict) -> int:

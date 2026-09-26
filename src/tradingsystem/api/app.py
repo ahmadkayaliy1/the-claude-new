@@ -34,7 +34,7 @@ from ..analysis.registry import capability_matrix
 from ..core.instruments import InstrumentRegistry
 from ..core.settings import PROJECT_ROOT, Settings, load_settings
 from ..core.timeframes import Timeframe
-from ..core.timeutil import iso, now_ms
+from ..core.timeutil import iso, now_ms, parse_date_spec
 from ..storage.reader import InstrumentReader
 from ..storage.tablespec import spec_for
 
@@ -177,15 +177,19 @@ def create_app(s: Settings) -> FastAPI:
             raise HTTPException(401, "missing or invalid dashboard token")
         con = sqlite3.connect(app_db, timeout=10)
         try:
-            row = con.execute("SELECT status, decision, execution_state, valid_until, ts FROM ai_decisions WHERE id=?",
-                              (decision_id,)).fetchone()
+            row = con.execute("SELECT status, decision, execution_state, valid_until, ts, recommendation FROM ai_decisions "
+                              "WHERE id=?", (decision_id,)).fetchone()
             if not row:
                 raise HTTPException(404, "decision not found")
-            status, dec, state, valid_until, ts = row
+            status, dec, state, valid_until, ts, rec_json = row
             if status != "valid" or dec not in ("BUY", "SELL"):
                 raise HTTPException(409, f"not executable (status={status}, decision={dec})")
             if valid_until and now_ms() >= valid_until:
                 raise HTTPException(409, "recommendation expired")
+            try:        # the risk gate ages a recommendation from its timestamp (= the cycle's data as-of), not the row
+                ts = parse_date_spec(json.loads(rec_json)["timestamp"])
+            except (TypeError, ValueError, KeyError):
+                pass
             if state == "not_executed" and now_ms() - ts > max_age_ms:      # the risk gate's recommendation_age rule
                 raise HTTPException(409, f"too old for execution ({(now_ms() - ts) // 1000}s > "
                                          f"{max_age_ms // 1000}s risk.max_recommendation_age_s)")

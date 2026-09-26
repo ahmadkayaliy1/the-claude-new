@@ -166,7 +166,9 @@ class MT5LiveService:
                 # bars closed after the newest stored one are outside the 3-bar window (outage, terminal re-sync,
                 # session break): fetch from that bar; on failure keep the mark → retried next poll (F6)
                 hi = int(r[-1]["time"])
-                rr = mt5.copy_rates_range(sym, tfc, max(last, hi * 1000 - LIVE_GAPFILL_MAX_MS) // 1000, hi)
+                # the cap bounds the catch-up, but never below the 3-bar window (a W1 window spans > the cap)
+                lo = min(int(r[0]["time"]) * 1000, max(last, hi * 1000 - LIVE_GAPFILL_MAX_MS))
+                rr = mt5.copy_rates_range(sym, tfc, lo // 1000, hi)
                 if rr is not None and len(rr) and int(rr[-1]["time"]) == hi:
                     r = rr
                 else:

@@ -158,7 +158,21 @@ def test_checksum_mismatch_twice_is_transient_and_leaves_nothing(tmp_path):
     with pytest.raises(VisionTransientError):
         c.download(VisionFile(ZIP_KEY, "2025-12", True))
     assert sum(1 for p, _ in log if p.endswith(".zip")) == 2                   # one refetch, then give up
-    assert not any((tmp_path / "cache").rglob("*.zip*"))
+    assert not any((tmp_path / "cache").rglob("*.zip")) and not any((tmp_path / "cache").rglob("*.part"))
+
+
+def test_checksum_mismatch_in_every_pass_becomes_permanent(tmp_path):
+    """Review fix: an object that never matches its CHECKSUM stops being retried every few minutes."""
+    from tradingsystem.ingest.binance.backfill import is_transient
+    from tradingsystem.ingest.binance.vision import MISMATCH_PASSES, VisionCorrupt
+    zip_bytes = (FIX / "XAUUSDT-1d-2025-12.zip").read_bytes()
+    c = client(tmp_path, vision_server(zip_bytes, "0" * 64, []))
+    for _ in range(MISMATCH_PASSES - 1):
+        with pytest.raises(VisionTransientError):
+            c.download(VisionFile(ZIP_KEY, "2025-12", True))
+    with pytest.raises(VisionCorrupt) as e:
+        c.download(VisionFile(ZIP_KEY, "2025-12", True))
+    assert not is_transient(e.value)
 
 
 def test_missing_object_is_not_marked_done(tmp_path, xau):

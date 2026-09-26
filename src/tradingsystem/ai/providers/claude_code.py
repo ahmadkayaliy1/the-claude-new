@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -80,13 +81,15 @@ def limit_reset_ms(message: str, now: int) -> int:
 
 
 def auth_problem(name: str, status: dict[str, Any]) -> str | None:
-    """Interpret ``claude auth status --json``: only a subscription sign-in is accepted."""
+    """Interpret ``claude auth status --json``: only a subscription sign-in is accepted — any sign of an API key
+    (``authMethod`` naming a key, or an ``apiKeySource`` other than none) is refused."""
     if not status.get("loggedIn"):
         return f"{name}: Claude Code is not signed in — run `claude auth login` once (H11)"
     method = str(status.get("authMethod", ""))
-    if "key" in method.lower():
-        return (f"{name}: Claude Code is signed in with an API key ({method}), not the subscription — "
-                "refusing so nothing is billed per token (D-030)")
+    key_source = str(status.get("apiKeySource") or "none")
+    if "key" in method.lower() or key_source.lower() not in ("none", "null", ""):
+        return (f"{name}: Claude Code is signed in with an API key ({method or key_source}), not the subscription "
+                "— refusing so nothing is billed per token (D-030)")
     return None
 
 
@@ -107,17 +110,30 @@ class ClaudeCodeProvider(LLMProvider):
         self.workdir.mkdir(parents=True, exist_ok=True)
         self._auth_checked = float("-inf")
         self._auth_problem: str | None = None
+        self._auth_refreshing = False
         self._lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------ availability
     def unavailable_reason(self) -> str | None:
+        """Cooldown, else the cached login check. Only the very first check runs inline; later refreshes run in a
+        background thread so the engine's event loop (heartbeat) never waits on ``claude auth status``."""
         why = super().unavailable_reason()
         if why:
             return why
-        if time.monotonic() - self._auth_checked > AUTH_CHECK_TTL_S:
-            self._auth_problem = self.check_auth()
-            self._auth_checked = time.monotonic()
+        if time.monotonic() - self._auth_checked > AUTH_CHECK_TTL_S and not self._auth_refreshing:
+            if self._auth_checked == float("-inf"):
+                self._refresh_auth()
+            else:
+                self._auth_refreshing = True
+                threading.Thread(target=self._refresh_auth, name="claude-auth-status", daemon=True).start()
         return self._auth_problem
+
+    def _refresh_auth(self) -> None:
+        try:
+            self._auth_problem = self.check_auth()
+        finally:
+            self._auth_checked = time.monotonic()
+            self._auth_refreshing = False
 
     def check_auth(self) -> str | None:
         """``claude auth status`` (no model call, no usage). A long-lived token is trusted until a call fails; one
@@ -225,7 +241,7 @@ class ClaudeCodeProvider(LLMProvider):
         now = now_ms()
         if _LOGIN_RE.search(message):
             self.cool_down(now + LOGIN_COOLDOWN_MS, f"{self.name}: not signed in ({message[:120]})")
-            self._auth_checked = float("-inf")
+            self._auth_checked = 0.0                      # re-check (in the background) after the cooldown
             return ProviderError(self.cooldown_reason, retryable=False)
         if status == 429 or _LIMIT_RE.search(message):
             self.cool_down(limit_reset_ms(message, now), f"{self.name}: subscription usage limit ({message[:120]})")

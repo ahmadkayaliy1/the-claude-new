@@ -51,6 +51,26 @@ def test_review_fires_once_per_decision(eng):
         assert not eng.evaluate("XAUUSD", t, False, None, "hybrid")[0]
 
 
+def test_review_survives_a_call_that_never_answered(eng):
+    """Integration review: an 'error' (e.g. usage limit) or data-gate 'skipped' row does not consume the review;
+    it re-fires after the floor instead of being lost."""
+    rec = rec_for()
+    rec["next_review"] = {"in_minutes": 30}
+    eng.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=rec, ts=T0))
+    eng.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "review", "error", ts=T0 + 31 * MIN))
+    eng.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "setup", "skipped", ts=T0 + 32 * MIN))
+    assert not eng.evaluate("XAUUSD", T0 + 34 * MIN, False, None, "hybrid")[0]      # < review floor
+    fire, _, strength = eng.evaluate("XAUUSD", T0 + 38 * MIN, False, None, "hybrid")
+    assert fire and strength == "review"
+
+
+def test_spacing_counts_from_the_dispatch_not_the_stored_answer(eng):
+    """Integration review: a call answered 3 min after dispatch must not push the next 15m close out of reach."""
+    eng.last_call["XAUUSD"] = T0
+    eng.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=rec_for(), ts=T0 + 3 * MIN))
+    assert eng.evaluate("XAUUSD", T0 + 15 * MIN + 5_000, True, PAYLOAD, "every_close")[0]
+
+
 def test_price_review_uses_the_analysis_quote_and_the_floor(eng, monkeypatch):
     rec = rec_for("BTCUSDT", decision="NO_TRADE")
     rec.update(price_reference="binance_spot:BTCUSDT",

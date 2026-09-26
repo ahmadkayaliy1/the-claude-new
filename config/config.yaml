@@ -199,7 +199,7 @@ ai:
       free_tier: true                  # flat subscription: no marginal USD cost per call
       rpm: 4
       rpd: 120                         # daily cap - keeps limits free for your own interactive use
-      timeout_s: 300
+      timeout_s: 180                  # serialized calls: keep a 3-pair batch within risk.max_recommendation_age_s
     gemini:
       kind: gemini
       model: gemini-3.8-flash

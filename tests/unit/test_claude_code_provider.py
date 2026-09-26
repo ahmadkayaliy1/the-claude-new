@@ -248,3 +248,33 @@ def test_token_added_to_env_file_is_picked_up(tmp_path, monkeypatch):
     env.write_text("CLAUDE_CODE_OAUTH_TOKEN=oat-123\n", encoding="utf-8")     # the user adds it later (OPS-07)
     monkeypatch.setattr(base, "_dotenv", (float("-inf"), {}))                   # the next re-read is due
     assert p.check_auth() is None and p.api_key == "oat-123"
+
+
+def test_api_key_source_is_refused():
+    """Integration review: an API-key credential reported via apiKeySource is refused, not only via authMethod."""
+    st = json.loads((FIX / "claude_code_auth_status_logged_out.json").read_text(encoding="utf-8"))
+    assert "API key" in cc.auth_problem("claude_code", {**st, "loggedIn": True, "authMethod": "claude.ai",
+                                                       "apiKeySource": "ANTHROPIC_API_KEY"})
+    assert cc.auth_problem("claude_code", {**st, "loggedIn": True, "authMethod": "claude.ai",
+                                           "apiKeySource": "none"}) is None
+
+
+def test_auth_refresh_after_the_first_check_runs_in_the_background(prov, monkeypatch):
+    """Integration review: only the first login check is inline; later ones never block the caller."""
+    import threading
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow_check():
+        calls.append(1)
+        if len(calls) > 1:
+            started.set()
+            release.wait(5)
+        return None
+    monkeypatch.setattr(prov, "check_auth", slow_check)
+    assert prov.unavailable_reason() is None and len(calls) == 1          # first check: inline
+    prov._auth_checked = 0.0                                              # TTL expired
+    assert prov.unavailable_reason() is None                             # returns at once (cached answer)
+    assert started.wait(5) and prov._auth_refreshing
+    release.set()

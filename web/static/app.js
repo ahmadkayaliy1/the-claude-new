@@ -20,11 +20,13 @@ const latestDecision = {};
 const setHTML = (el, html) => { if (el && el._html !== html) { el.innerHTML = html; el._html = html; } };   // no churn → no lost clicks
 const killSwitchOn = () => !!(STATUS.collectors || []).find((c) => c.collector === "executor")?.detail?.kill_switch;
 
-/* Execute Now is possible until the earlier of valid_until and ts + max_recommendation_age_s (the risk gate's rule). */
+/* Execute Now is possible until the earlier of valid_until and timestamp + max_recommendation_age_s (the risk gate's
+   rule: the recommendation's timestamp is the cycle's data as-of, earlier than the row's ts for a slow AI call). */
 function execDeadline(p, rec) {
   const r = rec?.recommendation || {};
   if (!p || !rec || rec.status !== "valid" || !["BUY", "SELL"].includes(r.decision) || rec.execution_state !== "not_executed") return null;
-  return Math.min(rec.valid_until || Infinity, rec.ts + (p.max_recommendation_age_s ?? 300) * 1000);
+  const asOf = Date.parse(r.timestamp) || rec.ts;
+  return Math.min(rec.valid_until || Infinity, asOf + (p.max_recommendation_age_s ?? 300) * 1000);
 }
 
 function updateCountdowns() {

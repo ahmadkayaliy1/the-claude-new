@@ -36,3 +36,6 @@ web/dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# agent worktrees (Claude Code)
+.claude/worktrees/
