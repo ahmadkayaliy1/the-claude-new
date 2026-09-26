@@ -14,7 +14,36 @@ const api = async (path, opts = {}) => {
 
 let PAIRS = [];
 let STATUS = {};
+let SKEW = 0;                                  // server clock − browser clock (ms), refreshed on every push
+const serverNow = () => Date.now() + SKEW;
 const latestDecision = {};
+const setHTML = (el, html) => { if (el && el._html !== html) { el.innerHTML = html; el._html = html; } };   // no churn → no lost clicks
+const killSwitchOn = () => !!(STATUS.collectors || []).find((c) => c.collector === "executor")?.detail?.kill_switch;
+
+/* Execute Now is possible until the earlier of valid_until and ts + max_recommendation_age_s (the risk gate's rule). */
+function execDeadline(p, rec) {
+  const r = rec?.recommendation || {};
+  if (!p || !rec || rec.status !== "valid" || !["BUY", "SELL"].includes(r.decision) || rec.execution_state !== "not_executed") return null;
+  return Math.min(rec.valid_until || Infinity, rec.ts + (p.max_recommendation_age_s ?? 300) * 1000);
+}
+
+function updateCountdowns() {
+  document.querySelectorAll("[data-deadline]").forEach((el) => {
+    const s = Math.max(0, (Number(el.dataset.deadline) - serverNow()) / 1000);
+    el.textContent = s >= 60 ? `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s` : `${Math.floor(s)}s`;
+  });
+}
+
+function execControls(p, rec) {
+  const deadline = execDeadline(p, rec);
+  if (deadline == null) return "";
+  const kill = killSwitchOn(), open = serverNow() < deadline;
+  const note = kill ? "kill switch engaged — the executor blocks every new order"
+    : open ? `executable for <span data-deadline="${deadline}"></span> · the executor re-checks every risk rule before any order`
+      : "too old to execute (validity / recommendation-age limit passed)";
+  return `<div style="margin-top:8px"><button class="primary" data-exec="${esc(rec.id)}" ${open && !kill ? "" : "disabled"}>Execute Now</button>
+    <span class="muted small">${note}</span></div>`;
+}
 
 /* ------------------------------------------------------------------ tabs */
 document.querySelectorAll("#tabs button").forEach((b) =>
@@ -29,74 +58,93 @@ document.querySelectorAll("#tabs button").forEach((b) =>
 );
 
 /* ------------------------------------------------------------------ live */
+/* Cards are built once; each part is replaced only when its HTML changes, so the Execute button is not recreated
+   every second (a click spanning a re-render used to be lost). Countdowns tick in place. */
+function ensureCards() {
+  const root = $("#pair-cards"), sig = PAIRS.map((p) => p.pair).join(",");
+  if (root.dataset.pairs === sig) return;
+  root.dataset.pairs = sig;
+  root.innerHTML = PAIRS.map((p) => `<div class="card" data-pair="${esc(p.pair)}">
+      <h3>${esc(p.pair)} <span class="muted small">${esc(p.asset_class)} · decision ${esc(p.decision_timeframe)}</span></h3>
+      <div class="kv" data-part="quotes"></div><div data-part="rec"></div></div>`).join("");
+}
+
 function renderLive() {
+  ensureCards();
   const quotes = Object.fromEntries((STATUS.quotes || []).map((q) => [q.instrument, q]));
-  const cards = PAIRS.map((p) => {
-    const prim = p.instruments.find((i) => i.roles.includes("analysis_primary"));
-    const exe = p.instruments.find((i) => i.roles.includes("execution"));
+  const qAge = (q) => `<span class="small ${q.stale ? "fail" : "muted"}">${age(q.age_s)}${q.stale ? " · stale" : ""}</span>`;
+  PAIRS.forEach((p, i) => {
+    const card = $("#pair-cards").children[i];
+    const prim = p.instruments.find((x) => x.roles.includes("analysis_primary"));
+    const exe = p.instruments.find((x) => x.roles.includes("execution"));
     const pq = quotes[prim.key], eq = quotes[exe.key];
     const d = p.price_decimals;
     const basis = pq && eq && prim.key !== exe.key ? (eq.bid + eq.ask) / 2 - (pq.bid + pq.ask) / 2 : null;
-    const rec = latestDecision[p.pair];
-    return `<div class="card">
-      <h3>${esc(p.pair)} <span class="muted small">${esc(p.asset_class)} · decision ${esc(p.decision_timeframe)}</span></h3>
-      <div class="kv">
-        <div>Analysis ${esc(prim.key)}</div><div class="price">${pq ? num((pq.bid + pq.ask) / 2, d) : "—"} <span class="muted small">${pq ? age(pq.age_s) : ""}</span></div>
-        <div>Execution ${esc(exe.key)}</div><div>${eq ? `${num(eq.bid, d)} / ${num(eq.ask, d)} · spread ${num(eq.ask - eq.bid, d)}` : "—"} <span class="muted small">${eq ? age(eq.age_s) : ""}</span></div>
-        ${basis != null ? `<div>Basis (exec − analysis)</div><div>${num(basis, d)}</div>` : ""}
-      </div>
-      ${renderRecCard(p.pair, rec, d)}
-    </div>`;
+    setHTML(card.querySelector('[data-part="quotes"]'), `
+        <div>Analysis ${esc(prim.key)}</div><div class="price">${pq ? num((pq.bid + pq.ask) / 2, d) : "—"} ${pq ? qAge(pq) : ""}</div>
+        <div>Execution ${esc(exe.key)}</div><div>${eq ? `${num(eq.bid, d)} / ${num(eq.ask, d)} · spread ${num(eq.ask - eq.bid, d)}` : "—"} ${eq ? qAge(eq) : ""}</div>
+        ${basis != null ? `<div>Basis (exec − analysis)</div><div>${num(basis, d)}</div>` : ""}`);
+    setHTML(card.querySelector('[data-part="rec"]'), renderRecCard(p, latestDecision[p.pair], d));
   });
-  $("#pair-cards").innerHTML = cards.join("");
-  document.querySelectorAll("button[data-exec]").forEach((b) => b.addEventListener("click", () => executeNow(b.dataset.exec)));
+  updateCountdowns();
   const tb = $("#collectors tbody");
-  tb.innerHTML = (STATUS.collectors || []).map((c) => {
+  setHTML(tb, (STATUS.collectors || []).map((c) => {
     const det = c.detail || {};
-    const keys = ["messages", "reconnects", "rows_written", "rows_rejected", "downloaded_mb", "mode", "policy", "governor_level", "equity", "open_positions"];
+    const keys = ["messages", "reconnects", "rows_written", "rows_rejected", "downloaded_mb", "mode", "policy", "governor_level", "equity", "open_positions", "open_orders", "errors_last_5min"];
     const brief = keys.filter((k) => det[k] != null).map((k) => `${k}=${esc(det[k])}`).join(" · ");
     const lastData = c.last_data_ms ? age(Math.max(0, (STATUS.server_time - c.last_data_ms) / 1000)) : "—";
+    const errAge = c.last_error && c.last_error_ms ? ` <span class="muted">(${age(Math.max(0, (STATUS.server_time - c.last_error_ms) / 1000))} ago)</span>` : "";
     return `<tr><td>${esc(c.collector)}</td><td class="state-${esc(c.state)}">${esc(c.state)}</td><td>${lastData}</td>
-      <td>${age(c.heartbeat_age_s)}</td><td class="small">${brief}</td><td class="small fail">${esc(c.last_error || "")}</td></tr>`;
-  }).join("");
+      <td>${age(c.heartbeat_age_s)}</td><td class="small">${brief}</td><td class="small fail">${esc(c.last_error || "")}${errAge}</td></tr>`;
+  }).join(""));
   const ex = (STATUS.collectors || []).find((c) => c.collector === "executor");
   const mode = ex?.detail?.mode || "—";
   $("#mode-badge").textContent = `${mode.toUpperCase()} · ${ex?.detail?.trigger || ""}`;
   $("#mode-badge").className = `badge ${mode}`;
+  $("#kill-badge").classList.toggle("hidden", !killSwitchOn());
   const eng = (STATUS.collectors || []).find((c) => c.collector === "engine");
   $("#ai-badge").textContent = eng?.detail ? `AI ${eng.detail.provider} · ${eng.detail.mode} · gov ${eng.detail.governor_level}` : "AI engine not running";
 }
 
-function renderRecCard(pair, rec, d) {
+function renderRecCard(p, rec, d) {
   if (!rec) return `<div class="rec muted">No recommendation yet.</div>`;
   const r = rec.recommendation || {};
   const cls = r.decision === "BUY" ? "buy" : r.decision === "SELL" ? "sell" : "notrade";
-  const canExec = rec.status === "valid" && ["BUY", "SELL"].includes(r.decision) && rec.execution_state === "not_executed" && (!rec.valid_until || rec.valid_until > Date.now());
   const entry = r.entry ? (r.entry.range_min != null ? `${num(r.entry.range_min, d)}–${num(r.entry.range_max, d)}` : num(r.entry.price, d)) : "—";
+  const reason = rec.execution_detail?.reason;
   return `<div class="rec">
     <div><b class="${cls}">${esc(r.decision || rec.status)}</b> ${esc(r.order_type || "")} · conf ${esc(r.confidence ?? "—")} · RR ${num(rec.rr_computed, 2)}
       <span class="muted small">· ${fmtT(rec.ts)} · <span class="state-${esc(rec.execution_state)}">${esc(rec.execution_state)}</span></span></div>
+    ${reason ? `<div class="small fail">${esc(reason)}</div>` : ""}
     ${["BUY", "SELL"].includes(r.decision) ? `<div class="small">entry ${entry} · SL ${num(r.stop_loss, d)} · TP ${(r.take_profits || []).map((t) => num(t.price, d)).join(" / ")}</div>` : ""}
     <div class="small muted">${esc((r.market_summary || "").slice(0, 220))}</div>
-    <div style="margin-top:8px"><button class="primary" data-exec="${esc(rec.id)}" ${canExec ? "" : "disabled"}>Execute Now</button>
-      <span class="muted small">the executor re-checks every risk rule before any order</span></div>
+    ${execControls(p, rec)}
   </div>`;
 }
 
 async function executeNow(id) {
   if (!confirm("Queue this recommendation for execution? The risk gate re-validates it with live prices first.")) return;
   try {
-    const r = await api(`/api/decisions/${id}/execute`, { method: "POST", headers: { "X-Dashboard-Token": TOKEN } });
+    const r = await api(`/api/decisions/${encodeURIComponent(id)}/execute`, { method: "POST", headers: { "X-Dashboard-Token": TOKEN } });
     alert(`Execution state: ${r.execution_state}${r.note ? " — " + r.note : ""}`);
-    refreshLatestDecisions();
   } catch (e) { alert(`Refused: ${e.message}`); }
+  refreshLatestDecisions();
+  if ($("#dec-detail").dataset.id === id) showDecision(id, false);
 }
 
-async function refreshLatestDecisions() {
-  for (const p of PAIRS) {
-    const list = await api(`/api/decisions?pair=${p.pair}&limit=1`);
-    if (list.length) latestDecision[p.pair] = await api(`/api/decisions/${list[0].id}`);
-  }
+let refreshing = false;
+/* which: {pair: decision id} (from the push) or null = every pair's latest via the list endpoint */
+async function refreshLatestDecisions(which = null) {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    const targets = which || Object.fromEntries(PAIRS.map((p) => [p.pair, null]));
+    for (const [pair, known] of Object.entries(targets)) {
+      const id = known || (await api(`/api/decisions?pair=${encodeURIComponent(pair)}&limit=1`))[0]?.id;
+      if (id) latestDecision[pair] = await api(`/api/decisions/${encodeURIComponent(id)}`);
+    }
+  } catch (e) { console.warn("decision refresh failed", e); }
+  finally { refreshing = false; }
   renderLive();
 }
 
@@ -107,8 +155,16 @@ function connectWS() {
   ws.onclose = () => { $("#ws-dot").className = "dot off"; setTimeout(connectWS, 2000); };
   ws.onmessage = (ev) => {
     STATUS = JSON.parse(ev.data);
+    if (STATUS.server_time) SKEW = STATUS.server_time - Date.now();
     $("#clock").textContent = `${STATUS.server_time_iso?.slice(11, 19) || ""} UTC`;
-    if ((STATUS.new_decisions || []).length) refreshLatestDecisions(); else renderLive();
+    // follow new decisions *and* state transitions (queued → executing → executed / rejected with its reason)
+    const changed = {};
+    for (const p of PAIRS) {
+      const l = (STATUS.latest_decisions || {})[p.pair], cur = latestDecision[p.pair];
+      if (l && (!cur || cur.id !== l.id || cur.execution_state !== l.execution_state)) changed[p.pair] = l.id;
+    }
+    renderLive();
+    if (Object.keys(changed).length) refreshLatestDecisions(changed);
     if ($("#tab-health").classList.contains("active")) renderHealth();
   };
 }
@@ -177,14 +233,17 @@ async function loadDecisions() {
   document.querySelectorAll("#decisions tbody tr[data-id]").forEach((tr) => tr.addEventListener("click", () => showDecision(tr.dataset.id)));
 }
 
-async function showDecision(id) {
-  const d = await api(`/api/decisions/${id}`);
+async function showDecision(id, scroll = true) {
+  const d = await api(`/api/decisions/${encodeURIComponent(id)}`);
   const r = d.recommendation || {};
   const gate = (d.execution_detail?.gate || []).map((g) => `<tr><td>${esc(g.check)}</td><td class="${g.ok ? "pass" : "fail"}">${g.ok ? "pass" : "FAIL"}</td><td>${esc(g.detail)}</td></tr>`).join("");
   const caps = d.payload ? Object.entries(d.payload.capabilities || {}).map(([k, v]) => `<span class="q-${esc(v.quality)}">${esc(k)}: ${esc(v.quality)}</span>`).join(" · ") : "";
   const el = $("#dec-detail");
   el.classList.remove("hidden");
+  el.dataset.id = d.id;
   el.innerHTML = `<h3>${esc(d.pair)} · ${esc(r.decision || d.status)} ${esc(r.order_type || "")} <span class="muted small">${fmtT(d.ts)} · ${esc(d.provider)}/${esc(d.model)} · prompt ${esc(d.prompt_hash)} · payload ${esc(d.payload_hash)}</span></h3>
+    <p class="small">Execution: <span class="state-${esc(d.execution_state)}">${esc(d.execution_state)}</span>${d.execution_detail?.reason ? ` — <span class="fail">${esc(d.execution_detail.reason)}</span>` : ""}</p>
+    ${execControls(PAIRS.find((p) => p.pair === d.pair), d)}
     <p>${esc(r.market_summary || "")}</p>
     <p class="small"><b>Reasoning:</b> ${esc(r.reasoning_trace || "")}</p>
     ${r.instructions ? `<p class="small"><b>Instructions:</b> ${esc(r.instructions)}</p>` : ""}
@@ -197,7 +256,8 @@ async function showDecision(id) {
     ${d.paper_legs?.length ? `<details open><summary>Paper legs</summary><pre>${esc(JSON.stringify(d.paper_legs, null, 1))}</pre></details>` : ""}
     <details><summary>Payload sent to the model</summary><pre>${esc(JSON.stringify(d.payload, null, 1))}</pre></details>
     <details><summary>Raw model output</summary><pre>${esc(d.raw_text || "")}</pre></details>`;
-  el.scrollIntoView({ behavior: "smooth" });
+  updateCountdowns();
+  if (scroll) el.scrollIntoView({ behavior: "smooth" });
 }
 
 /* ------------------------------------------------------------------ performance */
@@ -237,6 +297,12 @@ async function loadEvents() {
 
 /* ------------------------------------------------------------------ boot */
 (async function boot() {
+  // one delegated listener each: survives re-renders (no per-render re-binding)
+  ["#pair-cards", "#dec-detail"].forEach((sel) => $(sel).addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-exec]");
+    if (b && !b.disabled) executeNow(b.dataset.exec);
+  }));
+  setInterval(updateCountdowns, 1000);
   PAIRS = await api("/api/pairs");
   $("#dec-pair").innerHTML += PAIRS.map((p) => `<option>${esc(p.pair)}</option>`).join("");
   $("#dec-pair").addEventListener("change", loadDecisions);

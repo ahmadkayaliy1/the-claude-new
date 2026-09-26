@@ -27,11 +27,14 @@ def tag(decision_id: str, leg: int) -> str:
 class MT5Backend:
     name = "mt5"
 
-    def __init__(self, terminal: MT5Terminal, magic: int, *, expected_account_type: str) -> None:
+    def __init__(self, terminal: MT5Terminal, magic: int, *, expected_account_type: str,
+                 pair_by_symbol: dict[str, str] | None = None) -> None:
         self.t = terminal
         self.mt5 = terminal.mt5
         self.magic = magic
         self.expected = expected_account_type
+        self.pair_by_symbol = dict(pair_by_symbol or {})     # MT5 symbol → logical pair (risk is keyed by pair)
+        self._warned: set[str] = set()
         self.model = ServerTimeModel()
 
     # ------------------------------------------------------------------ state
@@ -42,24 +45,46 @@ class MT5Backend:
             raise RuntimeError(f"account mismatch: {acc.server} trade_mode={acc.trade_mode}, expected "
                                f"{self.t.profile.server} ({self.expected}) — refusing to trade")
 
+    def _pair(self, symbol: str) -> str:
+        if symbol not in self.pair_by_symbol and symbol not in self._warned:
+            self._warned.add(symbol)
+            log.warning("MT5 symbol %s (magic %s) maps to no configured pair — its risk is kept under the raw symbol",
+                        symbol, self.magic)
+        return self.pair_by_symbol.get(symbol, symbol)
+
     def account(self, marks=None) -> dict:
+        """Same contract as ``PaperBackend.account`` (the executor's risk gate reads these keys): our positions and
+        pending orders (by magic) → open decisions, SL risk % of equity by *pair*, floating PnL, realised today."""
         a = self.t.account()
-        positions = [p for p in (self.mt5.positions_get() or []) if p.magic == self.magic]
-        risk_by_symbol: dict[str, float] = {}
+        m = self.mt5
+        positions = [p for p in (m.positions_get() or []) if p.magic == self.magic]
+        orders = [o for o in (m.orders_get() or []) if o.magic == self.magic]
+        buy_orders = {m.ORDER_TYPE_BUY, m.ORDER_TYPE_BUY_LIMIT, m.ORDER_TYPE_BUY_STOP}
+        risk_usd: dict[str, float] = {}
+
+        def add_risk(symbol: str, buy: bool, volume: float, price: float, sl: float) -> None:
+            loss = m.order_calc_profit(m.ORDER_TYPE_BUY if buy else m.ORDER_TYPE_SELL, symbol, volume, price, sl) or 0.0
+            pair = self._pair(symbol)
+            risk_usd[pair] = risk_usd.get(pair, 0.0) + max(0.0, -loss)
+
         for p in positions:
             if p.sl:
-                dist = (p.price_open - p.sl) if p.type == self.mt5.POSITION_TYPE_BUY else (p.sl - p.price_open)
-                loss = self.mt5.order_calc_profit(
-                    self.mt5.ORDER_TYPE_BUY if p.type == self.mt5.POSITION_TYPE_BUY else self.mt5.ORDER_TYPE_SELL,
-                    p.symbol, p.volume, p.price_open, p.price_open - dist if p.type == self.mt5.POSITION_TYPE_BUY
-                    else p.price_open + dist) or 0.0
-                risk_by_symbol[p.symbol] = risk_by_symbol.get(p.symbol, 0.0) + max(0.0, -loss)
+                add_risk(p.symbol, p.type == m.POSITION_TYPE_BUY, p.volume, p.price_open, p.sl)
+        for o in orders:
+            if o.sl:
+                add_risk(o.symbol, o.type in buy_orders, o.volume_current, o.price_open, o.sl)
         today = now_ms() // 86_400_000 * 86_400_000
-        deals = self.mt5.history_deals_get(self.model.utc_to_server(today) // 1000, int(time.time()) + 86_400) or []
+        deals = m.history_deals_get(self.model.utc_to_server(today) // 1000, int(time.time()) + 86_400) or []
         realized = sum(d.profit + d.commission + d.swap for d in deals if d.magic == self.magic)
+        with_pos = {p.comment.rsplit(":", 1)[0] for p in positions}
+        with_ord = {o.comment.rsplit(":", 1)[0] for o in orders}
         return {"mode": self.expected, "currency": a.currency, "balance": a.balance, "equity": a.equity,
-                "margin_free": a.margin_free, "open_positions": len({p.comment.rsplit(':', 1)[0] for p in positions}),
-                "open_risk_usd_by_symbol": risk_by_symbol, "realized_today_usd": realized}
+                "margin_free": a.margin_free, "unrealized_usd": round(sum(p.profit + p.swap for p in positions), 2),
+                "open_positions": len(with_pos | with_ord), "open_orders": len(with_ord - with_pos),
+                "open_risk_usd_by_pair": {k: round(v, 2) for k, v in risk_usd.items()},
+                "open_risk_pct_by_pair":
+                    {k: round(v / a.equity * 100, 3) for k, v in risk_usd.items()} if a.equity > 0 else {},
+                "realized_today_usd": realized}
 
     def specs(self, symbol: str) -> dict:
         i = self.mt5.symbol_info(symbol)

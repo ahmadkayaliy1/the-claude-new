@@ -11,6 +11,7 @@ nav button.active, nav button:hover { color: var(--text); background: var(--pane
 .meta { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .badge { padding: 2px 8px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font-size: 12px; }
 .badge.paper { color: var(--blue); } .badge.demo { color: var(--amber); } .badge.live { color: var(--red); border-color: var(--red); }
+.badge.kill { color: white; background: var(--red); border-color: var(--red); font-weight: 700; }
 .muted { color: var(--muted); } .small { font-size: 12px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--red); }
 .dot.on { background: var(--green); }
@@ -33,7 +34,7 @@ table.grid { width: 100%; border-collapse: collapse; background: var(--panel); b
 .state-live, .state-valid, .state-executed { color: var(--green); }
 .state-error, .state-stale, .state-invalid, .state-rejected, .state-refused { color: var(--red); }
 .state-reconnecting, .state-backfilling, .state-starting, .state-queued, .state-executing, .state-budget_blocked { color: var(--amber); }
-.state-market_closed, .state-stopped, .state-not_executed { color: var(--muted); }
+.state-market_closed, .state-stopped, .state-not_executed, .state-expired { color: var(--muted); }
 button.primary, #ch-load, #dec-refresh { background: var(--blue); color: white; border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit; }
 button.primary:disabled { background: var(--panel2); color: var(--muted); cursor: not-allowed; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-bottom: 12px; }

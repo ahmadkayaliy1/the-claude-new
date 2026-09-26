@@ -5,7 +5,9 @@ Fill rules: BUY fills at the ask, SELL at the bid; BUY_LIMIT when ask ≤ price,
 (fills at the ask → real slippage), SELL_LIMIT when bid ≥ price, SELL_STOP when bid ≤ price. A BUY position's
 SL/TP trigger on the bid (exit at the bid, so gaps slip through the stop), a SELL's on the ask. Multiple TPs
 are separate legs sized by close fraction; ``move_sl_to_breakeven`` after TP k is applied to the remaining legs.
-State persists in ``app.db`` (``paper_orders`` / ``paper_positions``).
+State persists in ``app.db`` (``paper_account`` / ``paper_legs``). Each leg keeps a persisted watermark ``eval_key``
+(key of the last tick it was evaluated on, written in the same transaction as its state), so a restart replays
+exactly the ticks it missed and no tick is ever applied twice (idempotent replay, e.g. after a breakeven move).
 """
 from __future__ import annotations
 
@@ -27,9 +29,16 @@ _DDL = [
         order_type TEXT NOT NULL, order_price REAL, volume REAL NOT NULL, contract_size REAL NOT NULL, sl REAL NOT NULL,
         tp REAL, tp_index INTEGER, status TEXT NOT NULL, created_ms INTEGER NOT NULL, expires_ms INTEGER,
         fill_price REAL, fill_ms INTEGER, close_price REAL, close_ms INTEGER, close_reason TEXT, pnl_usd REAL,
-        management TEXT)""",
+        management TEXT, eval_key INTEGER)""",
     "CREATE INDEX IF NOT EXISTS paper_legs_status ON paper_legs(status, instrument)",
 ]
+_COLS = ("id", "decision_id", "pair", "instrument", "side", "order_type", "order_price", "volume", "contract_size", "sl",
+         "tp", "tp_index", "status", "created_ms", "expires_ms", "fill_price", "fill_ms", "close_price", "close_ms",
+         "close_reason", "pnl_usd", "management", "eval_key")
+# legacy legs (before eval_key): nothing at/before creation, fill or the last sibling close (breakeven moment) is replayed
+_LEGACY_WATERMARK = """UPDATE paper_legs SET eval_key = max(created_ms, COALESCE(fill_ms, 0), COALESCE((SELECT max(o.close_ms)
+    FROM paper_legs o WHERE o.decision_id = paper_legs.decision_id AND o.status = 'closed'), 0)) * 1000 + 999
+    WHERE eval_key IS NULL"""
 PENDING, OPEN, CLOSED, CANCELLED, EXPIRED = "pending", "open", "closed", "cancelled", "expired"
 
 
@@ -38,6 +47,11 @@ class Tick:
     time_msc: int
     bid: float
     ask: float
+    key: int | None = None           # stored tick key (utc_ms*1000+seq); None → time_msc*1000+999
+
+    @property
+    def order_key(self) -> int:
+        return self.key if self.key is not None else self.time_msc * 1000 + 999
 
 
 def split_volume(total: float, fractions: list[float], step: float, vmin: float) -> list[float] | None:
@@ -60,29 +74,47 @@ class PaperBackend:
         with self._lock:
             for s in _DDL:
                 self._con.execute(s)
+            if "eval_key" not in {r[1] for r in self._con.execute("PRAGMA table_info(paper_legs)")}:
+                try:
+                    self._con.execute("ALTER TABLE paper_legs ADD COLUMN eval_key INTEGER")
+                except sqlite3.OperationalError as exc:       # another process migrated first
+                    if "duplicate column" not in str(exc):
+                        raise
+            self._con.execute(_LEGACY_WATERMARK)
             if self._con.execute("SELECT count(*) FROM paper_account").fetchone()[0] == 0:
                 self._con.execute("INSERT INTO paper_account VALUES (1, ?, 0, ?)", (start_equity, now_ms()))
+            self.start_equity = float(self._con.execute("SELECT start_equity FROM paper_account").fetchone()[0])
 
     # ------------------------------------------------------------------ account
     def account(self, marks: dict[str, Tick] | None = None) -> dict:
+        """Account snapshot (same keys as ``MT5Backend.account``). ``open_positions`` counts *decisions* holding an open
+        leg or a live pending order (a pending order takes a slot and its SL risk); unrealised PnL needs ``marks``."""
+        now = now_ms()
         with self._lock:
             start, realized = self._con.execute("SELECT start_equity, realized_usd FROM paper_account").fetchone()
-            open_legs = self._con.execute("SELECT instrument, side, volume, contract_size, fill_price, sl, pair "
+            open_legs = self._con.execute("SELECT instrument, side, volume, contract_size, fill_price, sl, pair, decision_id "
                                           "FROM paper_legs WHERE status='open'").fetchall()
+            pending = self._con.execute(
+                "SELECT side, volume, contract_size, order_price, sl, pair, decision_id FROM paper_legs "
+                "WHERE status='pending' AND (expires_ms IS NULL OR expires_ms > ?)", (now,)).fetchall()
         unreal, risk_by_pair = 0.0, {}
-        for inst, side, vol, cs, fill, sl, pair in open_legs:
+        for inst, side, vol, cs, fill, sl, pair, _ in open_legs:
             m = (marks or {}).get(inst)
             if m is not None:
                 px = m.bid if side == "BUY" else m.ask
                 unreal += (px - fill if side == "BUY" else fill - px) * vol * cs
             risk_by_pair[pair] = risk_by_pair.get(pair, 0.0) + max(0.0, (fill - sl if side == "BUY" else sl - fill)) * vol * cs
+        for side, vol, cs, price, sl, pair, _ in pending:          # order price, never fill_price (NULL until filled)
+            risk = max(0.0, (price - sl if side == "BUY" else sl - price)) * vol * cs
+            risk_by_pair[pair] = risk_by_pair.get(pair, 0.0) + risk
+        with_open, with_pending = {r[-1] for r in open_legs}, {r[-1] for r in pending}
         balance = start + realized
         equity = balance + unreal
         return {"mode": "paper", "currency": "USD", "balance": round(balance, 2), "equity": round(equity, 2),
-                "unrealized_usd": round(unreal, 2), "open_legs": len(open_legs),
-                "open_positions": len({(p) for *_, p in open_legs}),
+                "unrealized_usd": round(unreal, 2), "open_legs": len(open_legs), "start_equity": start,
+                "open_positions": len(with_open | with_pending), "open_orders": len(with_pending - with_open),
                 "open_risk_pct_by_pair": {p: round(v / equity * 100, 3) for p, v in risk_by_pair.items()} if equity > 0 else {},
-                "realized_today_usd": self.realized_since(now_ms() // 86_400_000 * 86_400_000)}
+                "realized_today_usd": self.realized_since(now // 86_400_000 * 86_400_000)}
 
     def realized_since(self, since_ms: int) -> float:
         with self._lock:
@@ -115,6 +147,7 @@ class PaperBackend:
         expires = parse_date_spec(rec["valid_until"]) if rec["order_type"] != "MARKET" else None
         mgmt = json.dumps(rec.get("management", []))
         created = quote.time_msc
+        mark = quote.order_key                     # ticks at/before the placement quote are never evaluated
         rows = []
         for i, (tp, v) in enumerate(zip(tps, vols)):
             leg_id = f"{decision_id}:{i + 1}"
@@ -122,14 +155,14 @@ class PaperBackend:
                 fill = quote.ask if side == "BUY" else quote.bid
                 rows.append((leg_id, decision_id, pair, instrument, side, "MARKET", None, v, contract_size,
                              rec["stop_loss"], tp["price"], i + 1, OPEN, created, None, fill, created, None, None,
-                             None, None, mgmt))
+                             None, None, mgmt, mark))
             else:
                 rows.append((leg_id, decision_id, pair, instrument, side, rec["order_type"], entry, v, contract_size,
                              rec["stop_loss"], tp["price"], i + 1, PENDING, created, expires, None, None, None, None,
-                             None, None, mgmt))
+                             None, None, mgmt, mark))
         with self._lock:
             self._con.execute("BEGIN")
-            self._con.executemany("INSERT INTO paper_legs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            self._con.executemany(f"INSERT INTO paper_legs ({', '.join(_COLS)}) VALUES ({','.join('?' * len(_COLS))})", rows)
             self._con.execute("COMMIT")
         return {"ok": True, "legs": [r[0] for r in rows], "volumes": vols, "note": note,
                 "fill_price": rows[0][15] if rec["order_type"] == "MARKET" else None}
@@ -141,17 +174,33 @@ class PaperBackend:
             return cur.rowcount
 
     # ------------------------------------------------------------------ simulation
+    def watermarks(self) -> dict[str, int]:
+        """Instrument → lowest ``eval_key`` over its pending/open legs: where its tick replay must resume."""
+        with self._lock:
+            return {i: int(k) for i, k in self._con.execute(
+                "SELECT instrument, min(eval_key) FROM paper_legs WHERE status IN (?,?) GROUP BY instrument",
+                (PENDING, OPEN)).fetchall() if k is not None}
+
     def process(self, instrument: str, ticks: list[Tick]) -> list[dict]:
-        """Advance every pending/open leg of ``instrument`` through ``ticks`` (chronological). Returns events."""
+        """Advance every pending/open leg of ``instrument`` through ``ticks`` (chronological). Returns events.
+
+        A leg skips ticks at or below its ``eval_key``, so overlapping or replayed batches are idempotent."""
         with self._lock:
             legs = [dict(zip([c[0] for c in self._con.execute("SELECT * FROM paper_legs LIMIT 0").description], r))
                     for r in self._con.execute("SELECT * FROM paper_legs WHERE instrument=? AND status IN (?,?)",
                                                (instrument, PENDING, OPEN)).fetchall()]
         if not legs or not ticks:
             return []
+        for leg in legs:
+            if leg["eval_key"] is None:
+                leg["eval_key"] = max(leg["created_ms"], leg["fill_ms"] or 0) * 1000 + 999
         events = []
         for t in ticks:
+            tk = t.order_key
             for leg in legs:
+                if tk <= leg["eval_key"] or leg["status"] not in (PENDING, OPEN):
+                    continue
+                leg["eval_key"] = tk               # a finished leg keeps the key of the tick that ended it
                 if leg["status"] == PENDING:
                     if leg["expires_ms"] is not None and t.time_msc >= leg["expires_ms"]:
                         leg.update(status=EXPIRED, close_ms=t.time_msc, close_reason="expired before fill")
@@ -181,9 +230,9 @@ class PaperBackend:
             for leg in legs:
                 self._con.execute(
                     "UPDATE paper_legs SET status=?, sl=?, fill_price=?, fill_ms=?, close_price=?, close_ms=?, "
-                    "close_reason=?, pnl_usd=? WHERE id=?",
+                    "close_reason=?, pnl_usd=?, eval_key=? WHERE id=?",
                     (leg["status"], leg["sl"], leg["fill_price"], leg["fill_ms"], leg["close_price"], leg["close_ms"],
-                     leg["close_reason"], leg["pnl_usd"], leg["id"]))
+                     leg["close_reason"], leg["pnl_usd"], leg["eval_key"], leg["id"]))
             realized = sum(e.get("pnl_usd", 0.0) for e in events if e["event"] in ("tp", "sl"))
             if realized:
                 self._con.execute("UPDATE paper_account SET realized_usd = realized_usd + ?", (realized,))
@@ -195,6 +244,19 @@ class PaperBackend:
             cur = self._con.execute("SELECT * FROM paper_legs WHERE decision_id=? ORDER BY id", (decision_id,))
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def unsettled_decisions(self) -> list[str]:
+        """Decisions whose legs are all finished but whose outcome is not written yet (one query, same app.db)."""
+        with self._lock:
+            try:
+                return [r[0] for r in self._con.execute(
+                    "SELECT l.decision_id FROM paper_legs l JOIN ai_decisions d ON d.id = l.decision_id "
+                    "WHERE d.outcome IS NULL GROUP BY l.decision_id HAVING sum(l.status IN (?,?)) = 0",
+                    (PENDING, OPEN)).fetchall()]
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return []
+                raise
 
     def decisions_with_legs(self, statuses: tuple[str, ...]) -> list[str]:
         with self._lock:

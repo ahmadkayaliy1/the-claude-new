@@ -6,6 +6,8 @@
 * ``POST /api/decisions/{id}/execute`` queues a recommendation for the executor (manual mode). Protected by a
   token that must travel in the ``X-Dashboard-Token`` header (a custom header forces a CORS preflight, which
   this server never grants → other websites cannot trigger it) and by an Origin check. Bound to 127.0.0.1.
+* Host-header allow-list (loopback names only): a DNS-rebinding page served under another name cannot read
+  the dashboard (nor the token embedded in ``/``, which is also never cached).
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import os
 import secrets
 import shutil
 import sqlite3
+import threading
 import zlib
 from pathlib import Path
 from typing import Any
@@ -25,6 +28,7 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..analysis.registry import capability_matrix
 from ..core.instruments import InstrumentRegistry
@@ -60,17 +64,26 @@ def create_app(s: Settings) -> FastAPI:
     token = os.environ.get(s.api.token_env) or secrets.token_urlsafe(32)
     readers: dict[str, InstrumentReader] = {}
     allowed_origins = {f"http://127.0.0.1:{s.api.port}", f"http://localhost:{s.api.port}"}
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted({"127.0.0.1", "localhost", "[::1]", s.api.host}))
+    pair_names = tuple(s.enabled_pairs())
+    known = {i.key for p in pair_names for i in reg.for_pair(p)}
+    max_age_ms = s.risk.max_recommendation_age_s * 1000
 
     def reader(key: str) -> InstrumentReader:
         if key not in readers:
             readers[key] = InstrumentReader(reg.get(key), data)
         return readers[key]
 
+    def snapshot() -> dict:
+        return _shared_snapshot(app_db, pair_names, known)
+
     # ------------------------------------------------------------------ pages
     @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
+    def index() -> HTMLResponse:
         html = (WEB / "index.html").read_text(encoding="utf-8")
-        return html.replace("__DASHBOARD_TOKEN__", token)
+        return HTMLResponse(html.replace("__DASHBOARD_TOKEN__", token), headers={
+            "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+            "Content-Security-Policy": "frame-ancestors 'none'"})
 
     if (WEB / "static").exists():
         app.mount("/static", StaticFiles(directory=WEB / "static"), name="static")
@@ -82,7 +95,7 @@ def create_app(s: Settings) -> FastAPI:
         for p, cfg in s.enabled_pairs().items():
             caps = capability_matrix(s, reg, p)
             out.append({"pair": p, "asset_class": cfg.asset_class, "decision_timeframe": cfg.decision_timeframe.value,
-                        "price_decimals": cfg.price_decimals,
+                        "price_decimals": cfg.price_decimals, "max_recommendation_age_s": s.risk.max_recommendation_age_s,
                         "instruments": [{"key": i.key, "roles": list(i.roles), "timeframes": [t.value for t in i.timeframes],
                                          "datatypes": list(i.datatypes)} for i in reg.for_pair(p)],
                         "capabilities": {k: {"quality": v.quality, "reason": v.reason} for k, v in caps.items()}})
@@ -90,7 +103,7 @@ def create_app(s: Settings) -> FastAPI:
 
     @app.get("/api/status")
     def status() -> dict:
-        return _status_snapshot(app_db)
+        return snapshot()
 
     @app.get("/api/candles")
     def candles(instrument: str, tf: str = "15m", start: int | None = None, end: int | None = None,
@@ -164,15 +177,18 @@ def create_app(s: Settings) -> FastAPI:
             raise HTTPException(401, "missing or invalid dashboard token")
         con = sqlite3.connect(app_db, timeout=10)
         try:
-            row = con.execute("SELECT status, decision, execution_state, valid_until FROM ai_decisions WHERE id=?",
+            row = con.execute("SELECT status, decision, execution_state, valid_until, ts FROM ai_decisions WHERE id=?",
                               (decision_id,)).fetchone()
             if not row:
                 raise HTTPException(404, "decision not found")
-            status, dec, state, valid_until = row
+            status, dec, state, valid_until, ts = row
             if status != "valid" or dec not in ("BUY", "SELL"):
                 raise HTTPException(409, f"not executable (status={status}, decision={dec})")
             if valid_until and now_ms() >= valid_until:
                 raise HTTPException(409, "recommendation expired")
+            if state == "not_executed" and now_ms() - ts > max_age_ms:      # the risk gate's recommendation_age rule
+                raise HTTPException(409, f"too old for execution ({(now_ms() - ts) // 1000}s > "
+                                         f"{max_age_ms // 1000}s risk.max_recommendation_age_s)")
             if state != "not_executed":
                 return JSONResponse({"id": decision_id, "execution_state": state, "note": "already handled (idempotent)"})
             cur = con.execute("UPDATE ai_decisions SET execution_state='queued' WHERE id=? AND execution_state='not_executed'",
@@ -194,7 +210,7 @@ def create_app(s: Settings) -> FastAPI:
         last_decision_ts = 0
         try:
             while True:
-                snap = await asyncio.to_thread(_status_snapshot, app_db)
+                snap = dict(await asyncio.to_thread(snapshot))       # shared by all clients — copy before adding
                 new = []
                 if app_db.exists():
                     with _ro(app_db) as con:
@@ -212,25 +228,42 @@ def create_app(s: Settings) -> FastAPI:
 
 
 _PROC_CACHE: dict[str, Any] = {"ts": 0, "rows": []}
+_PROC_TTL_MS = 30_000
+_SNAP_CACHE: dict[str, Any] = {"ts": 0, "key": None, "snap": None}
+_SNAP_TTL_MS = 900
+_SNAP_LOCK = threading.Lock()
+QUOTE_STALE_S = 600
 
 
 def _process_list() -> list[dict]:
-    """Our processes and their RSS (cached 10 s — enumerating command lines is slow on Windows)."""
-    if now_ms() - _PROC_CACHE["ts"] < 10_000:
+    """Our processes and their RSS (cached 30 s). Only python processes are opened for their command line — reading
+    every process's command line costs seconds of CPU on Windows."""
+    if now_ms() - _PROC_CACHE["ts"] < _PROC_TTL_MS:
         return _PROC_CACHE["rows"]
     rows = []
-    for p in psutil.process_iter(["pid", "name", "cmdline", "memory_info"]):
+    for p in psutil.process_iter(["pid", "name"]):
+        if not (p.info.get("name") or "").lower().startswith("python"):
+            continue
         try:
-            cmd = " ".join(p.info.get("cmdline") or [])
+            cmd = " ".join(p.cmdline() or [])
+            if "tradingsystem" in cmd or "recorder.py" in cmd or ("multiprocessing" in cmd and "Python312" in cmd):
+                rows.append({"pid": p.info["pid"], "rss_mb": round(p.memory_info().rss / 2**20), "cmd": cmd[-80:]})
         except (psutil.Error, TypeError):
             continue
-        if "tradingsystem" in cmd or "recorder.py" in cmd or ("multiprocessing" in cmd and "Python312" in cmd):
-            rows.append({"pid": p.info["pid"], "rss_mb": round(p.info["memory_info"].rss / 2**20), "cmd": cmd[-80:]})
     _PROC_CACHE.update(ts=now_ms(), rows=rows)
     return rows
 
 
-def _status_snapshot(app_db: Path) -> dict:
+def _shared_snapshot(app_db: Path, pairs: tuple[str, ...] = (), known: set[str] | None = None) -> dict:
+    """One status snapshot per ~second, shared by ``/api/status`` and every WebSocket client (read-only: copy it)."""
+    with _SNAP_LOCK:
+        key = (str(app_db), pairs)
+        if _SNAP_CACHE["key"] != key or now_ms() - _SNAP_CACHE["ts"] >= _SNAP_TTL_MS:
+            _SNAP_CACHE.update(snap=_status_snapshot(app_db, pairs, known), key=key, ts=now_ms())
+        return _SNAP_CACHE["snap"]
+
+
+def _status_snapshot(app_db: Path, pairs: tuple[str, ...] = (), known: set[str] | None = None) -> dict:
     out: dict[str, Any] = {"server_time": now_ms(), "server_time_iso": iso(now_ms())}
     if not app_db.exists():
         return out
@@ -244,6 +277,17 @@ def _status_snapshot(app_db: Path) -> dict:
         out["quotes"] = _rows(con, "SELECT * FROM latest_quote ORDER BY instrument")
         for q in out["quotes"]:
             q["age_s"] = round(max(0, now_ms() - q["ts"]) / 1000, 1)
+            q["stale"] = q["age_s"] > QUOTE_STALE_S
+            q["configured"] = known is None or q["instrument"] in known     # rows of feeds no longer ingested
+        # latest decision per pair with its execution state + reason: the Live card follows queued → gate result
+        out["latest_decisions"] = {}
+        for p in pairs:
+            r = _rows(con, "SELECT id, ts, status, decision, execution_state, execution_detail FROM ai_decisions "
+                           "WHERE pair=? ORDER BY ts DESC LIMIT 1", (p,))
+            if r:
+                det = r[0].pop("execution_detail")
+                r[0]["execution_reason"] = (json.loads(det) or {}).get("reason") if det else None
+                out["latest_decisions"][p] = r[0]
         day0 = now_ms() // 86_400_000 * 86_400_000
         u = _rows(con, "SELECT provider, count(*) AS calls, COALESCE(sum(cost_usd),0) AS cost, "
                        "COALESCE(sum(ok),0) AS ok FROM ai_usage WHERE ts>=? GROUP BY provider", (day0,))
