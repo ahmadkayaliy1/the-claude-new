@@ -3,8 +3,8 @@ $BAD = @('C:\ProgramData\WindowsTask', 'C:\ProgramData\ReaItekHD')
 function IsBad($p) { if (-not $p) { return $false }; foreach ($b in $BAD) { if ($p -like "$b*") { return $true } }; return $false }
 $bad = 0
 Write-Host "== processes from the miner folders"
-$p = Get-CimInstance Win32_Process | Where-Object { IsBad $_.ExecutablePath -or $_.CommandLine -match 'stratum\+tcp' }
-if ($p) { $p | ForEach-Object { Write-Host "  !! $($_.ProcessId) $($_.ExecutablePath)  $($_.CommandLine)" -ForegroundColor Red; $bad++ } } else { Write-Host "  ok none" -ForegroundColor Green }
+$p = @(Get-CimInstance Win32_Process | Where-Object { (IsBad $_.ExecutablePath) -or ($_.CommandLine -match 'stratum\+tcp') })
+if ($p.Count -gt 0) { foreach ($x in $p) { Write-Host "  !! $($x.ProcessId) $($x.ExecutablePath)  $($x.CommandLine)" -ForegroundColor Red; $bad++ } } else { Write-Host "  ok none" -ForegroundColor Green }
 Write-Host "== folders"
 foreach ($b in $BAD) { if (Test-Path $b) { Write-Host "  !! still present: $b" -ForegroundColor Red; $bad++ } else { Write-Host "  ok gone: $b" -ForegroundColor Green } }
 Write-Host "== autostart registry entries"

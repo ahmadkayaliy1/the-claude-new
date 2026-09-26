@@ -34,7 +34,7 @@ Start-Sleep -Seconds 2
 try {
     $pref = Get-MpPreference
     foreach ($e in @($pref.ExclusionPath)) { if (IsBad $e) { Remove-MpPreference -ExclusionPath $e; Say "REMOVED Defender path exclusion $e" } }
-    foreach ($e in @($pref.ExclusionProcess)) { if (IsBad $e -or $e -match 'MicrosoftHost|AppHost|taskhostw') { Remove-MpPreference -ExclusionProcess $e; Say "REMOVED Defender process exclusion $e" } }
+    foreach ($e in @($pref.ExclusionProcess)) { if ((IsBad $e) -or ($e -match 'MicrosoftHost|AppHost|taskhostw')) { Remove-MpPreference -ExclusionProcess $e; Say "REMOVED Defender process exclusion $e" } }
     if (-not @($pref.ExclusionPath) -and -not @($pref.ExclusionProcess)) { Say "no Defender exclusions found" }
 } catch { Say "Defender preferences not readable: $($_.Exception.Message)" }
 
@@ -61,8 +61,8 @@ foreach ($t in Get-ScheduledTask) {
 }
 
 # 3c. services and drivers installed from the miner folders (e.g. the WinRing0 driver)
-foreach ($s in Get-CimInstance Win32_Service) { if (IsBad $s.PathName -or $s.PathName -match 'WinRing0') { sc.exe stop $s.Name | Out-Null; sc.exe delete $s.Name | Out-Null; Say "REMOVED service $($s.Name) ($($s.PathName))" } }
-foreach ($d in Get-CimInstance Win32_SystemDriver) { if (IsBad $d.PathName -or $d.PathName -match 'WinRing0') { sc.exe stop $d.Name | Out-Null; sc.exe delete $d.Name | Out-Null; Say "REMOVED driver $($d.Name) ($($d.PathName))" } }
+foreach ($s in Get-CimInstance Win32_Service) { if ((IsBad $s.PathName) -or ($s.PathName -match 'WinRing0')) { sc.exe stop $s.Name | Out-Null; sc.exe delete $s.Name | Out-Null; Say "REMOVED service $($s.Name) ($($s.PathName))" } }
+foreach ($d in Get-CimInstance Win32_SystemDriver) { if ((IsBad $d.PathName) -or ($d.PathName -match 'WinRing0')) { sc.exe stop $d.Name | Out-Null; sc.exe delete $d.Name | Out-Null; Say "REMOVED driver $($d.Name) ($($d.PathName))" } }
 foreach ($f in Get-ChildItem "$env:SystemRoot\System32\drivers" -Filter 'WinRing0*' -ErrorAction SilentlyContinue) { try { Move-Item $f.FullName "$($f.FullName).quarantined" -Force; Say "QUARANTINED driver file $($f.FullName)" } catch { Say "FAILED to move $($f.FullName): $($_.Exception.Message)" } }
 
 # 4. quarantine the folders (move, not delete)
