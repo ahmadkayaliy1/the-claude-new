@@ -68,7 +68,7 @@ class Executor:
             prof = s.mt5.profiles[pname]
             self.exec_reg = InstrumentRegistry.from_settings(s, mt5_profile=pname)
             term = MT5Terminal(prof)
-            term.connect()
+            self._connect_mt5(term)
             self.mt5 = MT5Backend(term, s.execution.magic, expected_account_type=prof.account_type,
                                   pair_by_symbol=self.pair_by_symbol())
             self.mt5.assert_account()
@@ -82,6 +82,22 @@ class Executor:
         self.started = now_ms()
         self.mt5_quiet_until = 0
         self.stop = False
+
+    def _connect_mt5(self, term, first_delay_s: float = 5.0) -> None:
+        """MT5 may be offline at start-up (terminal starting, reconnecting after a network drop): retry with backoff,
+        reporting 'reconnecting' (a fresh heartbeat), instead of exiting into a supervisor restart loop. An account
+        mismatch is permanent and still raises."""
+        from ..ingest.mt5.terminal import MT5Unavailable
+        delay = first_delay_s
+        while True:
+            try:
+                term.connect()
+                return
+            except MT5Unavailable as exc:
+                self.appdb.set_status("executor", "reconnecting", error=f"MT5 at start-up: {exc}"[:200])
+                log.warning("MT5 not available at start-up (%s) — retry in %.0fs", exc, delay)
+                time.sleep(delay)
+                delay = min(delay * 2, 60.0)
 
     def pair_by_symbol(self) -> dict[str, str]:
         """Execution-account MT5 symbol → pair (the MT5 account's risk is reported per pair)."""

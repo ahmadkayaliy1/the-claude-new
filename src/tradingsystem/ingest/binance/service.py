@@ -14,6 +14,8 @@ import threading
 from collections import defaultdict
 from pathlib import Path
 
+import httpx
+
 from ...core.instruments import Instrument, InstrumentRegistry
 from ...core.settings import Settings
 from ...core.timeframes import Timeframe
@@ -26,7 +28,7 @@ from ...storage.validators import validate_rows
 from ..common.appdb import AppDB
 from . import fetch, parsers
 from .markets import DEPTH_BANDS_PCT, MARKETS
-from .rest import BinanceRest
+from .rest import BinanceHTTPError, BinanceRest, RetriesExhausted
 from .ws import StreamConnection
 
 log = logging.getLogger(__name__)
@@ -442,11 +444,30 @@ class BinanceLiveService:
                 pass
 
     # ------------------------------------------------------------------ lifecycle
+    async def _sync_clock_until_ok(self, venue: str, rest: BinanceRest, first_delay_s: float = 5.0) -> None:
+        """The network may be down at start-up (Wi-Fi reset, DNS): wait and retry with backoff, reporting
+        'reconnecting', instead of exiting — the supervisor would restart the whole service every minute."""
+        delay = first_delay_s
+        while not self.stop.is_set():
+            try:
+                await rest.sync_clock(MARKETS[venue].rest_time)
+                return
+            except (httpx.TransportError, RetriesExhausted, BinanceHTTPError) as exc:
+                self.appdb.set_status(venue, "reconnecting", error=f"clock sync at start-up: {exc!r}"[:200])
+                log.warning("%s: clock sync failed at start-up (%r) — retry in %.0fs", venue, exc, delay)
+                try:
+                    await asyncio.wait_for(self.stop.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+                delay = min(delay * 2, 60.0)
+
     async def run(self) -> None:
         for venue in MARKETS:
             self.appdb.set_status(venue, "starting")
         for venue, rest in self.rest.items():
-            await rest.sync_clock(MARKETS[venue].rest_time)
+            await self._sync_clock_until_ok(venue, rest)
+        if self.stop.is_set():
+            return
         await self._pre_live_marks()
         self._build_connections()
         tasks = [asyncio.create_task(c.run(self.stop), name=c.name) for c in self.conns]
