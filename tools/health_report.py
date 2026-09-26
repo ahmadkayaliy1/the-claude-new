@@ -51,6 +51,18 @@ def main() -> int:
                     + (f" problem: {d.get('ai_problem')}" if d.get("ai_problem") else "")
         p(f"{'!! ' if bad else '   '}{c:17s} {st:12s} beat {age:6.0f}s{extra}" + (f" | last_error: {err[:120]}" if err and bad else ""))
 
+    # ---- research recorder (P1.12, runs outside the supervisor): its status.json is rewritten every flush (5 min)
+    st_file = data / "research" / "price_matching" / "status.json"
+    if st_file.exists():
+        try:
+            st = json.loads(st_file.read_text(encoding="utf-8"))
+            upd = time.mktime(time.strptime(st["updated"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+            age_min = (now / 1000 - upd) / 60
+            p(f"{'!! ' if age_min > 12 else '   '}price recorder: last flush {age_min:.0f} min ago"
+              + (" — stalled or stopped (restart: scripts\\start_recorder.bat)" if age_min > 12 else ""))
+        except (OSError, ValueError, KeyError):
+            p("!! price recorder: status.json unreadable")
+
     # ---- events
     ev = collections.Counter(r[0] for r in con.execute("SELECT event FROM ingestion_events WHERE ts>=?", (since,)))
     p("events: " + (", ".join(f"{k} {v}" for k, v in ev.most_common(14)) or "none"))

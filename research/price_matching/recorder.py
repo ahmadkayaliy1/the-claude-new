@@ -217,12 +217,15 @@ async def clock_sampler(buf: Buffers, stop: asyncio.Event) -> None:
                 pass
 
 
-async def flusher(buf: Buffers, stop: asyncio.Event, flush_s: float, started: int) -> None:
+async def flusher(buf: Buffers, stop: asyncio.Event, flush_s: float, started: int,
+                  ensure_mt5=lambda: None) -> None:
     while True:
         try:
             await asyncio.wait_for(stop.wait(), timeout=flush_s)
         except asyncio.TimeoutError:
             pass
+        if not stop.is_set():
+            ensure_mt5()                  # the MT5 poller process died (terminal crash, IPC fault): start a new one
         n = await asyncio.to_thread(buf.flush)
         status = {
             "pid": os.getpid(), "started": iso(started), "updated": iso(now_ms()),
@@ -246,8 +249,17 @@ async def main_async(args: argparse.Namespace) -> None:
     started = now_ms()
     mq: mp.Queue = mp.Queue()
     mstop = mp.Event()
-    proc = mp.Process(target=mt5_poller, args=(mq, mstop, args.mt5_interval_ms / 1000), daemon=True)
-    proc.start()
+    procs = [mp.Process(target=mt5_poller, args=(mq, mstop, args.mt5_interval_ms / 1000), daemon=True)]
+    procs[0].start()
+
+    def ensure_mt5() -> None:
+        if procs[-1].is_alive():
+            return
+        log.warning("MT5 poller process exited (code %s) — restarting it", procs[-1].exitcode)
+        buf.add("events", {"recv_ms": now_ms(), "symbol": "mt5", "event": "poller_restart",
+                           "detail": f"exit code {procs[-1].exitcode}"})
+        procs.append(mp.Process(target=mt5_poller, args=(mq, mstop, args.mt5_interval_ms / 1000), daemon=True))
+        procs[-1].start()
 
     def drain() -> None:
         while not (tstop.is_set() and mq.empty()):
@@ -264,11 +276,11 @@ async def main_async(args: argparse.Namespace) -> None:
         asyncio.create_task(clock_sampler(buf, stop)),
     ]
     try:
-        await flusher(buf, stop, args.flush_s, started)
+        await flusher(buf, stop, args.flush_s, started, ensure_mt5)
     finally:
         stop.set()
         mstop.set()
-        proc.join(timeout=15)
+        procs[-1].join(timeout=15)
         tstop.set()
         for t in tasks:
             t.cancel()
@@ -286,7 +298,8 @@ def main() -> None:
     ap.add_argument("--out", default=str(OUT), help="output folder (tests use a scratch folder)")
     args = ap.parse_args()
     OUT = Path(args.out)
-    setup_logging("recorder", logs_dir=PROJECT_ROOT / "logs", console=True)
+    # file only: a console write blocks the whole process while its window is in QuickEdit selection (a click)
+    setup_logging("recorder", logs_dir=PROJECT_ROOT / "logs", console=False)
     try:
         asyncio.run(main_async(args))
     except KeyboardInterrupt:
