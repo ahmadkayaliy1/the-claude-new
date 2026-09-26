@@ -5,9 +5,9 @@
 > Spec: `AI_Trading_System_Spec_EN.md`. Approved plan (Arabic): see Decision Log D-001.
 
 ## Overview
-- **Started:** 2026-09-25. **Approx. completion:** 73%.
-- **Current milestone:** Waiting on H11 (sign in Claude Code) for live AI (Gemini H4 = fallback); soak (P3.9/P4.6), recorder (P1.12), backfills run
-- **Summary:** M0–M4, M6, M8, M10 essentially complete; M9 paper execution complete (MT5 demo sends await H6); supervisor runs every service in production since 2026-09-25 11:13 UTC (dashboard http://127.0.0.1:8765). AI brain = Claude via the user's subscription (D-030, P8.9) with Gemini free as fallback. Next: H11 → first live AI decisions (P8.9/P8.8) → paper run; P1.11 gold-proxy study and P7.1 price matching once enough data (≥72 h); P6.15 replay study; P9.6 MT5 position manager; P5.3 ops/autostart.
+- **Started:** 2026-09-25. **Approx. completion:** 76%.
+- **Current milestone:** Audit fixes integrated; waiting on the user: start (H7), power settings (H2), Claude sign-in (H11)
+- **Summary:** M0–M4, M6, M8, M10 essentially complete; M9 paper execution complete (MT5 demo sends await H6). A 57-finding readiness audit was fixed and integrated on 2026-09-26 (D-031…D-034): backfill robustness, suspend-aware supervisor started detached by the user (scripts\\start.bat), AI call rationing, executor cursors/isolation. AI brain = Claude via the user's subscription (D-030, P8.9) with Gemini free as fallback. Next: user starts the system + recorder, applies power settings, signs in Claude (H11) → first live decisions → paper run; P1.11 / P7.1 once enough data; P6.15; P9.6.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
 
@@ -15,13 +15,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 | # | Action | Needed by | Status |
 |---|---|---|---|
 | H1 | MT5 terminal → Tools → Options → Charts → **Max bars in chart = Unlimited**, then restart terminal | P1.6 | ✅ done by the agent at the user's request (common.ini MaxBars → terminal now reports 100,000,000; backup `common.ini.bak-20260925`) |
-| H2 | Keep the PC awake (no sleep) during the 3–7 day price-matching recording (must include a weekend) | P1.12 | ⏳ |
+| H2 | Stop the laptop from sleeping (lid close = Do nothing on AC **and** battery, keep the charger in, Wi-Fi power saving off) — exact steps and `powercfg` commands in `docs/ops_windows.md` §2–§4; `scripts\check_ops.bat` verifies. The 41-min stall on 2026-09-25 and the 21:39 one were lid-close sleeps | P1.12 / P5.3 | ⏳ |
 | H3 | Allow one close/reopen of the MT5 terminal during the multi-client probe | P1.9 | ✅ |
 | H4 | Put `GOOGLE_API_KEY` in `.env` and copy the actual free-tier RPM/RPD limits from AI Studio into config (since D-030 Gemini is the *fallback* provider, used while Claude is unavailable) | P8.2 | ⏳ |
 | H5 | Review the price-matching decision (Binance vs Windsor execution for BTC/ETH) | P7.2 | ⏳ |
 | H6 | Approve demo-account test orders (0.01 lot) | P9.5 | ⏳ |
-| H7 | Ops settings (sleep off, autostart, time sync) per `docs/ops_windows.md` | P5.3 | ⏳ |
-| H8 | Confirm/adjust default risk parameters (0.5%/trade, 2% daily loss, RR ≥ 1.5, max 3 open) | P9.1 | ⏳ |
+| H7 | Start the system yourself with `scripts\start.bat` (then `scripts\start_recorder.bat`); optional autostart: `scripts\install_autostart.bat` (try `-DryRun` first); time sync per `docs/ops_windows.md` | P5.3 | ⏳ |
+| H8 | Confirm/adjust default risk parameters (0.5%/trade, 2% daily loss, RR ≥ 1.5, max 3 open). Since the audit fixes: pending orders count toward max open, one pair's stacked exposure is capped at `max_correlated_risk_pct` (1 %), crossed pending orders are rejected, and `max_recommendation_age_s` (300 s) must cover Claude's serialized calls (timeout 180 s) | P9.1 | ⏳ |
 | H9 | Any switch to LIVE trading is the user's decision only | P9.7 / P11.4 | ⏳ |
 | H10 | Demo balance vs intended live capital | P9.5 | ✅ user's intended live capital ≈ $100 (all 3 pairs); the current demo (≈$158) is close enough for realistic tests |
 | H11 | Sign the Claude Code CLI in with your Claude subscription once: `claude auth login` in a terminal (or `claude setup-token` and put the token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`) | P8.9 | ⏳ |
@@ -70,6 +70,10 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - [2026-09-25] **D-028** Dashboard = FastAPI + vanilla JS (no build step) + locally vendored TradingView lightweight-charts 4.2.3 — lighter than React/Vite on 4 GB machines and editable without a toolchain.
 - [2026-09-25] **D-029** Production runs under the supervisor (`run all`, Windows Job Object, process-tree kills). The research recorder (P1.12) runs separately until its 3–7 day window ends.
 - [2026-09-25] **D-030** AI brain = Claude on the user's own Claude subscription through the local Claude Code CLI (`ai.active_provider: claude_code`, model `sonnet`, effort medium) with Gemini free as `ai.fallback_provider` (supersedes D-003's Gemini-first default). Claude only analyses (no tools, no files, no execution); data, the risk gate and execution stay deterministic in our code. Personal use of one's own subscription; it shares the plan's usage limits with interactive use (daily cap `rpd: 120`). API keys are never passed to the CLI, so nothing is billed per token.
+- [2026-09-26] **D-031** Backfill robustness (audit, 57 findings / 4 areas, fixed on branches fix/a-ingest…fix/d-exec and integrated): transient failures (network, terminal link) are retried after 5→60 min instead of marking the pass done and sleeping until the daily slot; Vision zips stream to `data/vision_cache` (resumable, CHECKSUM first, deleted after ingest; an object that never matches its CHECKSUM becomes permanent after 3 passes); MT5 IPC failures are never recorded as source gaps / earliest bar / done tick days; dead backfill workers are restarted; MT5 candle holes after outages are healed live.
+- [2026-09-26] **D-032** Production is started by the user (`scripts\start.bat` → `run all --detach`), never from an agent's shell: processes an agent session starts die with that session (production stopped 2026-09-25 22:07 UTC). The supervisor is suspend-aware, single-instance, keeps the MT5 terminal outside its job, and logs child stderr.
+- [2026-09-26] **D-033** AI call rationing (protects the shared subscription limits): a pending review is consumed only by an answered cycle and re-fires no sooner than `review_floor_minutes` (5); failures back off up to `max_backoff_minutes` (120); a cycle has a deadline (`cycle_deadline_s` 600); the heartbeat runs independently of AI calls; per-pair failure isolation; the recommendation timestamp/valid_until are set by the system from the cycle (never trusted from the model); a data gate stores 'skipped' (no call) when the decision bar is missing or the history is too short (XAUUSD until the MT5 4h/1d backfill fills).
+- [2026-09-26] **D-034** Execution: paper tick cursors persist per leg (SL/TP hits during downtime are replayed); bounded tick reads; per-decision isolation with reconciliation (an unreachable MT5 terminal is 'unknown', never 'nothing placed'); risk gate: pending orders count toward max open, a single pair's stacked exposure is capped at `max_correlated_risk_pct`, crossed pending orders rejected (`pending_price_valid`); API Host-header allow-list (DNS rebinding). Awaits the user's H8 confirmation.
 
 ## Phases
 
@@ -474,11 +478,11 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 
 ### Phase P5.1: Supervisor
 - Status: ✅ Completed
-- Description: one command runs every layer; restarts; graceful Windows stop; no orphans.
-- Affected files: `src/tradingsystem/supervisor/supervisor.py`, `src/tradingsystem/ingest/main.py`, `ingest/mt5/service.py`
-- What was done: `python -m tradingsystem run all` (or a comma list / `--without`) spawns ingest-binance, ingest-mt5, engine, executor, api; Windows Job Object (kill-on-close); exit → restart with backoff; stale heartbeat (> 90–120 s) → kill the whole process tree (the venv launcher starts the real interpreter as a child) and restart; `data/STOP_ALL` or Ctrl+C → CTRL_BREAK then tree kill; SIGBREAK handlers flush the ingesters. Verified: graceful stop left no orphans; killing the engine's interpreter → restarted 9 s later. Production runs under the supervisor since 2026-09-25 11:13 UTC.
-- Why this way: spec §11.7; D-019 (hung MT5 calls can only be handled from outside).
-- Notes/open issues: the supervisor itself is not yet auto-started at boot (P5.3).
+- Description: one command runs every layer; restarts; graceful Windows stop; no orphans; survives sleep.
+- Affected files: `src/tradingsystem/supervisor/{supervisor,control,procs,winops}.py`, `core/logsetup.py`, `ingest/mt5/terminal.py`, `scripts/*.bat|ps1`
+- What was done: `run all` spawns ingest-binance, ingest-mt5, engine, executor, api in a Windows Job Object; restart with backoff; stale heartbeat → tree kill + restart. Audit fixes (2026-09-26, D-032): `run all --detach | --stop | --status` (the supervisor runs outside any console/job, so it no longer dies with the shell or agent session that started it — production had stopped at 22:07 UTC on 2026-09-25 for that reason); single-instance lock per data dir (an older lock-less build is detected and refused); suspend/clock-jump aware watchdog (QueryUnbiasedInterruptTime; resume grace instead of killing healthy children after sleep); its own `supervisor` heartbeat row; child stdout/stderr → rotating `logs/<svc>.stderr.log`; the MT5 terminal is started by the supervisor outside its job and never killed with a child tree, and services under it never launch a closed terminal themselves (`TS_MT5_NO_LAUNCH`); keep-awake while running.
+- Why this way: spec §11.7; D-019; audit findings stall F2/F7/F8, OPS-03/04/05/06.
+- Notes/open issues: `other_supervisors()` matches any `-m tradingsystem run` on the machine (one data dir in practice); a starved supervisor (stall) grants repeated grace periods.
 - The exact next step: —
 
 ### Phase P5.2: Resource profiles
@@ -491,13 +495,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: wire `resources.<profile>` into engine/backfill (DuckDB memory, cache sizes) and re-measure with `RESOURCE_PROFILE=low`.
 
 ### Phase P5.3: Ops runbook 👤
-- Status: ⏳ Not Started
+- Status: 🔄 In Progress
 - Description: sleep off, Task Scheduler autostart, time sync, MT5 settings.
-- Affected files: `docs/ops_windows.md`, `docs/mt5_setup.md`
-- What was done: —
-- Why this way: —
-- Notes/open issues: —
-- The exact next step: after P5.2.
+- Affected files: `docs/ops_windows.md`, `scripts/{start,stop,restart,status,start_recorder,check_ops,install_autostart,uninstall_autostart}.bat`
+- What was done: runbook with exact power (lid/sleep buttons/Wi-Fi power saving), time-sync, Windows Update and MT5 steps; double-click scripts: start (detached), stop, restart, status, start_recorder (P1.12), check_ops (verifies the settings); autostart installer/uninstaller for Task Scheduler (written, never run by the agent).
+- Why this way: the audit proved the 41-min stall was a lid-close sleep on battery (not software); OPS-01/OPS-08/BF-13.
+- Notes/open issues: power settings and autostart are the user's to apply (H2/H7).
+- The exact next step: user applies `docs/ops_windows.md` §2–§4 and starts with `scripts\start.bat`; then `scripts\check_ops.bat` should be all green.
 
 ### M6 — Quantitative analysis
 
@@ -741,11 +745,11 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 ### Phase P8.9: Claude on the user's subscription (Claude Code CLI)
 - Status: 🔄 In Progress
 - Description: use the user's existing Claude subscription as the AI brain instead of pay-per-token APIs; Gemini free as fallback.
-- Affected files: `src/tradingsystem/ai/providers/claude_code.py`, `ai/providers/{base,__init__}.py`, `ai/orchestrator.py` (routing), `analysis/engine.py` (status), `core/settings.py` (`claude_code` kind, `cli_path`, `ai.fallback_provider`, `AI_FALLBACK_PROVIDER`), `config/config.yaml`, `.env.example`, `tests/unit/test_claude_code_provider.py`, `tests/fixtures/real/claude_code_*.json`
-- What was done: provider `claude_code` spawns `claude -p` (Claude Code CLI 2.1.282, found on PATH or `~/.local/bin`) with our system prompt file, the snapshot on stdin, `--json-schema` structured output, `--tools ""`, `--strict-mcp-config`, `--setting-sources ""`, `--no-session-persistence`, empty working dir → pure analysis (no files, commands, MCP, CLAUDE.md or hooks). Minimal child environment: none of our secrets and no `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` → can only run on the subscription login; an API-key sign-in is refused. `claude auth status` (no usage) checked every 5 min; "not signed in" → 5 min cooldown; usage limit → cooldown until the reset epoch (else 30 min). Calls serialized (one CLI process). Cost = $0 (flat subscription), API-equivalent cost kept in `LLMResult.extra`. Orchestrator routes to `ai.fallback_provider` (gemini) while the active provider is unavailable and back when it recovers; explicit provider names (consensus) are never rerouted; the engine status shows the provider in use and why. Verified against the real CLI with the full agent_per_pair prompt (6.5 k chars), the full Recommendation schema and a real 26 k payload (arguments accepted, "not signed in" classified, temp files removed). 12 tests.
-- Why this way: D-030 — the subscription is already paid (marginal cost $0) whereas the same load via the API is ≈ $50/month (Sonnet) – $100/month (Opus) — too much for a $100 account (D-004 ROI rule).
-- Notes/open issues: usage shares the plan's 5-hour/weekly limits with the user's interactive Claude use (`rpd: 120` cap protects them). The parser's success path is tested on the real envelope structure; replace with a real success capture after H11. RSS of the CLI process not measured yet.
-- The exact next step: after H11, run `engine --once --pairs XAUUSD` (one real call), save its CLI output as a fixture, measure latency/RSS/tokens, then watch one day of paper cycles to see how much of the plan's limits the system uses.
+- Affected files: `src/tradingsystem/ai/providers/claude_code.py`, `ai/providers/{base,__init__}.py`, `ai/orchestrator.py`, `analysis/engine.py`, `core/settings.py`, `config/config.yaml`, `.env.example`, `tests/unit/test_claude_code_provider.py`, `tests/fixtures/real/claude_code_*.json`
+- What was done: provider `claude_code` spawns `claude -p` with our system prompt file, snapshot on stdin, `--json-schema`, `--tools ""`, `--strict-mcp-config`, `--setting-sources ""`, `--no-session-persistence`, empty working dir (pure analysis). Allow-listed child env: none of our secrets, no `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`; API-key sign-ins refused (`authMethod`/`apiKeySource`). Login checked with `claude auth status` (first check inline, later ones in a background thread); "not signed in" → 5-min cooldown; usage limit → cooldown until reset; calls serialized; a cancelled/timed-out call kills its CLI process; timeout 180 s. Orchestrator routes to `ai.fallback_provider` (gemini) while unavailable; a fallback equal to the active provider is ignored (never a startup error). Reviewed adversarially twice (billing safety, secret isolation, subprocess behaviour). Verified against the real CLI (full prompt, full schema, real 26 k payload).
+- Why this way: D-030 — the subscription is already paid; the same load via the API ≈ $50–100/month, too much for a $100 account.
+- Notes/open issues: shares the plan's 5-hour/weekly limits with interactive use (`rpd: 120`). The success-path parser test uses the real envelope structure; replace with a real capture after H11.
+- The exact next step: after H11 (sign-in) and the restart, run `engine --once --pairs BTCUSDT` (one real call), save its CLI output as a fixture, measure latency/RSS/tokens, then watch one day of paper cycles for limit usage.
 
 ### M9 — Execution
 
