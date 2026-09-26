@@ -242,6 +242,22 @@ class RiskCfg(_Model):
         return self
 
 
+class ManagementCfg(_Model):
+    """P9.6 — the executor applies the ``management`` rules the model declared with a trade (D-043)."""
+    enabled: bool = True
+    dry_run: bool = False                                   # record what would be done, touch nothing
+    breakeven_buffer_spread_mult: float = Field(1.0, ge=0, le=5)   # breakeven = fill ± this × spread (≥ stops+spread)
+    min_sl_change_ticks: int = Field(5, ge=1, le=10_000)    # smaller trailing moves are ignored
+
+
+class PositionActionsCfg(_Model):
+    """Bounded actions the model may take on its live trades on later cycles (D-043: tighten/close/cancel only)."""
+    enabled: bool = True
+    max_per_decision: int = Field(4, ge=1, le=4)
+    max_per_pair_per_day: int = Field(12, ge=0, le=100)     # applied actions per pair per UTC day
+    min_minutes_between_sl_changes: int = Field(15, ge=1, le=1440)   # per position
+
+
 class ExecutionCfg(_Model):
     paper_equity: float = 100.0            # starting equity of the paper account (user's intended capital, D-021)
     mode: ExecutionMode = "paper"
@@ -250,6 +266,8 @@ class ExecutionCfg(_Model):
     max_basis_deviation_pct: float = 0.15
     magic: int = 26092501
     live_confirmation: str = ""
+    management: ManagementCfg = ManagementCfg()
+    position_actions: PositionActionsCfg = PositionActionsCfg()
 
 
 # --------------------------------------------------------------------------- AI
@@ -285,6 +303,55 @@ class AIBudgetCfg(_Model):
     min_trades_for_ratio: int = 20
 
 
+ChartOverlay = Literal["levels", "zones", "liquidity", "structure", "holdings", "ema"]
+
+
+class ChartsCfg(_Model):
+    """Candle-chart images sent with the payload (D-038, Phase 3). ``enabled: false`` = text-only calls."""
+    enabled: bool = True
+    width: int = Field(720, ge=320, le=1600)
+    height: int = Field(400, ge=200, le=1200)
+    timeframes: list[str] = Field(default_factory=lambda: ["1w", "1d", "4h", "1h", "15m", "5m"])
+    bars: dict[str, int] = Field(default_factory=lambda: {"1w": 60, "1d": 120, "4h": 120, "1h": 120, "15m": 96,
+                                                          "5m": 96})
+    overlays: list[ChartOverlay] = Field(default_factory=lambda: ["levels", "zones", "liquidity", "structure",
+                                                                  "holdings", "ema"])
+
+    @model_validator(mode="after")
+    def _check(self) -> "ChartsCfg":
+        for tf in self.timeframes:
+            Timeframe.parse(tf)
+            if not 20 <= self.bars.get(tf, 0) <= 300:
+                raise ValueError(f"ai.charts.bars[{tf}] must be 20..300")
+        return self
+
+
+class RoleModelCfg(_Model):
+    """The model of one role. ``model``: a Claude Code alias (sonnet | opus | fable) or a full model name; None =
+    the provider's configured model. Applies to the claude_code provider; other providers (the fallback) keep their
+    own model. ``effort``: low | medium | high | xhigh | max; None = the provider's configured effort."""
+    model: str | None = None
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+
+class AIModelsCfg(_Model):
+    decision: RoleModelCfg = RoleModelCfg()
+    escalation: RoleModelCfg = RoleModelCfg(model="opus", effort="high")
+    review: RoleModelCfg = RoleModelCfg(model="opus", effort="high")        # Phase 4 review sessions
+    monitor: RoleModelCfg = RoleModelCfg(model="sonnet", effort="low")      # Phase 4 diagnosis
+
+
+class AIEscalationCfg(_Model):
+    """A stronger model confirms (or downgrades) a strong setup before it can be executed (D-043)."""
+    enabled: bool = False
+    on_strength: list[Literal["strong", "weak", "review", "event", "idle", "close"]] = Field(
+        default_factory=lambda: ["strong"])
+    min_confidence: int = Field(60, ge=50, le=95)
+    max_per_day_per_pair: int = Field(6, ge=0, le=40)
+    on_failure: Literal["withhold", "keep"] = "withhold"
+    timeout_s: float = Field(150.0, ge=30, le=600)
+
+
 class AICfg(_Model):
     active_provider: str
     fallback_provider: str | None = None    # used while the active provider is unavailable (D-030)
@@ -294,15 +361,23 @@ class AICfg(_Model):
     min_minutes_between_calls: int = 15     # per pair (protects free-tier quotas)
     max_idle_minutes: int = 120             # hybrid policy: review a pair at least this often (market open)
     max_parallel_calls: int = 2
-    # one system per pair (D-042): the daily request cap (rpd) is shared by every instance through one ledger; no
-    # instance may use more than this share of it, so one busy pair never leaves the others without analysis
-    instance_max_rpd_share: float = Field(0.6, gt=0, le=1)
+    # one system per pair (D-042/D-043): the provider's rpd counts every instance through one shared ledger, and one
+    # pair may make at most this many calls a day (every attempt counts: first calls, repairs, escalations)
+    daily_calls_per_pair: int = Field(40, ge=10, le=120)
+    event_calls_per_day: int = Field(6, ge=0, le=20)     # calls woken by fills / closes / outcomes, per pair and day
+    screen_timeframe: str = "5m"            # Python screens every close of this TF; Claude is called only on change
+    screen_move_atr: float = Field(0.5, ge=0.2, le=1.0)  # a time-based review needs a move > this × ATR (or a new setup)
+    weak_min: int = Field(2, ge=1, le=4)    # weak setup reasons needed to call (Phase 4 overlay may raise it)
+    liquidity_atr: float = Field(0.3, ge=0.1, le=0.6)    # "price near liquidity" distance in ATR
     review_floor_minutes: int = 5           # next_review price/candle triggers: not sooner after the last call
     max_backoff_minutes: int = 120          # per-pair back-off cap after failed cycles (spacing doubles per failure)
     cycle_deadline_s: float = 600.0         # an AI cycle is cut off after this; unfinished pairs stored as 'error'
     consensus_providers: list[str] = Field(default_factory=list)
     providers: dict[str, AIProviderCfg]
     budget: AIBudgetCfg = AIBudgetCfg()
+    charts: ChartsCfg = ChartsCfg()
+    models: AIModelsCfg = AIModelsCfg()
+    escalation: AIEscalationCfg = AIEscalationCfg()
 
     @model_validator(mode="after")
     def _check_provider(self) -> "AICfg":
@@ -316,6 +391,7 @@ class AICfg(_Model):
             raise ValueError(f"ai.consensus_providers not configured: {missing}")
         if self.fallback_provider is not None and self.fallback_provider not in self.providers:
             raise ValueError(f"ai.fallback_provider {self.fallback_provider!r} not configured")
+        Timeframe.parse(self.screen_timeframe)
         return self
 
     @property

@@ -236,8 +236,8 @@ def test_rpd_is_shared_and_capped_per_pair(tmp_path):
     cfg = AIProviderCfg(kind="claude_code", model="sonnet", rpd=10)
     for pair in ["BTCUSDT"] * 5 + ["ETHUSDT"] * 3:
         usage.record(None, provider="claude_code", model="sonnet", purpose="decision", pair=pair, ok=True)
-    btc = budget.RateLimiter("claude_code", cfg, usage, instance="BTCUSDT", share=0.6)
-    eth = budget.RateLimiter("claude_code", cfg, usage, instance="ETHUSDT", share=0.6)
+    btc = budget.RateLimiter("claude_code", cfg, usage, instance="BTCUSDT", daily_cap=6)
+    eth = budget.RateLimiter("claude_code", cfg, usage, instance="ETHUSDT", daily_cap=6)
     alone = budget.RateLimiter("claude_code", cfg, usage)
     assert btc.cap() == 6 and alone.cap() == 10
     assert btc.remaining_today() == 1          # its own share: 6 − 5

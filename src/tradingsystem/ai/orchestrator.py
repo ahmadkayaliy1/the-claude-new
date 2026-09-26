@@ -47,6 +47,7 @@ ANALYST_TFS = ["1w", "1d", "4h", "1h", "15m", "5m"]
 class CycleRequest:
     pair: str
     reason: str
+    strength: str | None = None          # the trigger strength (strong | weak | review | event | idle | close | manual)
 
 
 class Orchestrator:
@@ -93,7 +94,7 @@ class Orchestrator:
             prov = make_provider(self.s, name)
             self._providers[name] = prov
             self._limiters[prov.name] = RateLimiter(prov.name, prov.cfg, self.usage, instance=self.s.paths.instance,
-                                                    share=self.s.ai.instance_max_rpd_share)
+                                                    daily_cap=self.s.ai.daily_calls_per_pair)
         return self._providers[name]
 
     def _set_route(self, name: str, why: str | None) -> None:
@@ -133,6 +134,8 @@ class Orchestrator:
         return 4 * (self.s.pairs[pair].decision_timeframe.ms if pair else 900_000)
 
     def _system_vars(self, pair: str | None, account: dict) -> dict:
+        """Values of the SYSTEM prompt: they must not change from cycle to cycle, or the CLI's prompt cache and the
+        prompt hash break (the live equity lives in the user prompt — Phase 3 fix)."""
         r = self.s.risk
         pairs = list(self.s.enabled_pairs())
         return {
@@ -141,15 +144,18 @@ class Orchestrator:
             "sl_min_atr": r.sl_atr_min_mult, "sl_max_atr": r.sl_atr_max_mult, "min_rr": r.min_rr,
             "max_risk_pct": r.max_risk_per_trade_pct, "max_spread_pct": round(r.max_spread_to_sl_ratio * 100),
             "min_confidence": r.min_confidence, "max_rec_age_min": round(r.max_recommendation_age_s / 60),
-            "account_equity": int(round(float(account.get("equity", self.s.execution.paper_equity)) / 10) * 10),
-            "account_currency": account.get("currency", "USD"),
             "price_reference": self.reg.primary(pair).key if pair else "each pair's meta.price_reference",
             "output_language": "English" if self.s.ai.output_language == "en" else self.s.ai.output_language,
         }
 
-    def _user_vars(self, pair: str | None, as_of: int, reason: str, payload_json: str, **extra) -> dict:
+    def _user_vars(self, pair: str | None, as_of: int, reason: str, payload_json: str, *,
+                   account: dict | None = None, **extra) -> dict:
+        account = account or self.default_account()
+        eq = account.get("equity", self.s.execution.paper_equity)
         return {"now_utc": iso(as_of), "trigger_reason": reason, "payload": payload_json,
-                "max_valid_until": iso(as_of + self.horizon_ms(pair)), **extra}
+                "max_valid_until": iso(as_of + self.horizon_ms(pair)),
+                "account_equity": f"{float(eq):.2f}" if eq is not None else "unknown",
+                "account_currency": account.get("currency", "USD"), **extra}
 
     async def _gen(self, provider: LLMProvider, model_cls, system: str, user: str, purpose: str,
                    pair: str | None) -> Generation:
@@ -351,13 +357,14 @@ class Orchestrator:
                         review: bool = False, provider_name: str | None = None) -> DecisionRecord:
         prov = self.provider(provider_name)
         pr = render("agent_per_pair", self._system_vars(pair, account),
-                    self._user_vars(pair, as_of, reason, _dump(payload)))
+                    self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account))
         gen = await self._gen(prov, Recommendation, pr.system, pr.user, "agent_per_pair", pair)
         rec = self._record(pair, "agent_per_pair", reason, payload, gen, prov, pr.prompt_hash)
         if not review or rec.status != "valid" or rec.recommendation["decision"] == Decision.NO_TRADE.value:
             return rec
         rv = render("risk_reviewer", self._system_vars(pair, account),
-                    self._user_vars(pair, as_of, reason, _dump(payload), proposal=json.dumps(rec.recommendation)))
+                    self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account,
+                                    proposal=json.dumps(rec.recommendation)))
         g2 = await self._gen(prov, RiskReview, rv.system, rv.user, "risk_reviewer", pair)
         rec.sub_outputs.append({"role": "trader", "label": pair, "provider": prov.name, "model": rec.model,
                                 "prompt_hash": pr.prompt_hash, "ok": True, "output": rec.recommendation,
@@ -382,7 +389,7 @@ class Orchestrator:
         prov = self.provider()
         pr = render("single_agent_global", self._system_vars(None, account),
                     self._user_vars(None, as_of, "; ".join(f"{p}: {r}" for p, r in reasons.items()),
-                                    _dump(list(payloads.values()))))
+                                    _dump(list(payloads.values())), account=account))
         gen = await self._gen(prov, RecommendationSet, pr.system, pr.user, "single_agent_global", None)
         out = []
         by_pair = {r.pair: r for r in gen.value.recommendations} if gen.ok else {}
@@ -455,7 +462,8 @@ class Orchestrator:
         compact = {k: payload[k] for k in ("meta", "account", "market", "capabilities", "levels", "confluence", "history",
                                            "memory", "performance") if k in payload}
         pr = render("coordinator", self._system_vars(pair, account),
-                    self._user_vars(pair, as_of, reason, _dump(compact), assessments=json.dumps(assessments)))
+                    self._user_vars(pair, as_of, reason, _dump(compact), account=payload.get("account") or account,
+                                    assessments=json.dumps(assessments)))
         if not assessments:
             rec = DecisionRecord(pair, mode, reason, "invalid", provider=prov.name, model=prov.model,
                                  payload_hash=payload["meta"]["payload_hash"],

@@ -179,6 +179,16 @@ execution:
   max_basis_deviation_pct: 0.15        # provisional; set from P7 measurements
   magic: 26092501
   live_confirmation: ""                # must equal the exact phrase in settings.py to allow live
+  management:                          # P9.6 / D-043: the executor applies the model's declared management rules
+    enabled: true
+    dry_run: false                     # true = record what would be done, touch nothing (rollback switch)
+    breakeven_buffer_spread_mult: 1.0  # breakeven stop = fill +/- this x spread (never closer than stops level + spread)
+    min_sl_change_ticks: 5             # trailing moves smaller than this are ignored
+  position_actions:                    # D-043: the model may tighten a stop, take profit, adjust a TP, cancel an order
+    enabled: true                      # (never widen/remove a stop, never add size) - false = rollback switch
+    max_per_decision: 4
+    max_per_pair_per_day: 12
+    min_minutes_between_sl_changes: 15
 
 ai:
   active_provider: claude_code         # D-030 (override with ACTIVE_AI_PROVIDER in .env)
@@ -194,6 +204,31 @@ ai:
   review_floor_minutes: 5              # next_review price/candle triggers: once per decision, >= this after the last call
   max_backoff_minutes: 120             # spacing doubles after each failed cycle of a pair, up to this
   cycle_deadline_s: 600                # an AI cycle is cut off after this (unfinished pairs stored as 'error')
+  daily_calls_per_pair: 40             # D-043: every attempt counts (first call, repair, escalation)
+  event_calls_per_day: 6               # calls woken by a fill / close / outcome, per pair and day
+  screen_timeframe: 5m                 # Python screens every 5m close; Claude only on change (new setup / condition / event)
+  screen_move_atr: 0.5                 # a time-based review needs a new setup or a move > 0.5 x ATR since the last call
+  weak_min: 2                          # weak setup reasons needed for a call
+  liquidity_atr: 0.3                   # "price near liquidity" = within 0.3 x ATR
+  charts:                              # D-038: candle charts sent as images with the payload
+    enabled: true                      # false = text-only calls (rollback switch)
+    width: 720
+    height: 400
+    timeframes: [1w, 1d, 4h, 1h, 15m, 5m]
+    bars: {1w: 60, 1d: 120, 4h: 120, 1h: 120, 15m: 96, 5m: 96}
+    overlays: [levels, zones, liquidity, structure, holdings, ema]
+  models:                              # D-043: per role, changeable any time (config.local.yaml); model = sonnet | opus |
+    decision: {model: null, effort: null}      # fable | a full name; null = providers.claude_code.model / effort
+    escalation: {model: opus, effort: high}    # confirms/downgrades strong setups when escalation.enabled
+    review: {model: opus, effort: high}        # Phase 4 daily/weekly review sessions
+    monitor: {model: sonnet, effort: low}      # Phase 4 diagnosis runs
+  escalation:
+    enabled: false                     # true = a strong BUY/SELL is confirmed by models.escalation before execution
+    on_strength: [strong]
+    min_confidence: 60
+    max_per_day_per_pair: 6
+    on_failure: withhold               # withhold | keep
+    timeout_s: 150
   consensus_providers: []
   budget:                              # D-004 Cost Governor
     daily_usd_cap: 0.0                 # 0 = paid providers blocked (free tier only for now)

@@ -94,11 +94,66 @@ class TakeProfit(_M):
 
 
 class ManagementRule(_M):
+    """A rule the system applies to this trade after it opens (P9.6). Prices are in the analysis instrument's
+    prices (the system translates them). The system only ever tightens a stop."""
     action: Literal["move_sl_to_breakeven", "partial_close", "trail_atr", "trail_structure", "close_all"]
     trigger: Literal["tp_hit", "price_reached", "r_multiple", "minutes_elapsed", "candle_close"]
-    value: float | None = Field(None, description="TP index (1-based), price, R multiple or minutes, per trigger")
-    params: dict[str, float] = Field(default_factory=dict, description="e.g. {'atr_mult': 1.5, 'fraction': 0.5}")
+    value: float | None = Field(None, description="tp_hit: TP index (1-based); price_reached / candle_close: price; "
+                                                  "r_multiple: R; minutes_elapsed: minutes since the fill")
+    params: dict[str, float] = Field(default_factory=dict, description="partial_close: {'fraction': 0.5}; "
+                                                                       "trail_atr: {'atr_mult': 1.5}")
     note: Text(200) | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "ManagementRule":
+        v = self.value
+        if self.trigger == "tp_hit" and (v is None or v != int(v) or not 1 <= v <= 4):
+            raise ValueError("tp_hit needs value = the TP index 1..4")
+        if self.trigger in ("price_reached", "candle_close") and (v is None or v <= 0):
+            raise ValueError(f"{self.trigger} needs a price > 0 as value")
+        if self.trigger == "r_multiple" and (v is None or not 0 < v <= 10):
+            raise ValueError("r_multiple needs value in (0, 10]")
+        if self.trigger == "minutes_elapsed" and (v is None or v < 5):
+            raise ValueError("minutes_elapsed needs value >= 5")
+        if self.action == "partial_close" and not 0 < self.params.get("fraction", 0) < 1:
+            raise ValueError("partial_close needs params.fraction in (0, 1)")
+        if self.action == "trail_atr" and not 0.5 <= self.params.get("atr_mult", 0) <= 5:
+            raise ValueError("trail_atr needs params.atr_mult in [0.5, 5]")
+        return self
+
+
+class PositionTarget(_M):
+    decision: str = Field(pattern=r"^[0-9a-f]{8,32}$",
+                          description="The `decision` id shown in account.open_positions / account.pending_orders")
+    kind: Literal["position", "order"]
+
+
+class PositionAction(_M):
+    """An action on a live trade of this pair (D-043: the model leads, the code protects). Prices in the analysis
+    instrument's prices. A stop can only be tightened, never widened or removed; size can only be reduced."""
+    target: PositionTarget
+    action: Literal["modify_sl", "modify_tp", "close", "cancel_order"]
+    value: float | None = Field(None, gt=0, description="modify_sl / modify_tp: the new price")
+    fraction: float | None = Field(None, gt=0, le=1, description="close: fraction of the open volume (default 1)")
+    leg: int | None = Field(None, ge=1, le=4, description="modify_tp: which take-profit leg (1-based) when several "
+                                                          "are open")
+    reason: Text(200, 3)
+
+    @model_validator(mode="after")
+    def _check(self) -> "PositionAction":
+        if self.action in ("modify_sl", "modify_tp"):
+            if self.value is None:
+                raise ValueError(f"{self.action} needs value (the new price)")
+            if self.target.kind != "position":
+                raise ValueError(f"{self.action} applies to a position")
+        elif self.action == "close":
+            if self.target.kind != "position":
+                raise ValueError("close applies to a position (use cancel_order for a pending order)")
+            if self.fraction is None:
+                self.fraction = 1.0
+        elif self.target.kind != "order":
+            raise ValueError("cancel_order applies to a pending order")
+        return self
 
 
 class ReviewCondition(_M):
@@ -143,6 +198,9 @@ class Recommendation(_M):
     operator_notes: Text(600) = Field("", description="Notes to yourself for the next cycle on this pair: what you "
                                                       "are watching, the plan for a pending order or open trade, what "
                                                       "would change your mind, the levels that matter")
+    position_actions: Annotated[list[PositionAction], _trim(4)] = Field(
+        default_factory=list, max_length=4,
+        description="Actions on live positions / pending orders of this pair (allowed with NO_TRADE)")
 
     @model_validator(mode="before")
     @classmethod
@@ -262,6 +320,22 @@ class RiskReview(_M):
     def _reject_means_no_trade(self) -> "RiskReview":
         if self.verdict == "reject" and self.final_recommendation.is_trade:
             raise ValueError("a rejected proposal must end as NO_TRADE")
+        return self
+
+
+class EscalationReview(_M):
+    """escalation output: a stronger model confirms the trader's proposal or downgrades it to NO_TRADE (D-043)."""
+    verdict: Literal["confirm", "downgrade"]
+    issues: Notes(8) = Field(default_factory=list)
+    confidence: int = Field(ge=0, le=100, description="Your own confidence in the proposal (never above the trader's)")
+    final_recommendation: Recommendation
+
+    @model_validator(mode="after")
+    def _downgrade_means_no_trade(self) -> "EscalationReview":
+        if self.verdict == "downgrade" and self.final_recommendation.is_trade:
+            raise ValueError("a downgraded proposal must end as NO_TRADE")
+        if self.verdict == "confirm" and not self.final_recommendation.is_trade:
+            raise ValueError("a confirmed proposal must keep the trade")
         return self
 
 

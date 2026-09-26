@@ -8,6 +8,7 @@ Sub-agent outputs (timeframe analysts, risk reviewer, consensus members) are sto
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import threading
 import uuid
@@ -39,6 +40,10 @@ _DDL = [
         provider TEXT, model TEXT, prompt_hash TEXT, ok INTEGER, output TEXT, errors TEXT, cost_usd REAL)""",
     "CREATE INDEX IF NOT EXISTS ai_sub_outputs_decision ON ai_sub_outputs(decision_id)",
 ]
+
+# Phase 3 columns (added in place on existing databases; old code ignores them)
+EXTRA_COLUMNS = (("actions_state", "TEXT"), ("library_hash", "TEXT"), ("trigger_strength", "TEXT"))
+ACTION_STATES = ("pending", "done")
 
 EXECUTION_STATES = ("not_executed", "queued", "executing", "executed", "rejected", "expired", "cancelled")
 STATUSES = ("valid", "invalid", "refused", "budget_blocked", "error", "skipped")
@@ -72,6 +77,9 @@ class DecisionRecord:
     output_tokens: int = 0
     rr_computed: float | None = None
     sub_outputs: list[dict] = field(default_factory=list)
+    trigger_strength: str | None = None      # strong | weak | review | event | idle | close | manual
+    library_hash: str | None = None          # the whole prompt library's hash (prompt versions in force)
+    actions_state: str | None = None         # 'pending' while position_actions await the executor
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     ts: int = field(default_factory=now_ms)
 
@@ -85,6 +93,14 @@ class DecisionStore:
         with self._lock:
             for s in _DDL:
                 self._con.execute(s)
+            have = {r[1] for r in self._con.execute("PRAGMA table_info(ai_decisions)")}
+            for col, typ in EXTRA_COLUMNS:          # several services open the store concurrently
+                if col not in have:
+                    try:
+                        self._con.execute(f"ALTER TABLE ai_decisions ADD COLUMN {col} {typ}")
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column" not in str(exc):
+                            raise
 
     def save_payload(self, payload_hash: str, pair: str, payload: dict) -> None:
         blob = zlib.compress(json.dumps(payload, separators=(",", ":"), default=str).encode(), 6)
@@ -107,13 +123,15 @@ class DecisionStore:
             self._con.execute(
                 """INSERT INTO ai_decisions(id, ts, pair, mode, trigger, provider, model, prompt_hash, payload_hash,
                    config_hash, git_sha, status, decision, order_type, confidence, rr_computed, valid_until,
-                   recommendation, raw_text, errors, cost_usd, latency_ms, input_tokens, output_tokens)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   recommendation, raw_text, errors, cost_usd, latency_ms, input_tokens, output_tokens,
+                   trigger_strength, library_hash, actions_state)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (rec.id, rec.ts, rec.pair, rec.mode, rec.trigger, rec.provider, rec.model, rec.prompt_hash,
                  rec.payload_hash, self.config_hash, self.git_sha, rec.status, r.get("decision"), r.get("order_type"),
                  r.get("confidence"), rec.rr_computed, valid_until,
                  json.dumps(r, default=str) if r else None, rec.raw_text, json.dumps(rec.errors) if rec.errors else None,
-                 rec.cost_usd, rec.latency_ms, rec.input_tokens, rec.output_tokens))
+                 rec.cost_usd, rec.latency_ms, rec.input_tokens, rec.output_tokens, rec.trigger_strength,
+                 rec.library_hash, rec.actions_state))
             for s in rec.sub_outputs:
                 self._con.execute(
                     "INSERT INTO ai_sub_outputs(decision_id, role, label, provider, model, prompt_hash, ok, output, errors, cost_usd) "
@@ -129,6 +147,20 @@ class DecisionStore:
         with self._lock:
             self._con.execute("UPDATE ai_decisions SET execution_state=?, execution_detail=? WHERE id=?",
                               (state, json.dumps(detail, default=str) if detail else None, decision_id))
+
+    def pending_actions(self, pair: str, since_ms: int) -> list[dict[str, Any]]:
+        """Valid decisions of ``pair`` whose ``position_actions`` the executor has not handled yet."""
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT id, ts, recommendation FROM ai_decisions WHERE pair=? AND status='valid' "
+                "AND actions_state='pending' AND ts>=? ORDER BY ts", (pair, since_ms)).fetchall()
+        return [{"id": r[0], "ts": r[1], "rec": json.loads(r[2]) if r[2] else {}} for r in rows]
+
+    def set_actions_state(self, decision_id: str, state: str) -> None:
+        if state not in ACTION_STATES:
+            raise ValueError(state)
+        with self._lock:
+            self._con.execute("UPDATE ai_decisions SET actions_state=? WHERE id=?", (state, decision_id))
 
     def set_outcome(self, decision_id: str, outcome: str, pnl_usd: float | None, pnl_pct: float | None,
                     pips: float | None) -> None:

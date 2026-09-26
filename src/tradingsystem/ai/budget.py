@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
-import math
 import sqlite3
 import threading
 import time
@@ -51,7 +50,9 @@ def usage_db(settings) -> Path:
     return settings.paths.state() / "app.db"
 
 
-EXTRA_COLUMNS = (("api_equivalent_usd", "REAL"), ("num_turns", "INTEGER"), ("cache_creation_tokens", "INTEGER"))
+EXTRA_COLUMNS = (("api_equivalent_usd", "REAL"), ("num_turns", "INTEGER"), ("cache_creation_tokens", "INTEGER"),
+                 # Phase 3: which role made the call, and the chart images it carried (estimated tokens)
+                 ("role", "TEXT"), ("images", "INTEGER"), ("image_tokens_est", "INTEGER"))
 
 
 class UsageStore:
@@ -71,17 +72,18 @@ class UsageStore:
                             raise
 
     def record(self, res: LLMResult | None, *, provider: str, model: str, purpose: str, pair: str | None,
-               ok: bool, error: str | None = None) -> None:
+               ok: bool, error: str | None = None, role: str | None = None, images: int = 0,
+               image_tokens_est: int = 0) -> None:
         x = (res.extra if res else None) or {}
         with self._lock:
             self._con.execute(
                 "INSERT INTO ai_usage(ts, provider, model, purpose, pair, input_tokens, output_tokens, cached_tokens, "
-                "cost_usd, latency_ms, ok, error, request_id, api_equivalent_usd, num_turns, cache_creation_tokens) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "cost_usd, latency_ms, ok, error, request_id, api_equivalent_usd, num_turns, cache_creation_tokens, "
+                "role, images, image_tokens_est) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (now_ms(), provider, model, purpose, pair, res.input_tokens if res else 0, res.output_tokens if res else 0,
                  res.cached_input_tokens if res else 0, res.cost_usd if res else 0.0, res.latency_ms if res else 0,
                  int(ok), error, res.request_id if res else None, x.get("api_equivalent_usd"), x.get("num_turns"),
-                 x.get("cache_creation_input_tokens")))
+                 x.get("cache_creation_input_tokens"), role, int(images), int(image_tokens_est)))
 
     def count_since(self, provider: str, since_ms: int, pair: str | None = None) -> int:
         sql, args = "SELECT count(*) FROM ai_usage WHERE provider=? AND ts>=?", [provider, since_ms]
@@ -112,36 +114,38 @@ def month_start(ms: int) -> int:
 
 
 class RateLimiter:
-    """Per-provider RPM spacing (in-process) + RPD (persisted). ``instance`` (one system per pair, D-042): the
-    ledger is shared, ``rpd`` counts every instance's calls, and this instance may use at most ``share`` of it."""
+    """Per-provider RPM spacing (in-process) + RPD (persisted). ``instance`` (one system per pair, D-042/D-043): the
+    ledger is shared, ``rpd`` counts every instance's calls, and this pair may make at most ``daily_cap`` calls a
+    day — every ledger row counts (first attempts, repairs, escalations: each one spends the subscription)."""
 
     def __init__(self, name: str, cfg: AIProviderCfg, usage: UsageStore, *, instance: str | None = None,
-                 share: float = 1.0) -> None:
+                 daily_cap: int | None = None) -> None:
         self.name, self.cfg, self.usage = name, cfg, usage
-        self.instance, self.share = instance, share
+        self.instance, self.daily_cap = instance, daily_cap
         self._last: list[float] = []
         self._lock = asyncio.Lock()
 
     def cap(self) -> int | None:
-        """This system's daily cap: ``rpd``, or its share of it when running as an instance."""
-        if not self.cfg.rpd:
-            return None
-        return max(1, math.ceil(self.cfg.rpd * self.share)) if self.instance else self.cfg.rpd
+        """This system's daily cap: ``rpd`` for the all-pairs system; for one pair ``min(rpd, daily_cap)``."""
+        caps = [c for c in (self.cfg.rpd, self.daily_cap if self.instance else None) if c]
+        return min(caps) if caps else None
 
     def remaining_today(self) -> int | None:
-        if not self.cfg.rpd:
+        if self.cap() is None:
             return None
         day0 = quota_day_start(now_ms(), self.cfg.quota_reset_tz)
-        left = max(self.cfg.rpd - self.usage.count_since(self.name, day0), 0)
-        if self.instance:
-            left = min(left, max(self.cap() - self.usage.count_since(self.name, day0, pair=self.instance), 0))
-        return left
+        lefts = []
+        if self.cfg.rpd:
+            lefts.append(max(self.cfg.rpd - self.usage.count_since(self.name, day0), 0))
+        if self.instance and self.daily_cap:
+            lefts.append(max(self.daily_cap - self.usage.count_since(self.name, day0, pair=self.instance), 0))
+        return min(lefts) if lefts else None
 
     async def acquire(self) -> None:
         left = self.remaining_today()
         if left is not None and left <= 0:
-            share = f", {self.instance}'s share {self.cap()}" if self.instance else ""
-            raise BudgetExceeded(f"{self.name}: daily request quota ({self.cfg.rpd}{share}) used up")
+            mine = f", {self.instance}: {self.daily_cap}/day" if self.instance and self.daily_cap else ""
+            raise BudgetExceeded(f"{self.name}: daily request quota ({self.cfg.rpd}{mine}) used up")
         if not self.cfg.rpm:
             return
         async with self._lock:

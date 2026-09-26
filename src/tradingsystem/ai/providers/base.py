@@ -44,6 +44,16 @@ class LLMResult:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ImageInput:
+    """One image sent with the user message (Phase 3 charts). ``label`` is the caption text sent before it;
+    ``token_est`` the estimated input tokens (≈ width × height / 750)."""
+    label: str
+    data: bytes
+    media_type: str = "image/png"
+    token_est: int = 0
+
+
 class ProviderError(RuntimeError):
     def __init__(self, message: str, *, retryable: bool, rate_limited: bool = False) -> None:
         super().__init__(message)

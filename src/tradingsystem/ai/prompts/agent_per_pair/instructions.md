@@ -1,5 +1,5 @@
 <!-- prompt: agent_per_pair/instructions · version 3 -->
-Analysis cycle for **$pair** at **$now_utc** (UTC). Trigger: $trigger_reason.
+Analysis cycle for **$pair** at **$now_utc** (UTC). Trigger: $trigger_reason. Account equity ≈ $account_equity $account_currency.
 
 The payload below is the desk's prepared screen set (see "Reading the payload"). Its sections:
 - `meta` — pair, cycle time, decision timeframe, price reference (analysis instrument; the execution instrument is `meta.execution_instrument`), payload hash, `data_warnings`.
