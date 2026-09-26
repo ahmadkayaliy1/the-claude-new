@@ -6,7 +6,7 @@
 
 ## Overview
 - **Started:** 2026-09-25. **Approx. completion:** 82%.
-- **Current milestone:** v2 Phase 2 (P12.2, one system per pair) done on branch feat/instances (includes Phase 1) — awaiting the user's merge + `scripts\switch_to_pairs.bat` (H14); next P12.3 charts / 5-minute screening
+- **Current milestone:** v2 Phase 2 merged and running (three per-pair systems since 2026-09-27); Phases 3–5 specified in docs/handoff_operator_v2.md §3.6–3.10 (D-043) — next: P12.3 "sees and manages" on branch feat/phase3-sees-manages (Opus 5.5)
 - **Summary:** M0–M10 built; demo/auto execution with Claude via the user's subscription (D-030…D-037). v2 target (D-038…D-040, docs/handoff_operator_v2.md): Phase 1 (P12.1) — venue costs and stop bounds in the snapshot, compact model view (−37 %), operator memory, gate reasons, 30-day record per pair. Phase 2 (P12.2, D-042) — every pair runs as its own system (`start.bat BTCUSDT`): own app.db, logs, dashboard port and MT5 magic (10 %/day per pair), account-wide 25 % drawdown stop, same-direction guard, live account + positions in the model's payload, shared AI ledger with a per-pair share, machine-wide locks (MT5 terminal/history/placement, Claude CLI starts), one-time migration. Neither phase is merged yet; production still runs `f01c86d`-era code in the all-pairs mode.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
@@ -24,10 +24,22 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 | H8 | Risk parameters | P9.1 | ✅ user 2026-09-26: never lose more than 10 %/day — D-036 (1 % target / 3 % max per trade / 10 % daily incl. worst case / 4 % correlated / 3 open) |
 | H9 | Any switch to LIVE trading is the user's decision only | P9.7 / P11.4 | ⏳ |
 | H10 | Demo balance vs intended live capital | P9.5 | ✅ user's intended live capital ≈ $100 (all 3 pairs); the current demo (≈$158) is close enough for realistic tests |
-| H11 | Sign the Claude Code CLI in with your Claude subscription once: `claude auth login` in a terminal (or `claude setup-token` and put the token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`) | P8.9 | ⏳ |
+| H11 | Sign the Claude Code CLI in with your Claude subscription once: `claude auth login` in a terminal (or `claude setup-token` and put the token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`) | P8.9 | ✅ signed in (verified 2026-09-26, §2 of the handoff) |
 | H12 | **Remove the crypto-miner** found on the laptop (2026-09-26): `C:\ProgramData\WindowsTask\` (MicrosoftHost.exe, AppHost.exe, audiodg.exe, WinRing0x64.sys, winlogon.bat/new.xml), persistence `HKLM\...\Run "Realtek HD Audio" = C:\ProgramData\ReaItekHD\taskhostw.exe` and the Startup shortcut `WindowsFormsApp10 - Shortcut.lnk`; 2.1 GB RSS, 50 % CPU. Defender full/offline scan as administrator, remove the entries, reboot, change passwords (Windows, e-mail, broker, Claude). The agent never touches it | all | ⏳ |
-| H13 | After every reboot nothing auto-starts: run `scripts\start.bat` + `scripts\start_recorder.bat`, or install autostart once with `scripts\install_autostart.bat` (`-DryRun` first) | P5.3 | ⏳ |
-| H14 | Apply v2 Phases 1+2 and switch to one system per pair: `git merge --ff-only feat/instances` in `C:\the_claude_new`, then double-click `scripts\switch_to_pairs.bat` (stops the all-pairs system, copies each pair's history, one autostart task per pair, starts every pair), then `scripts\start_recorder.bat`. Staying on the all-pairs system is also possible: `scripts\restart.bat` after the merge | P12.2 | ⏳ |
+| H13 | After every reboot nothing auto-starts: run `scripts\start.bat` + `scripts\start_recorder.bat`, or install autostart once with `scripts\install_autostart.bat` (`-DryRun` first) | P5.3 | ✅ autostart installed 2026-09-26; per-pair tasks since 2026-09-27 |
+| H14 | Apply v2 Phases 1+2 and switch to one system per pair: `git merge --ff-only feat/instances` in `C:\the_claude_new`, then double-click `scripts\switch_to_pairs.bat` (stops the all-pairs system, copies each pair's history, one autostart task per pair, starts every pair), then `scripts\start_recorder.bat`. Staying on the all-pairs system is also possible: `scripts\restart.bat` after the merge | P12.2 | ✅ done 2026-09-27: merged, `switch_to_pairs.bat` run, three systems up; XAUUSD stopped for the weekend by the user |
+| H15 | Phase 3 prerequisite: `.venv\Scripts\pip install -r requirements.lock` (matplotlib/pillow become declared; already installed, so a no-op) | P12.3 | ⏳ |
+| H16 | Apply Phase 3: `git merge --ff-only feat/phase3-sees-manages`, then `scripts\restart_all.bat` | P12.3 | ⏳ |
+| H17 | Optional after Phase 3: in `config\config.local.yaml` set `ai: {escalation: {enabled: true}}` for stronger-model confirmation of strong setups; `ai.models.escalation.model: fable` to use Fable | P12.3 | ⏳ |
+| H18 | Phase 4: create a Telegram bot (BotFather) and put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` (chat id from `getUpdates`); optional — toast + log work without it | P12.4 | ⏳ |
+| H19 | Phase 4: run `scripts\install_operator_tasks.bat` (`-DryRun` first) to register the 15-min monitor and the daily/weekly review tasks; retire the desktop-app 3-hourly scheduled task | P12.4 | ⏳ |
+| H20 | Apply Phase 4: `git merge --ff-only feat/phase4-watches-learns`, then `scripts\restart_all.bat` | P12.4 | ⏳ |
+| H21 | Optional after a week of Phase 4: set `ai.usage.weekly_token_budget` / `five_hour_token_budget` in `config.local.yaml` from the observed usage | P12.4 | ⏳ |
+| H22 | Phase 5 (only for the bounded MCP tools): `.venv\Scripts\pip install mcp` | P12.5 | ⏳ |
+| H23 | Phase 5: compile and attach `tools\mql5\CalendarExport.mq5` in the MT5 terminal (news blackout for gold) | P12.5 | ⏳ |
+| H24 | Optional Phase 5: opt one pair into `session_mode: persistent` for a 24-h measurement | P12.5 | ⏳ |
+| H25 | Phase 5: set `flow_proxy_approved: true` for XAUUSD only if the gold-proxy study passes its thresholds | P12.5 | ⏳ |
+| H26 | Apply Phase 5: `git merge --ff-only feat/phase5-goes-deeper`, then `scripts\restart_all.bat` | P12.5 | ⏳ |
 
 ## Environment facts (observed 2026-09-25, read-only probes)
 - Windows 11 Pro; CPU i3-1005G1 (2C/4T); RAM 7.7 GB; ~59 GB free on C:. Local TZ **"Middle East Standard Time"** (UTC+3 now).
@@ -85,6 +97,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - [2026-09-26] **D-040** Operator session model: the user asked for a persistent Claude session; it is built as persistent *memory* (`operator_notes` fed back per pair) with event-driven single-turn calls by default, and a true persistent stream-json session as a measured, switchable second mode — a session polling 24/7 would exhaust the shared subscription limits within hours. Measured: ~23 k input / 3–5 k output tokens and ~50 s per call; ~1.1 M tokens/day per pair at today's cadence → one instance first.
 - [2026-09-26] **D-041** The model reads a compact *view* of the snapshot (`ai/model_view.py`, legend in the cached system prompt) instead of the stored payload (−37 % tokens, nothing dropped); the stored/hashed payload stays the source of truth for triggers, the data gate and the dashboard. The snapshot states the execution venue's costs and the stop bounds exactly as the risk gate computes them, and the model keeps per-pair operator notes that are fed back on the next cycle (v2 Phase 1).
 - [2026-09-27] **D-042** One independent system per pair (D-038/D-039, v2 Phase 2): `--instance <PAIR>` (TS_INSTANCE) runs a pair with its own state `data/instances/<PAIR>` (app.db, run/, STOP_ALL, KILL_SWITCH), logs `logs/<PAIR>`, dashboard port and MT5 magic (base + offset) — so the 10 %/day limit, the open-trade limit and the new same-direction guard are per pair; market data stays shared (disjoint instruments, one writer per file). Shared by every system: the AI usage ledger `data/shared/ai_usage.db` (rpd counts every pair, one pair ≤ 60 %), an account-wide drawdown stop (25 % below the equity peak, sticky until `reset_drawdown_stop.bat`, fail-closed on an unreadable peak file), machine-wide locks for the MT5 terminal launch, MT5 history calls and MT5 order placement (gate → broker listing, so the BTC+ETH correlated cap holds across systems), and 15 s spacing of Claude CLI starts. A pair adopts the all-pairs system's orders on its own pair (placed before the switch). The all-pairs system still works unchanged and never runs next to a per-pair one (command line + lock checks). The model's payload now carries the live account (equity, today's result, drawdown, this pair's positions and pending orders). Reviewed by 3 lenses with adversarial verification (25 confirmed findings fixed, among them an autostart installer that always aborted in PowerShell 5.1 and a per-pair kill switch that did nothing in the all-pairs mode).
+- [2026-09-27] **D-043** (user) Phases 3–5 scope and four choices (full spec: docs/handoff_operator_v2.md §3.6–3.10). (1) Position management = "Claude leads, code protects": Python executes the management rules the model declares with a trade (breakeven with a spread buffer, trailing, partial close, time stop) and on later reviews the model may tighten a stop, take profit, adjust a TP or cancel a pending order through `position_actions`; it can never widen or remove a stop or add size; every action passes a gate and protective actions keep running under the kill switch. (2) Notifications when the desktop app is closed: Telegram bot (token/chat id in .env) plus a Windows toast and a log line. (3) Models per role, changeable at any time in config (`ai.models`): Sonnet for decisions now, Opus for reviews, optional escalation of strong setups to Opus/Fable that may only confirm or downgrade. (4) Daily cap 40 calls per pair (every ledger row counts), with Python screening every 5 minutes and calling only on change; a ledger-based usage gauge rations further. Phase order: 3 "sees and manages" (charts, screening, position management, prompts v6), 4 "watches and learns" (metrics, bounded tuning, reviews from Task Scheduler, monitor, notifier), 5 "goes deeper" (enrichments, persistent session opt-in, MCP tools, news blackout, gold proxy). No operator session ever writes to git in the production checkout: runtime tuning lives under data/, proposals in separate worktrees.
 
 ## Phases
 
@@ -936,7 +949,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - What was done: — · Why this way: — · Notes/open issues: H9.
 - The exact next step: after P11.3.
 
-### M12 — v2: Claude as operator (docs/handoff_operator_v2.md, D-038…D-040)
+### M12 — v2: Claude as operator (docs/handoff_operator_v2.md, D-038…D-043)
 
 ### Phase P12.1: Operator memory, venue costs, compact model view (v2 Phase 1)
 - Status: ✅ Completed
@@ -956,23 +969,30 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - Notes/open issues: not live-tested — needs the merge and the switch (H14). Known and rare (pre-existing): a pair supervisor whose command line lacks `--instance` and whose environment cannot be read looks like the all-pairs one to `stop.bat` without a pair. The three pairs together start 3× the services (≈3× RAM of one pair; the i3/8 GB laptop ran all pairs in one system so far — watch `status_all.bat` / health report after the switch). Deferred review item (c) from Phase 1 (gate_reason prices) is now covered by the legend.
 - The exact next step: after H14, check `scripts\status_all.bat` and `tools\health_report.py` (one section per pair), one AI cycle per pair, and the executors' `exposure` / `account_drawdown` in their status rows; then P12.3.
 
-### Phase P12.3: Charts, 5-minute screening, cheap enrichments (v2 Phase 3)
+### Phase P12.3: "Sees and manages" — charts, 5-minute screening, position management, prompts v6 (v2 Phase 3)
 - Status: ⏳ Not Started
-- Description: candle-chart images (1w…5m, 720×400, levels drawn) sent with the text; Python screens every 5m close and calls Claude only on change; HTF reference levels, derivatives history (OI nulls fix), depth imbalance, BTC–ETH correlation.
-- Affected files: see handoff §3.2 items 4–6
-- What was done: — · Why this way: D-038 (images requested by the user). · Notes/open issues: —
-- The exact next step: after P12.2.
+- Description: six chart images (720×400, levels/zones/liquidity/holdings drawn) sent with the text over stream-json; the prompt cache fixed (equity out of the system prompt); Python screens every 5m close and calls Claude only on change (≤ 40 calls/pair/day, event triggers on fills/closes/outcomes); per-role models (`ai.models`) with optional escalation of strong setups; P9.6 position management (declared rules executed deterministically: breakeven, trailing, partials, time stop) plus bounded `position_actions` by the model (tighten/close/cancel only); prompts v6 (persona v2, rules 13–16, legend v4); the gate measures RR on the single leg actually placed at the 0.01-lot minimum.
+- Affected files: spec docs/handoff_operator_v2.md §3.7 — new `analysis/charts.py`, `execution/management.py`, `execution/action_gate.py`, prompts `escalation/*`; changed `ai/providers/{base,claude_code}.py`, `ai/{repair,budget,triggers,orchestrator,contract,store}.py`, `analysis/engine.py`, `core/settings.py`, `execution/{executor,risk_gate,price_mapping,sizing}.py`, `execution/backends/{mt5_backend,paper}.py`, `api/app.py`, `web/static/app.js`, `pyproject.toml`, `requirements.lock`; tests listed in §3.7.4
+- What was done: —
+- Why this way: D-038 (charts), D-043 (Claude leads, code protects; 40/day; per-role models). Position management moved here from Phase 5 because the first live BTC position (2026-09-26) showed the gap.
+- Notes/open issues: ONE billed live call on a scratch data root; measure engine RSS with charts (laptop has ≈0.4 GB free) and `snapshot_build_ms` at 5-min screening; rollbacks without code: `ai.charts.enabled: false`, `execution.management.dry_run: true`, `execution.position_actions.enabled: false`. User actions H15–H17.
+- The exact next step: worktree `C:\the_claude_new_wt\phase3`, branch `feat/phase3-sees-manages`; build in the order of §3.7.1 (prompt-cache fix first), tests, the one live call, adversarial review, update this block, then H16.
 
-### Phase P12.4: Learning loop and operator sessions (v2 Phase 4)
+### Phase P12.4: "Watches and learns" — metrics, bounded tuning, operator sessions, monitor, notifier (v2 Phase 4)
 - Status: ⏳ Not Started
-- Description: feedback metrics, bounded tuning (`tools/tune.py`, playbooks, adaptive.yaml), review packs, daily/weekly review and 3-hourly monitor from Task Scheduler, usage gauge.
-- Affected files: see handoff §3.4–3.5
-- What was done: — · Why this way: D-039. · Notes/open issues: —
-- The exact next step: after P12.3.
+- Description: `decision_metrics` (MFE/MAE in R, TP hits, exit reason, slippage, costs, counterfactuals) and attribution columns; a per-pair adaptive overlay under `data/adaptive/<PAIR>/` (bounded keys, 14-day expiry, hot-reloaded, single writer `tools/tune.py` with policy in code) and a linted playbook injected into the user prompt; review packs and daily/weekly Claude review sessions (Opus, read-only allow-list) plus a diagnose session, run from Task Scheduler; proposals for everything else via `tools/propose.py` in separate worktrees; a pure-Python 15-min monitor with per-pair/global kill-switch rules; Telegram + toast + log notifier; a ledger-based usage gauge in the rationing ladder; dashboard tabs Operator/Tuning/Proposals/Reviews and a kill-switch ON button.
+- Affected files: spec docs/handoff_operator_v2.md §3.8 — new `core/adaptive.py`, `core/playbook.py`, `core/notify.py`, `ai/usage_gauge.py`, `execution/metrics.py`, `tools/{tune,review_pack,propose,monitor,notify}.py`, `tools/operator/*`, `scripts/{install_operator_tasks.ps1,notify.ps1,monitor.bat}`, docs `learning_loop.md`, `operator_sessions.md`, `monitoring.md`; changed `ai/{store,orchestrator,prompts/__init__}.py`, `analysis/engine.py`, `execution/executor.py`, `api/app.py`, `web/*`
+- What was done: —
+- Why this way: D-039 (bounded autonomy), D-043 (Telegram; no git writes by operator sessions; Opus for reviews).
+- Notes/open issues: ONE billed live call = one daily review session on a scratch data root; the weekly/5-hour token budgets are calibration guesses until a week of data exists; the review session's Bash allow-list must never include order-sending tools. User actions H18–H21.
+- The exact next step: after H16; worktree `C:\the_claude_new_wt\phase4`, branch `feat/phase4-watches-learns`, build order §3.8.1.
 
-### Phase P12.5: Persistent session mode, bounded tools, position management (v2 Phase 5)
+### Phase P12.5: "Goes deeper" — enrichments, persistent session (opt-in), MCP tools, news blackout, gold proxy (v2 Phase 5)
 - Status: ⏳ Not Started
-- Description: stream-json persistent session (measured, behind a switch), ≤ 3 read-only MCP tools, P9.6 MT5 position management, news blackout, gold-proxy study, profile tables.
-- Affected files: see handoff §3.1, §3.4
-- What was done: — · Why this way: D-040. · Notes/open issues: —
-- The exact next step: after P12.4.
+- Description: payload v4 (depth bands, OI from `metrics`, prev week/month levels, BTC–ETH correlation, session statistics, forming bar; ≤ +1.5 k tokens), persistent stream-json session mode measured only when the user opts one pair in, ≤ 3 read-only as-of-bound MCP tools behind `needs_detail`, news blackout for XAU from an MQL5 calendar export, the gold-proxy study P1.11, daily profile tables, and the measured inputs of the go-live checklist.
+- Affected files: spec docs/handoff_operator_v2.md §3.9 — `analysis/{snapshot,context,model_view}.py`, new `analysis/{cross,news}.py`, `ai/providers/claude_code.py` (`SessionRunner`), new `tools/mcp_server.py`, `tools/mql5/CalendarExport.mq5`, `research/gold_flow/study.py`, `docs/go_live_checklist.md`
+- What was done: —
+- Why this way: D-040 (persistent session only measured/optional), D-043.
+- Notes/open issues: persistent mode needs 300–500 MB more RAM per pair (opt-in only); MCP turns cost +25–30 k tokens each (capped 2/pair/day); the news file fails open with a warning. User actions H22–H26.
+- The exact next step: after H20; worktree `C:\the_claude_new_wt\phase5`, branch `feat/phase5-goes-deeper`.
+

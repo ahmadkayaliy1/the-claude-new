@@ -41,6 +41,17 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-09-27 — Phases 3–5 fully specified (§3.6–3.10) and approved by the user; production runs three per-pair
+  systems on main `82fdafa` (+ the XAU watchdog hotfix `6a10a26` once merged with this docs branch).** The next
+  implementing session (Opus 5.5) starts Phase 3 on worktree `C:\the_claude_new_wt\phase3`, branch
+  `feat/phase3-sees-manages`, following §3.7 in its build order; §3.6 lists the ground rules (one billed live call per
+  phase on a scratch data root; never stop production from a worktree; additive DB changes; user-only actions as H rows).
+  The user's four decisions are D-043 in PROJECT_STATUS.md; H15–H26 are the actions the phases will need from the user.
+  Known state today: XAUUSD stopped for the weekend by the user (gold closed until Sunday 22:00 UTC; its ingest-binance
+  kill loop is fixed in `6a10a26`), RAM is tight (≈0.4 GB free with three systems), the open BTC demo position (0.01 @
+  84343, SL 84095, TP 85255) has no breakeven/trailing until Phase 3 lands, and something outside our code changed its
+  TP from 85254.58 to 85251.83 after placement (the user was asked to check MT5's Journal/Experts and to disable EAs).
+
 * **2026-09-27 \01:20 local (2026-09-26 22:20 UTC) — the user ran `switch_to_pairs.bat` (all three pairs) + the
   recorder; production now runs `82fdafa` as three per-pair systems (BTCUSDT 8766, ETHUSDT 8767, XAUUSD 8768).**
   Migration: BTC 28 decisions, ETH 24, XAU 0; ledger 48 rows. First cycles fine; BTC placed a demo BUY 0.01 at
@@ -280,6 +291,454 @@ become per-instance for free.
 * The engine's data gate and the report must keep flagging `data_not_ready`; the monitor must detect an outage
   within one cycle (heartbeats older than 15 min) — today nobody noticed for 7.5 h.
 
+### 3.6 Phases 3–5 — ground rules (approved 2026-09-27, supersedes §3.1 "bounded tools"/"persistent", §3.2 items 4–6, §3.4 and §3.5 where they differ)
+
+The user's decisions of 2026-09-27 (D-043): position management = "Claude leads, code protects"; notifications = Telegram
+bot + Windows toast + log; models = Sonnet for decisions, every role's model/effort configurable at any time, optional
+stronger-model confirmation of strong setups; cap = 40 calls per pair per day. Order: Phase 3 "sees and manages", Phase 4
+"watches and learns", Phase 5 "goes deeper" (position management moved from Phase 5 to Phase 3 because the open BTC
+position showed the gap on day one).
+
+| Rule | Enforcement |
+|---|---|
+| Production keeps running | one worktree per phase: `C:\the_claude_new_wt\phase3` (`feat/phase3-sees-manages`), `…\phase4` (`feat/phase4-watches-learns`), `…\phase5` (`feat/phase5-goes-deeper`); tests: `PYTHONPATH=src C:/the_claude_new/.venv/Scripts/python.exe -m pytest tests/unit -q -p no:cacheprovider`; **never** `run --stop`, `stop*.bat`, `switch_to_pairs.bat` from a worktree |
+| Mergeable and restart-safe on its own | additive DB changes only (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN` behind a `PRAGMA table_info` guard as in `ai/budget.py:EXTRA_COLUMNS`); new behaviour behind config keys with safe defaults; old code ignores new columns |
+| Fail closed on money paths | every new executor step catches its own exceptions → `ingestion_events` row, never blocks `process_candidates`; anything unverifiable at the broker is "unknown", never "done" |
+| ONE billed Claude call per phase | on a scratch data root (`--data-dir <scratch>` with `<scratch>\hot`, `<scratch>\cold` as `mklink /J` junctions to production, a copy of the pair's app.db, own `shared\ai_usage.db`); a CLI input-format rejection (no API request) is not a billed call |
+| User-only actions | `.env`, Task Scheduler, `pip install`, merges, restarts, `config.local.yaml` toggles — the agent writes the exact commands as H rows in `PROJECT_STATUS.md` |
+| Review before merge | independent adversarial review of the branch (as in Phases 1–2), then the user merges (`git merge --ff-only`) and restarts (`scripts\restart_all.bat`) |
+| No automated git writes from any operator session | runtime tuning state lives under `data/` (git-ignored); proposals are created in separate worktrees; the production checkout stays clean for ff-merges (deviation from the handoff's `tuning/<date>` commits — justified by D-032) |
+| Secrets | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` via `ai/providers/base.py:secret()` (re-reads `.env`), redacted by `core/logsetup.py:get_redactor()`, added to `Settings.secret_env_names()` |
+
+### 3.7 Phase 3 spec — "sees and manages"
+
+Goal: Claude reads six chart images, is screened every 5 minutes by Python and called only on change (≤ 40/pair/day),
+can be confirmed by a stronger model on strong setups, and the executor manages open trades from the rules Claude
+declared while Claude may issue bounded actions on live trades; prompts rewritten (v6) as a professional desk brief; the
+prompt cache fixed; the single-leg fallback made honest.
+
+##### 3.1 Build order and files
+
+| # | Component | Files (under `src/tradingsystem/` unless noted) | Reuse |
+|---|---|---|---|
+| 1 | Prompt-cache fix | `ai/orchestrator.py` (`_system_vars` → drop `account_equity/currency`; `_user_vars` gains them), `ai/prompts/shared/core_rules.md`, `ai/prompts/agent_per_pair/instructions.md` | `prompts/__init__.py:render`, `RenderedPrompt.prompt_hash` |
+| 2 | Charts | new `analysis/charts.py`; `pyproject.toml` (declare matplotlib, pillow), `requirements.lock` | `analysis/frames.py:load_frame`, `analysis/indicators.py:ema/atr`, payload `levels`, `timeframes.<tf>.{zones,liquidity,structure}`, `account.{open_positions,pending_orders}`, `market.basis_exec_minus_analysis` |
+| 3 | Image transport | `ai/providers/base.py` (`generate(..., images=None)` → `_call`), `ai/providers/claude_code.py` (`build_args(images)`, `user_message_line()`), other providers accept+ignore `images` (one warning), `ai/repair.py` (images on the first attempt only), `ai/budget.py` (`ai_usage` cols `role, images, image_tokens_est`) | `claude_code.py:parse` (already reads the last `result` line), `_staggered_start`, `claim_start` |
+| 4 | 5-minute screening, on-change, cap, event triggers | `ai/triggers.py` (`setup_reasons(payload, *, weak_min, liquidity_atr, screen_tf)`, new `setup_signature`, `decide` gains `new_strong/new_weak/changed/events`), `analysis/engine.py` (`tick`, `evaluate`, `_ration`, `engine_kv`, executor-event polling), `ai/budget.py:RateLimiter.cap`, `core/settings.py:AICfg` | `engine._data_ready`, `store.last_decision/last_attempt_ts`, `appdb.add_event/statuses`, `triggers.review_due` |
+| 5 | Per-role models + escalation | `core/settings.py` (`AIModelsCfg`, `AIEscalationCfg`), `ai/providers/__init__.py:make_provider(model=, effort=)`, `ai/orchestrator.py` (`_get(name, role)`, `_per_pair` escalation branch, `CycleRequest.strength`), new prompts `ai/prompts/escalation/{system,instructions}.md`, `ai/contract.py:EscalationReview` | the `risk_reviewer` branch in `_per_pair` (sub_outputs; failure → withheld) |
+| 6 | Position management (P9.6) | new `execution/management.py` (`PositionManager`); `execution/backends/mt5_backend.py` (`modify_sl` hardened, `close_position(volume=)`, `cancel_order` detail, new `legs_of(decision_id)`), `execution/backends/paper.py` (generic rules, `modify_leg`, `close_legs`), `execution/price_mapping.py:translate` (shift management/action values), `execution/executor.py:step` | `mt5_backend.existing/specs/quote/_filling`, `retcodes.describe/retryable/SUCCESS`, `executor.atr`, `analysis/structure.py`, `exposure.aggregate` |
+| 7 | Claude position actions | `ai/contract.py` (`PositionAction`, `Recommendation.position_actions`), `ai/orchestrator.py:_finalize`, new `execution/action_gate.py`, `execution/executor.py:process_actions`, `ai/store.py` (`actions_state`, `pending_actions()`) | `risk_gate.py` check style `add(name, ok, detail)`, `store.set_execution_state` |
+| 8 | Prompts v6 | `ai/prompts/shared/trader_persona.md` v2, `shared/core_rules.md` v6, `shared/payload_legend.md` v4, `agent_per_pair/system.md` v3, `agent_per_pair/instructions.md` v4, new `escalation/*`; `ai/store.py` (`library_hash`, `trigger_strength` columns) | `prompts/__init__.py:library_hash` (exists, unused → stored per decision) |
+| 9 | Gate on the leg actually placed | `execution/risk_gate.py` (`rr_after_costs` on the single leg when volume cannot split), move `split_volume` to `execution/sizing.py` (re-exported from `paper.py`) | `paper.py:split_volume`, `mt5_backend.build_requests` fallback rule |
+| 10 | Dashboard minimum | `api/app.py` (`GET /api/charts/{pair}/{tf}` serving `data/instances/<PAIR>/charts/<tf>.png`), `web/static/app.js:showDecision` (operator_notes, position_actions, chart thumbnails) | existing routes |
+
+##### 3.2 Behaviour rules
+
+**Prompt cache.** `account_equity` leaves the system prompt (rule 8 → "equity is `account.equity` in the payload; the
+cycle header repeats it"); `instructions.md` header line "Account equity ≈ $account_equity $account_currency".
+Acceptance: `render()` with equity 99 and 158 → identical `prompt_hash`.
+
+**Charts (`analysis/charts.py`).** Pure matplotlib, Agg backend set in the module, **no mplfinance, no pandas** (D-005;
+pandas ≈ 60 MB RSS). Candles = `vlines` wicks + `bar` bodies, volume panel below (titled "tick volume" when
+`Frame.volume_kind == "tick"`, i.e. XAU). API `render_set(reader, inst, as_of, payload, cfg) -> list[ChartImage(tf, png,
+bars, width, height, token_est)]`; frames via `load_frame(..., cfg.bars[tf], as_of)`; the snapshot is untouched
+(`payload_hash` unchanged). Overlays from the payload: `levels` lines; `zones.order_blocks/fvg` (≤ 3 each, translucent
+rectangles from `formed` to the right edge); liquidity pools (dashed); last 6 `structure.events` (marker + BOS/CHoCH/sweep
+label); EMA20/50; **this pair's holdings** (entry/SL/TP lines from `account.open_positions/pending_orders`, translated back
+to the analysis space by subtracting `market.basis_exec_minus_analysis`). 720×400 px, dpi 100, deterministic PNG
+(`metadata={"Software": None}`), `plt.close(fig)` in `finally`. Defaults: TFs `[1w,1d,4h,1h,15m,5m]`, bars `{1w:60,
+1d:120, 4h:120, 1h:120, 15m:96, 5m:96}`. Rendered inside `Orchestrator._per_pair` with `asyncio.to_thread` (the engine
+heartbeat is never blocked); per-pair cache `{tf: (last_closed_open_time, overlay_signature, png)}` → re-render only when
+the bar or the overlays changed; latest PNGs also written to `data/instances/<PAIR>/charts/<tf>.png`. Token estimate
+`ceil(w*h/750)` (= 384) per image → `ai_usage.image_tokens_est`, added to `est_input_tokens` in `_gen`. Config
+`ai.charts: {enabled: true, width: 720, height: 400, timeframes: [...], bars: {...}, overlays: [levels, zones,
+liquidity, structure, holdings, ema]}`; `enabled: false` = text-only rollback. Log the engine RSS delta after the first
+render set.
+
+**Image transport.** With images and provider `claude_code`: args `[-p, --input-format, stream-json, --output-format,
+stream-json, --verbose, --model, M, --system-prompt-file, F, --tools, "", --strict-mcp-config, --setting-sources, "",
+--no-session-persistence, (--effort E), (--fallback-model)]`; stdin = ONE line
+`{"type":"user","message":{"role":"user","content":[{"type":"text","text":<user prompt>},{"type":"text","text":"Chart 1w — <pair> <analysis instrument>, last N closed candles, analysis prices"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"<b64>"}}, …]}}\n`
+then stdin closed (`proc.communicate`). If the CLI rejects the line at its parser (non-zero exit within ~2 s, no `result`
+line, no API call) try the alternate shape `{"type":"user","content":[…]}` once and record the winner in
+`data/shared/cli_capabilities.json` (`{"stream_json_user_shape": "message"|"content", "cli_version": …}`) — a one-time
+probe per machine; if both fail, log `charts_disabled_cli_shape` and fall back to the text/json path. `parse()` keeps
+reading the last `{"type":"result"}` line (its `usage` block is used unchanged). Repair calls re-send text only. Without
+images nothing changes.
+
+**Screening and calls.** New `AICfg` keys: `screen_timeframe: 5m` (must be < decision TF and in the pair's timeframes),
+`screen_move_atr: 0.5` [0.2, 1.0], `daily_calls_per_pair: 40` [10, 120], `event_calls_per_day: 6` [0, 20]; remove
+`instance_max_rpd_share` (tell the user if `config.local.yaml` sets it — `extra="forbid"`). `RateLimiter.cap()`: instance →
+`min(rpd, daily_calls_per_pair)`, all-pairs → `rpd`; the cap counts **every ledger row of the pair** (first attempts,
+repairs, escalations — each spends the subscription).
+Engine `tick()`: keep `processed[pair]` for the decision-TF close, add `processed_screen[pair]` for the 5m close (SETTLE
+5 s; `_data_ready` on the 5m table; a missing 5m bar is skipped, DEBUG-logged once per bar — no `data_not_ready` spam).
+At each 5m close build the payload once (`orch.payload`) and evaluate. **Measure the payload build time first** (log
+`snapshot_build_ms`); if the 5-minute build exceeds 3 s on this laptop, build a lighter screen payload (decision TF +
+1h + 5m only) for screening and the full one only for a dispatch.
+`setup_signature(strong, weak) -> frozenset[str]`: structure `f"{tf}:{kind}:{dir}:{event_time}"`, zone
+`f"{tf}:{zone_kind}:{dir}:{top}-{bottom}"`, liquidity `f"{tf}:liq:{side}:{level}"`, pattern `f"{tf}:pattern:{bar_time}"`,
+footprint `f"fp:{bar_time}:{kind}"`, divergence `f"div:{type}:{last_pivot_time}"`. Persist per pair in new table
+`engine_kv` (`last_signature`, `last_call_price` = analysis mid at dispatch via `orchestrator._analysis_mid`,
+`last_event_id`), updated at dispatch only.
+`setup_reasons` gains the 5m TF: 5m BOS/CHoCH/sweep count as **weak** (15m/1h stay strong); `weak_min` (2) and
+`liquidity_atr` (0.3) become parameters (settings now, adaptive overlay in Phase 4).
+`decide()` at any 5m close: `new_strong = strong − last_signature`, `new_weak = weak − last_signature`; fire on
+`new_strong` or `len(new_weak) ≥ weak_min` (strength strong/weak), on price/candle review conditions (review), or on
+executor events (event). Time-based `next_review.in_minutes` fires only when `changed` = a new decision-TF bar closed since
+the last call **and** (`len(new_weak) ≥ 1` or `|mid − last_call_price| > screen_move_atr × timeframes[decision_tf].indicators.atr14`).
+Idle floor unchanged (`max_idle_minutes`, at a decision-TF close). Spacing: strong/weak/idle ≥ `min_minutes_between_calls`;
+review/event ≥ `review_floor_minutes`; back-off unchanged. Candle-close conditions: 5m ones at 5m closes, 15m at 15m.
+`_ration` with cap 40: left/cap < 0.5 → strong + review + event; < 0.2 → review + event; 0 → none; event calls also capped
+by `event_calls_per_day` (count `ai_decisions.trigger LIKE 'event:%'` today).
+**Event triggers:** the engine polls `ingestion_events` (`collector='executor'`, `id > last_event_id`) every tick; waking
+events: `order` (placed), `paper_filled`/`mgmt_filled`, `mgmt_position_closed` (reason SL/TP/rule/model), `outcome`,
+`action_applied`, `action_rejected`; coalesced within 60 s into one reason `"event: BTCUSDT filled 0.01 @ 84350; TP1 hit"`.
+
+**Roles and escalation.**
+```yaml
+ai:
+  models:                                   # per role; model = sonnet|opus|fable or a full name; effort low|medium|high|max
+    decision:   {model: sonnet, effort: medium}
+    escalation: {model: opus,   effort: high}
+    review:     {model: opus,   effort: high}     # Phase 4 sessions
+    monitor:    {model: sonnet, effort: low}      # Phase 4 diagnosis
+  escalation:
+    enabled: false            # the user flips it in config.local.yaml
+    on_strength: [strong]
+    min_confidence: 60        # first answer must reach this
+    max_per_day_per_pair: 6
+    on_failure: withhold      # withhold | keep
+```
+`make_provider(settings, name, model=, effort=)`; `ClaudeCodeProvider.effort` instance attribute used by `build_args`;
+`Orchestrator._get(name, role)` caches by `(name, model, effort)`; one `RateLimiter` per provider name (shared cap). In
+`_per_pair`: after a valid BUY/SELL with `strength ∈ on_strength`, `confidence ≥ min_confidence`, today's escalations <
+max and ≥ 2 calls left in the cap → render role `escalation` (same user text + charts + the first answer as `$proposal`);
+contract `EscalationReview{verdict: confirm|downgrade, issues ≤ 8, confidence, final_recommendation}`; code enforces
+`final.decision ∈ {first.decision, NO_TRADE}`, `final.confidence ≤ first.confidence`, levels unchanged on confirm (else the
+record is `invalid: escalation altered levels`); stored as sub_output role `escalation`, ledger `role='escalation'`;
+timeout 150 s (the decision must still pass `max_recommendation_age_s`); failure → `on_failure`.
+
+**Position management (`execution/management.py`, pure functions testable without MT5).**
+`evaluate_rules(rules, legs, quote, ctx) -> list[Action]`; legs from `MT5Backend.legs_of(decision_id)` (positions by tag
++ `history_deals_get(position=…)` to learn how a leg ended: `DEAL_REASON_TP/SL`) or `PaperBackend.decision_legs`.
+Triggers (execution price space): `tp_hit k` → leg k closed by TP; `price_reached v` → bid (BUY)/ask (SELL) crossed v;
+`r_multiple v` → `(px − fill)/(fill − sl0) ≥ v` with the original SL; `minutes_elapsed v` → since fill; `candle_close v`
+→ at a decision-TF close beyond v. Actions: `move_sl_to_breakeven` → `fill ± max(spread × breakeven_buffer_spread_mult,
+stops_level + spread)` on the safe side of the fill, never worse than the current SL; `partial_close params.fraction` →
+volume rounded down to `volume_step`, ≥ `volume_min`, remainder ≥ `volume_min` else full close; `trail_atr
+params.atr_mult ∈ [0.5, 5]` and `trail_structure` (last swing low/high ± `stops_level + spread`) → once per decision-TF
+close (`management_state.last_bar_ms`), tighten only, ignore moves < `min_sl_change_ticks` (5); `close_all` → close open
+legs + cancel pending legs. Time stop = `close_all` + `minutes_elapsed`. **A move that does not yet satisfy the venue
+(closer than `stops_level + spread` to the current price) is deferred and retried every loop until it qualifies or the
+leg closes — never rejected permanently.** New `ManagementRule` validators: `tp_hit` value integer ∈ [1, 4];
+`partial_close` needs `fraction ∈ (0, 1)`; `trail_atr` needs `atr_mult ∈ [0.5, 5]`; `minutes_elapsed ≥ 5`;
+`price_reached > 0`; `r_multiple ∈ (0, 10]`. `translate()` now shifts `management[].value` (price triggers) and
+`position_actions[].value` — a real bug today.
+MT5: `modify_sl(ticket, symbol, sl, tp)` rewritten — round to `digits`, refuse widening (BUY: `sl > current_sl` only),
+require ≥ `stops_level + spread` from the current price and outside `trade_freeze_level`, retcode 10025 ("no changes") =
+ok, `retryable()` codes retried twice, every attempt returned with `describe(code)`; `close_position(ticket, volume=None)`
+partial (`TRADE_ACTION_DEAL` with `position=ticket`); `cancel_order` with retcode detail. Called only from
+`PositionManager`/`process_actions`. The executor runs `manage_positions()` every loop (1 s) for MT5 and paper; per-loop
+cost one `positions_get()` + ATR/structure cached per decision-TF bar. **Protective actions keep running under
+`KILL_SWITCH`** (they reduce risk); only new orders are blocked — documented in `docs/ops_windows.md`.
+Config `execution.management: {enabled: true, dry_run: false, breakeven_buffer_spread_mult: 1.0, min_sl_change_ticks: 5}`;
+`dry_run` records `status='skipped'` with `detail.dry_run=true`.
+
+**Claude position actions.** Contract: `Recommendation.position_actions: list[PositionAction] ≤ 4` (allowed with
+NO_TRADE — the main use: hold but tighten). `PositionAction{target: {decision: <8-char id shown in
+account.open_positions/pending_orders>, kind: position|order}, action: modify_sl|modify_tp|close|cancel_order,
+value: float|None, fraction: float|None, reason: Text(200)}`; validators: `modify_sl/modify_tp` need `value > 0`;
+`close` fraction ∈ (0, 1] default 1; `cancel_order` only for orders, the others only for positions; values in the
+analysis price space. `_finalize` drops actions whose target is not in the payload's holdings (note in `errors`); sets
+`actions_state='pending'` when any remain. Executor `process_actions()` (after `process_candidates`, before
+`manage_positions`): `ai_decisions WHERE status='valid' AND actions_state='pending' AND ts ≥ started − 1 h`; resolve the
+target (`id LIKE ? || '%' AND pair=? AND execution_state='executed'`; **exactly one match, else rejected `ambiguous_target`**);
+legs via `legs_of`; translate the value by the live basis (`check_basis` as in `_handle`); `action_gate.evaluate(action,
+legs, ctx)` checks: `own_target`, `not_expired` (`now − rec.timestamp ≤ max_recommendation_age_s`), `quote_fresh` (≤ 30 s),
+`market_open`, `modify_sl`: tighter only + ≥ `stops_level + spread` from price + never None (a valid-but-too-close move is
+deferred, see above); `modify_tp`: correct side, ≥ `stops_level` from price; `close`: volume rounding rule; `cancel_order`:
+target is a pending order; rate limits `max_per_decision` (4), `max_per_pair_per_day` (12 applied),
+`min_minutes_between_sl_changes` (15) per ticket. Apply via the backend; write a `position_actions` row per
+(source_decision, seq, leg) with the check list; `actions_state='done'`; events `action_applied`/`action_rejected` (these
+wake the model). Paper equivalents `PaperBackend.modify_leg(leg_id, sl=, tp=)`, `close_legs(decision_id, fraction,
+quote)`, `cancel_decision` (exists). Config `execution.position_actions: {enabled: true, max_per_decision: 4,
+max_per_pair_per_day: 12, min_minutes_between_sl_changes: 15}`.
+
+**Prompts v6 (every file's `<!-- prompt: … · version N -->` header bumped).**
+- `trader_persona.md` v2 — the professional process: (1) manage what is open before looking for new trades; (2) read the
+  charts top-down (1w/1d/4h context → 1h structure → 15m setup → 5m trigger), then confirm every visual read against the
+  payload numbers (numbers are authoritative for levels); (3) act only on confirmed things — a closed candle beyond a
+  level, a sweep that closed back inside, a retest that held — never in anticipation; (4) write the plan as `management`
+  rules and exact `next_review` conditions; (5) keep `operator_notes`. "If in doubt, NO_TRADE."
+- `core_rules.md` v6 — rule 8 without `$account_equity`; rule 13 rewritten: earlier orders/positions are managed by the
+  system from the `management` rules declared with them; on later cycles the trader may act through `position_actions`
+  (tighten a stop, take profit with a fraction, adjust a TP, cancel a pending order), can never widen/remove a stop or add
+  size, the system checks each action against the venue's stops level; BUY/SELL adds a NEW order (refused in the same
+  direction); "return NO_TRADE with actions when the right move is to manage, not to add"; rule 14 (charts): the images
+  show the same closed candles as `timeframes.<tf>.recent` in the analysis instrument's prices with levels/zones/
+  liquidity/holdings overlaid — use them for shape, momentum, context; exact numbers from the payload; rule 15
+  (single leg): at the 0.01-lot minimum the system usually cannot split take-profits — it places ONE position at the TP
+  with the largest `close_fraction` (ties → nearest) and measures RR on that leg; give the largest fraction to the target
+  you want executed; rule 16 (playbook): the `Playbook` section holds desk notes learned from this pair's record —
+  guidance, never a reason to break rules 1–15.
+- `payload_legend.md` v4 — `position_actions`, `management` semantics, `trigger_reason` prefixes (`event:`, `review
+  condition:`, `idle:`), the chart list.
+- `agent_per_pair/instructions.md` v4 — `$charts_note` ("Attached: 6 charts (1w, 1d, 4h, 1h, 15m, 5m), 720×400, last N
+  closed candles each, analysis prices" | "No charts this cycle"), a `Playbook` block `$playbook` (Phase 3 passes "(no
+  playbook yet)"), the equity line; `system.md` v3.
+- `escalation/system.md` + `instructions.md` — a senior risk partner who sees the same screens and the trader's proposal
+  and may only confirm or downgrade.
+- `DecisionStore` columns `library_hash`, `trigger_strength` (from `CycleRequest.strength`).
+
+**Gate on the leg actually placed.** In `risk_gate.evaluate`, after sizing: if `len(tps) > 1` and
+`split_volume(size.lots, fractions, volume_step, volume_min) is None` → `rr_after_costs` uses only the largest-fraction TP
+(ties → nearest, the `build_requests` rule) with detail `single leg at TPk`; `executed_levels.take_profits` then lists that
+TP.
+
+##### 3.3 DDL (per-instance `app.db`, created by the owning module; shared ledger for `ai_usage`)
+```sql
+CREATE TABLE IF NOT EXISTS position_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, pair TEXT NOT NULL,
+  source TEXT NOT NULL /* model|rule */, source_decision TEXT NOT NULL, seq INTEGER NOT NULL,
+  target_decision TEXT NOT NULL, leg TEXT NOT NULL /* MT5 ticket or paper leg id */,
+  action TEXT NOT NULL, requested TEXT, status TEXT NOT NULL /* pending|applied|rejected|failed|skipped|deferred */, detail TEXT,
+  UNIQUE(source, source_decision, seq, target_decision, leg));
+CREATE TABLE IF NOT EXISTS management_state (decision_id TEXT NOT NULL, rule_idx INTEGER NOT NULL, leg TEXT NOT NULL,
+  status TEXT NOT NULL, last_bar_ms INTEGER, applied_ms INTEGER, detail TEXT, PRIMARY KEY(decision_id, rule_idx, leg));
+CREATE TABLE IF NOT EXISTS engine_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ms INTEGER NOT NULL);
+ALTER TABLE ai_decisions ADD COLUMN actions_state TEXT;  -- + library_hash TEXT, trigger_strength TEXT (PRAGMA-guarded)
+ALTER TABLE ai_usage ADD COLUMN role TEXT;               -- + images INTEGER, image_tokens_est INTEGER
+```
+
+##### 3.4 Tests (unit, real fixtures in `tests/fixtures/real`)
+| File | Proves |
+|---|---|
+| `test_charts.py` | 720×400 PNG from `btcusdt_candles_1m_3000.csv` (+5m resample), deterministic bytes, overlays drawn, 30 renders grow RSS < 20 MB and leave 0 open figures, token_est 384 |
+| `test_claude_code_images.py` | args carry `--input-format stream-json --output-format stream-json --verbose`; user-line shape; `parse()` on a redacted real NDJSON capture (new fixture `claude_code_stream_json_result.jsonl`); repairs send no images; ledger rows carry `images/image_tokens_est/role` |
+| `test_triggers_screen.py` | signature keys, dedupe (same reasons → no fire), `weak_min`, 5m events weak, the 0.5-ATR `changed` rule, idle floor, event coalescing, `event_calls_per_day`; `test_replay_budget`: replaying 24 h of stored `ai_payloads` fires ≤ 40/pair/day |
+| `test_call_cap.py` | `cap()` = 40 in instance mode, counts repair/escalation rows; `_ration` at 20/8/0 |
+| `test_roles_escalation.py` | scripted provider per role; escalation only on strong + conf ≥ 60; keep/downgrade only; never raises confidence or changes levels; failure → per config; daily max |
+| `test_management.py` | paper on real XAU ticks: breakeven with spread buffer, partial rounding, trail once per bar tighten-only, time stop, deferred too-close move; MT5 fake: `modify_sl` refuses widening/inside stops level, 10025 ok, retry, `close_position(volume)`; idempotent state; **property test over 200 random rule sets: no rule ever loosens an SL** |
+| `test_position_actions.py` | validators; `_finalize` drops unknown targets; ambiguous prefix rejected; gate checks incl. rate limits; basis translation; paper + MT5-fake application; `actions_state`; events |
+| `test_prompts.py` (extend) | prompt_hash stable across equity; all roles render; version headers parsed; `library_hash` per decision; `$playbook` default |
+| `test_gate_single_leg.py`, `test_price_mapping.py` (extend) | RR on the largest-fraction leg when the volume cannot split; management/action values translated |
+
+**The ONE live call:** `engine --once --pairs BTCUSDT` from the worktree on the scratch data root with charts on.
+Record in `docs/measurements/phase3_live.md`: input tokens (target ≤ 23 k incl. ≈ 2.3 k image tokens), output, latency
+(≤ 120 s), `num_turns` = 1, valid first attempt, `position_actions` empty or valid, which user-line shape worked, engine
+RSS before/after rendering, `snapshot_build_ms`.
+
+##### 3.5 Acceptance
+- All existing + new unit tests pass; `prompt_hash` invariant to equity.
+- Live call valid with 6 images, ≤ 23 k input tokens, ≤ 120 s.
+- Replay of 24 h of stored payloads: ≤ 40 calls/pair/day.
+- Management on the XAU tick fixture produces the expected `position_actions` rows; property test holds.
+- Engine RSS increase with charts ≤ 60 MB per pair (measured, in the docs).
+
+##### 3.6 User actions (H rows) and rollbacks
+H15 `.venv\Scripts\pip install -r requirements.lock` (no-op today; libs now declared) · H16 `git merge --ff-only
+feat/phase3-sees-manages` + `scripts\restart_all.bat` · H17 (optional) `config.local.yaml`: `ai: {escalation: {enabled:
+true}}`; `ai.models.escalation.model: fable` for Fable. Rollbacks without code: `ai.charts.enabled: false`,
+`execution.management.dry_run: true`, `execution.position_actions.enabled: false`.
+
+##### 3.7 Risks
+RAM (0.4 GB free): charts +35–60 MB/engine — start with one pair's charts if needed; the docs restate the 16 GB RAM
+recommendation. Live management touches demo positions: tighten-only invariants + property test + dry-run switch.
+stream-json shape: one-time probe + text fallback. Cap counts repairs: expect ~25–30 first attempts/day.
+
+### 3.8 Phase 4 spec — "watches and learns"
+
+Goal: the system measures its own decisions; Claude reviews them daily/weekly from Task Scheduler with read-only tools,
+tunes only a bounded per-pair overlay and playbook (auto, logged, expiring, revertible), proposes everything else; a
+pure-Python monitor and a notifier watch production without the desktop app; the dashboard shows notes, tuning,
+proposals, reviews.
+
+##### 4.1 Components
+| # | Component | Files | Reuse |
+|---|---|---|---|
+| 1 | Feedback metrics + attribution + prompt registry | `ai/store.py` (columns, `prompt_versions`, `pending_metrics()`), new `execution/metrics.py`, `execution/executor.py` (housekeeping), `ai/prompts/__init__.py` (`render` returns versions; `register_versions(store)`) | `executor.evaluate_virtual` (1m walk), `mt5_backend.decision_result` (extend to return commission/swap split), gate detail (+`spread`), `context.sessions`, `confluence.bias`, `timeframes.<dec>.regime` |
+| 2 | Adaptive overlay + playbooks + `tune.py` | new `core/adaptive.py` (`AdaptiveCfg`, `AdaptiveStore`), new `core/playbook.py` (`lint`), new `tools/tune.py`, consumers in `analysis/engine.py`, `execution/executor.py` (gate floor), `ai/orchestrator.py` (`$playbook`, `$tp_hint`, `playbook_hash`, `adaptive_hash`) | pydantic style of `settings.py`, `core/filelock.FileLock`, `execution/drawdown._put` (atomic write), Phase-3 `setup_reasons(weak_min, liquidity_atr)` |
+| 3 | Review packs + operator sessions + proposals | new `tools/review_pack.py`, `tools/propose.py`, `tools/operator/{run_session.ps1, session_args.py, prompts/_system.md, prompts/daily.md, prompts/weekly.md, prompts/diagnose.md}`, new `scripts/install_operator_tasks.ps1|.bat` (uninstall also removes them) | `tools/health_report.py:machine_report/system_report` (import, don't duplicate), `install_autostart.ps1` task pattern |
+| 4 | Pure-Python monitor | new `tools/monitor.py` (+ `scripts/monitor.bat`), state `data/shared/monitor_state.json` | `appdb` tables, `procs.running_supervisors`, `control.read_state`, `psutil`, `drawdown._read` |
+| 5 | Notifier | new `core/notify.py`, `tools/notify.py`, `scripts/notify.ps1`; hooks in engine, executor, management, monitor | `secret()`, `get_redactor()`, `httpx` |
+| 6 | Usage gauge | new `ai/usage_gauge.py`; `engine._ration`, `engine.write_status` | `UsageStore` (+`tokens_since(since, pair=None)`) |
+| 7 | Dashboard + API | `api/app.py` (`/api/operator/{pair}`, `/api/adaptive`, `/api/tuning_changes`, `/api/position_actions`, `/api/proposals`, `/api/reviews[/{name}]`, `POST /api/kill_switch` ON only), `web/index.html`, `web/static/{app.js,style.css}` | token/origin protection of `execute` |
+| 8 | Docs | new `docs/learning_loop.md`, `docs/operator_sessions.md`, `docs/monitoring.md`; `docs/ops_windows.md` §8; `PROJECT_STATUS.md` (P12.4, D-043…D-046, H rows) | — |
+
+##### 4.2 Behaviour rules
+
+**Metrics (`decision_metrics`, executor housekeeping every 60 s)** for decisions with `outcome` or `virtual_outcome` and
+no metrics row, from real 1m bars of the analysis instrument between `timestamp` and resolution: `mfe_r`, `mae_r` (R of
+the original SL from the worst fill edge as in `rr_computed`), `tp1/2/3_hit`, `minutes_to_resolve`, `exit_reason ∈ {sl,
+tp, rule_close, model_close, expired, not_triggered, open}` (from `position_actions`/deals), `slippage` (mean of
+`backend.placed[].slippage`), `spread_at_gate`, `commission`, `swap`, `rejected_but_virtual_win`,
+`no_trade_counterfactual_atr` (max |move| in decision-TF ATR over the next 4 bars). Attribution columns at record time:
+`setup_kinds` (json), `session` (killzone or active), `regime`, `htf_bias`, `data_warnings`. `prompt_versions` upserted at
+every render.
+
+**Adaptive overlay.** Files `data/adaptive/<PAIR>/{adaptive.yaml, playbook.md, changes.jsonl}` + table
+`tuning_changes` in the pair's app.db. Nothing in git, no restart: `AdaptiveStore.current()` re-reads on mtime change
+(checked ≤ every 5 s), validates with `AdaptiveCfg`; an invalid file keeps the last good values + one `adaptive_invalid`
+event; missing = defaults. Single writer `tools/tune.py` under `FileLock(data/shared/locks/adaptive_<PAIR>.lock)`, atomic
+replace. Keys, bounds, autonomous direction, consumer:
+
+| key | bounds | direction | consumer |
+|---|---|---|---|
+| `min_confidence_floor` | [55, 80] | raise only | executor gate `min_confidence = max(risk.min_confidence, floor)` |
+| `min_minutes_between_calls` | [15, 60] | up only | engine |
+| `max_idle_minutes` | [60, 240] | up only | engine |
+| `review_floor_minutes` | [5, 30] | up only | engine + `_review_plan` |
+| `trigger.weak_min` | [2, 3] | up only | `setup_reasons` |
+| `trigger.liquidity_atr` | [0.2, 0.5] | down only | `setup_reasons` |
+| `pair.ai_paused_until` | ≤ now + 7 d | — | engine skips dispatch (event `ai_paused`) |
+| `tp_hint` | ≤ 200 chars, linted | — | user prompt `$tp_hint` |
+| playbook | ≤ 1500 chars, ≤ 12 bullets, linted | — | user prompt `$playbook` |
+
+Entry = `{value, set_ms, expires_ms ≤ set_ms + 14 d, reason, evidence, window_hours, review_id}`; an expired entry is
+absent (default) — the engine appends one `expired` line and sets `tuning_changes.reverted_ms`; `adaptive_hash` and
+`playbook_hash` stored per decision. `core/playbook.py:lint`: length/bullets; denylist regex
+`(risk[_ ]per|lot|leverage|stop.?loss (distance|closer)|ignore|override|always (buy|sell|trade)|never no_trade|confidence (8|9)\d|daily loss|kill.?switch|min_rr)`;
+`$` must be `$$`.
+`tools/tune.py` (only writer): `--pair P set <key> <value> --reason … --evidence-json … --window-hours N --review-id R`,
+`playbook <file>`, `revert <key>`, `list`, `--dry-run`. Policy in code: refuse when `data/TUNING_FREEZE` exists or
+`adaptive.enabled: false`; ≤ 1 change per pair per calendar day; 7-day cooldown per key; strategy keys (floor, weak_min,
+liquidity_atr, tp_hint, playbook) need ≥ 20 resolved virtual outcomes in the window, activity-reducing keys ≥ 10; freeze
+when the window is > 25 % **unhealthy** (:= an `ai_decisions` row with status error/skipped/budget_blocked or
+`data_warnings` naming the decision TF, or an hour with a `killed`/`exited` event for engine/executor/ingest-mt5 or a
+heartbeat gap > 15 min); direction per table; exit 0 applied / 2 refused (reason) / 3 invalid.
+
+**Review packs and operator sessions.** `tools/review_pack.py --hours 24|168 [--pair P] --out data/reviews/` →
+`<ts>_daily.md|.json` (≤ ~10 k tokens; last 25 ideas): machine + per-system health (from `health_report`), per-pair funnel
+(5m screens → triggers by strength → calls by role → valid → ideas → gate by check → placed → outcomes broker/virtual →
+metric means), position actions and rule executions, escalation verdicts, log ERROR counts, adaptive values with expiry,
+tuning changes, hashes (prompt/library/playbook/adaptive/config/git), usage by role and cache-read share, gauge level.
+`tools/operator/run_session.ps1 -Kind daily|weekly|diagnose [-DryRun]`: builds the pack, reads CLI args from
+`session_args.py --kind` (`ai.models.review/monitor`), runs
+`claude -p --model <m> --effort <e> --output-format json --no-session-persistence --setting-sources "" --strict-mcp-config --permission-mode dontAsk --permission-prompts none --max-turns 30 --add-dir C:\the_claude_new --system-prompt-file tools\operator\prompts\_system.md --tools "Read,Grep,Glob,Bash" --disallowedTools "Edit,Write,NotebookEdit,WebFetch,WebSearch" --allowedTools "Read" "Grep" "Glob" "Bash(.venv/Scripts/python.exe tools/health_report.py*)" "Bash(.venv/Scripts/python.exe tools/review_pack.py*)" "Bash(.venv/Scripts/python.exe tools/tune.py*)" "Bash(.venv/Scripts/python.exe tools/propose.py*)" "Bash(.venv/Scripts/python.exe tools/notify.py*)" "Bash(git status*)" "Bash(git log*)" "Bash(git diff*)"`
+with the kind's prompt + pack path on stdin; output → `data/reviews/<ts>_<kind>.session.json`; a **diff guard** compares
+`git status --porcelain` before/after and notifies `review_touched_checkout` (never auto-reverts). `demo_order_test.py` and
+`migrate_instance.py` are not in the list. The diagnosis kind may additionally run `scripts/kill_switch_on.bat /nopause
+<PAIR>`. The session ends with a ≤ 1500-char summary that `run_session.ps1` sends via `tools/notify.py`.
+`tools/propose.py --slug S --title T --body-file F --pair P`: creates worktree `C:\the_claude_new_wt\proposal-<date>-<slug>`
+on branch `proposal/<date>-<slug>` from `main`, writes `docs/proposals/<date>-<slug>.md` (problem, numbers, proposed
+diff/text, risk, test plan) + a `PROJECT_STATUS.md` row there, commits there, appends `data/shared/proposals.jsonl`
+(`status: awaiting_user`), notifies; the production checkout is untouched; the user merges or deletes.
+Task registration (user action, `scripts/install_operator_tasks.ps1 [-DryRun]`, same principal/settings pattern as
+`install_autostart.ps1`): `TradingSystem-Monitor` every 15 min → `pythonw tools\monitor.py --quiet`;
+`TradingSystem-Review-Daily` 04:30 UTC → `run_session.ps1 -Kind daily`; `TradingSystem-Review-Weekly` Sunday 06:00 UTC →
+`-Kind weekly`; time limits 20/40 min; "run only when logged on" (the CLI login lives in the user profile). Also add
+`claude -p --max-turns` and `--permission-mode dontAsk` to the "verify with one call" list.
+
+**Monitor (`tools/monitor.py`, no Claude; exit 0 ok / 1 problems).** Reads every running/expected system
+(`health_report.systems()` logic), the shared ledger, `monitor_state.json` (last equity per account, last event id per
+system, alert dedupe). Checks → action: heartbeat stale > 15 min (any collector not `stopped`) → warn; MT5 IPC hung
+(executor/mt5 `reconnecting|error` with last_error matching `IPC|-1000[45]` > 5 min) → critical (terminal restart stays a
+proposal, never automatic); position without SL → critical; order burst > 3 `order` events/pair/hour → per-pair
+`KILL_SWITCH` + critical; daily loss ≤ −(max − 2) % warn, ≤ −max % → per-pair `KILL_SWITCH`; equity drop between runs > 5 %
+warn, > 10 % → global `data/KILL_SWITCH` + critical; drawdown stop tripped → critical once; `latest_quote` > 10 min while
+open → warn; free RAM < 300 MB / disk < 5 GB → warn; restart loop (> 3 exited/killed per service per hour) → warn;
+outage (`disconnect` without `resumed` > 10 min) → warn; VPN adapter up/down change (`monitor.vpn_adapter_names`) → info;
+no daily review in 30 h → warn; ≥ 1 warn/critical and last diagnosis > 3 h ago → `run_session.ps1 -Kind diagnose`
+(≤ 8 k tokens, `--max-turns 12`). The monitor writes only `KILL_SWITCH` files and its state file. Config block `monitor:`.
+
+**Notifier (`core/notify.py:notify(level, title, text, key=None)`).** Always a log line; Windows toast via
+`scripts/notify.ps1` (WinRT `ToastNotificationManager` under PS 5.1, no extra module); Telegram `sendMessage` via `httpx`
+with `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` from `secret()` (silently skipped when unset), 10 s timeout, daemon thread —
+never raises into the caller; redaction; rate limit 20/hour per process; dedupe by `key` within 30 min
+(`data/shared/notify_state.json`). Events: order placed/filled/closed, outcome, position action applied/rejected,
+management rule applied, escalation verdict, kill switch on/off, drawdown trip, monitor findings, proposal created, review
+summaries, gauge level change. `tools/notify.py --level --title --text` for scripts/sessions.
+
+**Usage gauge (`ai/usage_gauge.py`).** Ledger-based: rolling 7-day and 5-hour sums of input+output tokens vs
+`ai.usage.weekly_token_budget` (default 12 M) and `five_hour_token_budget` (default 1.5 M) — **both are calibration
+guesses**; level 0 < 70 %, 1 (reviews/events only) ≥ 70 %, 2 (pause except events) ≥ 90 %; the CLI's own usage-limit
+cooldown remains the hard stop. `_ration` takes the max of the request ladder and the gauge; `write_status` publishes
+`usage_gauge`; the health report and the review pack print it.
+
+**Dashboard.** Tabs Operator (per pair: memory notes, last `position_actions`, `position_actions` table,
+`management_state`, chart PNGs), Tuning (effective values with expiry, `changes.jsonl`, playbook, freeze flag), Proposals
+(`proposals.jsonl`), Reviews (list + escaped markdown). `POST /api/kill_switch` writes this instance's switch (ON only; OFF
+stays a script — deliberate friction). No config editing UI.
+
+##### 4.3 DDL
+```sql
+ALTER TABLE ai_decisions ADD COLUMN setup_kinds TEXT;  -- + session, regime, htf_bias, data_warnings, playbook_hash, adaptive_hash (PRAGMA-guarded)
+CREATE TABLE IF NOT EXISTS decision_metrics (decision_id TEXT PRIMARY KEY, computed_ms INTEGER NOT NULL, mfe_r REAL, mae_r REAL,
+  tp1_hit INTEGER, tp2_hit INTEGER, tp3_hit INTEGER, minutes_to_resolve INTEGER, exit_reason TEXT, slippage REAL, spread_at_gate REAL,
+  commission REAL, swap REAL, rejected_but_virtual_win INTEGER, no_trade_counterfactual_atr REAL, detail TEXT);
+CREATE TABLE IF NOT EXISTS prompt_versions (prompt_hash TEXT PRIMARY KEY, role TEXT NOT NULL, library_hash TEXT NOT NULL,
+  versions TEXT NOT NULL, git_sha TEXT, first_seen_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS tuning_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, pair TEXT NOT NULL, key TEXT NOT NULL,
+  old_value TEXT, new_value TEXT, reason TEXT, evidence TEXT, window_hours INTEGER, expires_ms INTEGER, review_id TEXT, actor TEXT, reverted_ms INTEGER);
+```
+
+##### 4.4 Tests
+`test_metrics.py` (MFE/MAE/TP hits on the 1m fixture; counterfactual), `test_adaptive.py` (bounds, expiry, mtime reload,
+invalid file keeps last good, gate uses `max()`, `AdaptiveCfg` has no `risk`/`execution` keys), `test_tune_policy.py`
+(min samples 20/10, cooldown, one/day, freeze > 25 % unhealthy, direction rules, `TUNING_FREEZE`, path allow-list),
+`test_playbook_lint.py`, `test_review_pack.py` (seeded app.db → md ≤ 40 k chars), `test_monitor.py` (stale heartbeat, order
+burst → the pair's file only, equity drop → global file, dedupe), `test_notify.py` (rate limit, dedupe, redaction, Telegram
+payload via `httpx.MockTransport`, unset token → skipped), `test_usage_gauge.py`, `test_api_tabs.py` (routes; kill switch
+POST needs token/origin), `test_propose.py` (git mocked; production checkout untouched), `test_prompt_versions.py`.
+
+**The ONE live call:** one daily review session (`run_session.ps1 -Kind daily`, Opus) on a scratch data root against a
+copy of production data. Record: tokens (target ≤ 30 k), turns, whether `tune.py` was called and refused/applied within
+policy (assert from the scratch `tuning_changes`), the summary received on Telegram + toast, diff guard clean.
+
+##### 4.5 Acceptance
+Tests green; `tune.py` cannot write outside `data/adaptive/<PAIR>/` and refuses every out-of-bounds/direction/cooldown
+case; the monitor detects a simulated stale heartbeat in one run and a simulated burst writes exactly the pair's switch;
+review session ≤ 30 k tokens with a clean diff guard; dashboard tabs render on a seeded DB.
+
+##### 4.6 User actions
+H18 `.env`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (BotFather; chat id from `getUpdates`) — optional · H19
+`scripts\install_operator_tasks.bat` (`-DryRun` first); retire the desktop-app 3-hourly task · H20 merge + `restart_all.bat`
+· H21 (optional) `config.local.yaml`: `ai.usage.weekly_token_budget` after a week of observation.
+
+##### 4.7 Risks
+A review session with Bash: exact allow-list prefixes, editors disallowed, diff guard, no order-sending tool. Tuning drift:
+bounds + direction + 14-day expiry + one change/day + `TUNING_FREEZE`. Monitor false positives writing a switch:
+conservative thresholds, dedupe, `kill_switch_off.bat`.
+
+### 3.9 Phase 5 spec — "goes deeper"
+
+| # | Component | Files | Rule |
+|---|---|---|---|
+| 1 | Depth block | `analysis/snapshot.py:_depth`, `ai/model_view.py` | last `depth` snapshot ≤ 2 min old: per band (±0.1/0.25/0.5/1/2/5 %) bid/ask notional, imbalance `(bid−ask)/(bid+ask)`, 1-h change of the ±0.5 %/±1 % imbalance; ≤ 250 tokens; BTC/ETH only |
+| 2 | OI fix + percentiles | `snapshot._derivatives` | `change_pct_1h/4h/24h` from `metrics.sum_open_interest`; 30-day percentile rank of OI and funding |
+| 3 | Prev W/M levels | `analysis/context.py:reference_levels(daily=…)` | `pwh/pwl/pmh/pml/month_open/year_open` from the 1d frame (day roll respected); drawn on 1d/4h charts |
+| 4 | BTC–ETH correlation | new `analysis/cross.py` | sibling hot DB read-only (`data/hot/binance_spot/<SIBLING>.db`): 96-bar 15m log-return corr + beta + the sibling's 15m trend; capability `cross_asset` |
+| 5 | Session statistics | `context.py:session_stats` | last 30 d of 15m bars: per session mean range in ATR, up-close share, current session range vs mean — causal |
+| 6 | Forming bar | `snapshot._analyze_tf` (15m/5m) + charts | `forming: [open_time,o,h,l,c,v,age_s]` from `Frame.forming`; hollow on the chart; never a trigger input |
+| 7 | Versions | `PAYLOAD_VERSION "4"`, `VIEW_VERSION "3"`, legend v5 | token budget ≤ +1.5 k per call (measured) |
+| 8 | Persistent session (measured, off) | `providers/claude_code.py:SessionRunner`, `ai.providers.claude_code.session_mode: per_call|persistent` | one `claude -p --input-format stream-json --output-format stream-json --verbose --session-id <per-pair uuid> --autocompact 100k --tools "" …` process held by the engine; one user line per event; daily restart with `--resume`; uuid in `engine_kv`; 24-h opt-in measurement in `docs/measurements/phase5_session.md` (tokens raw/cached, RAM 300–500 MB expected); default stays `per_call` |
+| 9 | Bounded MCP tools | new `tools/mcp_server.py` (stdio; needs `mcp` pkg), provider args when `needs_detail` | as-of-bound tools `candles(tf, n≤300)`, `depth_bands()`, `decisions(n≤10)`; `--mcp-config … --strict-mcp-config --allowedTools "mcp__ts__*" --max-turns 3 --permission-mode dontAsk --permission-prompts none`, timeout 300 s; only when the previous answer set the new contract field `needs_detail` and ≤ 2/pair/day |
+| 10 | News blackout (XAU) | `tools/mql5/CalendarExport.mq5` (user attaches), new `analysis/news.py`, gate check `news_blackout`, trigger suppression | the script writes `MQL5/Files/calendar.csv` (next 48 h, USD high impact); blackout ±15 min; payload `market.news`; stale file > 24 h → capability unavailable + warning, no blackout |
+| 11 | Gold-proxy study P1.11 | `research/gold_flow/study.py` → `docs/exploration/gold_flow.md` | XAUUSDT perp delta vs XAUUSD@ returns, lead/lag; the user sets `flow_proxy_approved` only if \|corr\| ≥ 0.5 and sign-stable over 4 weeks |
+| 12 | Profile tables | `snapshot._orderflow` | daily POC/VAH/VAL for the last 5 days (BTC/ETH real; XAU approx), ≤ 200 tokens |
+| 13 | Go-live checklist inputs | `docs/go_live_checklist.md` | measured calls/day, tokens, RAM, gate approval share, action counts, monitor MTTD |
+
+Tests: `test_snapshot_enrichments.py` (depth from a seeded table; OI from metrics; PW/PM causal; session stats causal;
+forming bar excluded from triggers), `test_cross.py`, `test_news.py`, `test_session_runner.py` (framing, result parsing,
+`--resume`, no orphan on cancel), `test_mcp_tools.py` (refuses future data), `test_model_view_v3.py`.
+The ONE live call: a decision call with payload v4 + charts → token delta ≤ +1.5 k, valid. Persistent-session and MCP
+measurements only if the user opts in (they replace, not add to, normal calls).
+User actions: H22 `pip install mcp` (only for 9) · H23 attach `CalendarExport.mq5` in MT5 · H24 opt one pair into
+`session_mode: persistent` for 24 h (optional) · H25 `flow_proxy_approved: true` only after the study · H26 merge + restart.
+Risks: persistent-mode RAM on this laptop (opt-in only); MCP extra turns (+25–30 k tokens each, capped 2/day/pair); the news
+file depends on the terminal (fail-open with a warning; never a silent trade during a known event when the file is fresh).
+
+### 3.10 Verification per phase (end-to-end)
+
+1. Unit suite green from the worktree (`-p no:cacheprovider`).
+2. The single live call per phase on the scratch data root; numbers written to `docs/measurements/`.
+3. Independent adversarial review of the branch (Phase 1–2 pattern: lenses → verifiers → fix → re-review).
+4. After the user's merge + `restart_all.bat`: `scripts\status_all.bat`, `tools\health_report.py --hours 1`, one real
+   cycle per pair observed in the dashboard (charts thumbnails, position actions, management rows), Telegram message
+   received (Phase 4), `tools\monitor.py` exit code, review pack produced by the scheduled task (Phase 4).
+5. Phase 3 specifically: watch the open BTC position — breakeven/trailing rows appear in `position_actions` when the
+   declared triggers hit; `kill_switch_on.bat BTCUSDT` blocks new orders but a protective SL move still applies.
+
 ## 4. Phases, acceptance tests, effort
 
 | Phase | Scope | Acceptance | Effort |
@@ -287,9 +746,9 @@ become per-instance for free.
 | 0 (user) | H12 malware removal, H13 autostart, H4 Gemini key, restart system + recorder | `scripts\check_ops.bat` all ok; `tools/health_report.py` clean; free RAM > 2 GB | user |
 | 1 | §3.2 items 1–3 + operator_notes (§3.1) + usage extras persisted | 334+ tests pass; one live BTC call: SL ≥ gate minimum, `operator_notes` stored and fed back; input tokens/call ≤ 19 k | hours–1 day |
 | 2 | §3.3 instances (BTCUSDT first; ETHUSDT second) | two instances run 24 h without cross-kills; per-instance gate proven by test; account floor test; migration script rehearsed on a copy | 2–3 days |
-| 3 | §3.2 item 5 charts + item 4 trigger policy + item 6 cheap enrichments | live call with 6 images validates; tokens/call measured before/after; 5m screening test on real fixtures; calls/day/pair ≤ 40 | 2–3 days |
-| 4 | §3.4 learning loop + Task-Scheduler operator sessions + usage gauge | tune.py bounds/cooldown/min-samples tests; playbook lint; a dry review run produces a pack and a proposal branch; monitor detects a simulated stale heartbeat | 3–4 days |
-| 5 | persistent session mode (measure), bounded tools, P9.6 position management, news blackout (XAU), gold-proxy study, profile tables | each behind a config flag with a 24-h measurement written to docs/ | as needed |
+| 3 | §3.7 "sees and manages": charts + stream-json images, prompt-cache fix, 5-min screening, 40/day cap, per-role models + escalation, P9.6 position management + Claude position actions + event triggers, prompts v6, gate on the placed leg | all tests + the listed new ones; ONE live call valid with 6 images ≤ 23 k input tokens ≤ 120 s; 24-h payload replay ≤ 40 calls/pair/day; no rule ever loosens an SL (property test); engine RSS +≤ 60 MB | 5–7 days |
+| 4 | §3.8 "watches and learns": decision metrics, adaptive overlay + playbooks + tune.py, review packs, Task-Scheduler operator sessions (Opus), pure-Python monitor, Telegram/toast notifier, usage gauge, dashboard tabs | tune.py bounds/direction/cooldown/min-samples/freeze tests; monitor detects a simulated stale heartbeat and writes only the pair's switch on a burst; ONE daily review ≤ 30 k tokens with a clean diff guard | 5–6 days |
+| 5 | §3.9 "goes deeper": depth block, OI fix, prev W/M levels, BTC–ETH correlation, session stats, forming bar (payload v4), persistent session (opt-in, measured), bounded MCP tools, news blackout (XAU), gold-proxy study, profile tables, go-live inputs | ONE live call: token delta ≤ +1.5 k; opt-in measurements written to docs/measurements/ | 4–6 days + measurements |
 
 ## 5. Working rules for the implementing session
 
