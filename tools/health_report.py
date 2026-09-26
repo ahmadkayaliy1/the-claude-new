@@ -7,6 +7,7 @@ Built for a periodic check by a person or an agent: short, and every problem lin
 from __future__ import annotations
 
 import argparse
+import calendar
 import collections
 import json
 import sqlite3
@@ -56,7 +57,7 @@ def main() -> int:
     if st_file.exists():
         try:
             st = json.loads(st_file.read_text(encoding="utf-8"))
-            upd = time.mktime(time.strptime(st["updated"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+            upd = calendar.timegm(time.strptime(st["updated"][:19], "%Y-%m-%dT%H:%M:%S"))   # UTC, DST-proof
             age_min = (now / 1000 - upd) / 60
             p(f"{'!! ' if age_min > 12 else '   '}price recorder: last flush {age_min:.0f} min ago"
               + (" — stalled or stopped (restart: scripts\\start_recorder.bat)" if age_min > 12 else ""))
