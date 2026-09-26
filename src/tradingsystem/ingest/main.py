@@ -34,10 +34,12 @@ def run_binance(data_dir: str | None = None, backfill: bool = True) -> None:
     setup_from_settings("ingest-binance", s)
     appdb = AppDB(s.paths.data() / "app.db")
     svc = BinanceLiveService(s, InstrumentRegistry.from_settings(s), appdb)
-    worker = None
-    if backfill:
-        from .binance.backfill import start_worker
-        worker = start_worker(data_dir)
+    keeper = keeper_done = None
+    if backfill:                  # restarted with backoff if it ever dies (BF-03)
+        from .binance.backfill import COLLECTOR, start_worker
+        from .common.backfill_loop import WorkerKeeper
+        keeper = WorkerKeeper(lambda: start_worker(data_dir), appdb, COLLECTOR)
+        keeper_done = keeper.monitor()
 
     async def main() -> None:
         loop = asyncio.get_running_loop()
@@ -55,8 +57,9 @@ def run_binance(data_dir: str | None = None, backfill: bool = True) -> None:
     except KeyboardInterrupt:
         log.info("interrupted")
     finally:
-        if worker is not None and worker.is_alive():
-            worker.terminate()
+        if keeper is not None:
+            keeper_done.set()
+            keeper.stop()
         appdb.close()
 
 

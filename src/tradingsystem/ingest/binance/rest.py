@@ -2,12 +2,14 @@
 
 * Tracks ``X-MBX-USED-WEIGHT-1M`` and pauses before the configured per-minute budget is exceeded.
 * 429 → honours ``Retry-After``; 418 (IP ban) → waits the full ``Retry-After`` and logs an error.
-* Network errors / 5xx → exponential backoff (bounded). 4xx other than 429/418 → raised (caller bug).
+* Network errors / 5xx → exponential backoff (``max_retries``; or, with ``retry_deadline_s``, until that budget
+  is spent — the backfill rides out a post-wake network outage, BF-12). 4xx other than 429/418 → raised.
 * Keeps a local↔Binance clock offset (NTP-style, lowest-RTT sample).
 """
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import time
 from typing import Any
@@ -25,12 +27,17 @@ class BinanceHTTPError(RuntimeError):
         self.status, self.body = status, body
 
 
+class RetriesExhausted(RuntimeError):
+    """Rate-limit (429/418) retries used up — transient: the caller may retry later."""
+
+
 class BinanceRest:
     def __init__(self, base_url: str, *, weight_budget_per_min: int = 3000, timeout_s: float = 20.0,
-                 max_retries: int = 6) -> None:
+                 max_retries: int = 6, retry_deadline_s: float | None = None) -> None:
         self.base = base_url.rstrip("/")
         self.budget = weight_budget_per_min
         self.max_retries = max_retries
+        self.retry_deadline_s = retry_deadline_s
         self._client = httpx.AsyncClient(timeout=timeout_s, headers={"User-Agent": "tradingsystem/0.1"})
         self._used = 0
         self._window = int(time.time() // 60)
@@ -54,17 +61,22 @@ class BinanceRest:
                 self._window, self._used = int(time.time() // 60), 0
             self._used += weight
 
+    def _give_up(self, attempt: int, t0: float, delay: float) -> bool:
+        if self.retry_deadline_s is None:
+            return attempt >= self.max_retries
+        return time.monotonic() - t0 + delay > self.retry_deadline_s
+
     async def get(self, path: str, params: dict[str, Any] | None = None, *, weight: int = 1) -> Any:
         url = self.base + path
-        delay = 1.0
-        for attempt in range(self.max_retries + 1):
+        delay, t0 = 1.0, time.monotonic()
+        for attempt in itertools.count():
             await self._respect_budget(weight)
             try:
                 r = await self._client.get(url, params=params)
                 self.requests += 1
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 self.errors += 1
-                if attempt == self.max_retries:
+                if self._give_up(attempt, t0, delay):
                     raise
                 log.warning("GET %s failed (%r) — retry in %.0fs", path, exc, delay)
                 await asyncio.sleep(delay)
@@ -82,14 +94,16 @@ class BinanceRest:
                 (log.error if r.status_code == 418 else log.warning)(
                     "Binance %d on %s — backing off %.0fs", r.status_code, path, wait)
                 await asyncio.sleep(wait + 1)
+                if self._give_up(attempt, t0, 0):
+                    break
                 continue
-            if r.status_code >= 500 and attempt < self.max_retries:
+            if r.status_code >= 500 and not self._give_up(attempt, t0, delay):
                 log.warning("GET %s → %d — retry in %.0fs", path, r.status_code, delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
                 continue
             raise BinanceHTTPError(r.status_code, r.text, str(r.url))
-        raise RuntimeError(f"GET {path}: retries exhausted")
+        raise RetriesExhausted(f"GET {path}: retries exhausted")
 
     async def sync_clock(self, path: str = "/api/v3/time", samples: int = 3) -> float:
         best: tuple[float, int] | None = None

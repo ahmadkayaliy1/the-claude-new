@@ -2,6 +2,8 @@
 
 Order of operations (D-009 live-first): open stores → connect WebSockets → REST gap-fill from the last
 stored row to now (overlap with live rows is harmless: idempotent upserts) → steady state.
+After a reconnect, candles are re-fetched from the bar containing the outage start (or the bar after the newest stored
+one, whichever is older) and the self-healing audit runs at once (F5).
 Deep history (Vision) is handled by the separate backfill worker (``backfill.py``).
 """
 from __future__ import annotations
@@ -112,6 +114,8 @@ class BinanceLiveService:
         self._gapfill_locks = {v: asyncio.Lock() for v in MARKETS}
         self._marks: dict[tuple[str, str], int | None] = {}
         self._initial_done: set[str] = set()
+        self._audit_kick = asyncio.Event()
+        self._venue_ok: dict[str, bool] = {}
         self.stop = asyncio.Event()
 
     # ------------------------------------------------------------------ streams
@@ -245,6 +249,11 @@ class BinanceLiveService:
                         for tf in inst.timeframes:
                             spec = sink.spec("candles", tf)
                             start = self._start_for(sink, spec, since_ms, now - 1000 * tf.ms)
+                            if since_ms is not None:
+                                # every bar that closed during the outage: from the bar containing its start (the
+                                # paginator rounds a start up) or after the newest stored bar, if older (F5)
+                                last = await asyncio.to_thread(sink.hot.last_time, spec)
+                                start = tf.floor(min(since_ms, last + tf.ms) if last is not None else since_ms)
                             start = max(start, now - LIVE_GAPFILL_MAX_BARS * tf.ms)
                             async for rows in fetch.klines(rest, m, inst.symbol, tf, start, now):
                                 sink.add_many(spec, rows)
@@ -265,6 +274,8 @@ class BinanceLiveService:
                     self.appdb.add_event(venue, "gapfill_error", f"{inst.key}: {exc!r}"[:300])
             self.appdb.add_event(venue, "gapfill_done", f"{'initial' if since_ms is None else 'after outage'} "
                                                          f"until {iso(now)}")
+            if since_ms is not None:
+                self._audit_kick.set()          # verify recent candles / aggTrade ids now, not in ≤ 5 min
 
     async def _gap_fill_agg(self, sink: InstrumentSink, rest: BinanceRest, m, now: int, since_ms: int | None) -> None:
         """Fill aggTrade ids between the last stored id (before live / before the outage) and the first live id."""
@@ -294,8 +305,14 @@ class BinanceLiveService:
         Catches anything a reconnect gap-fill missed (network flaps, killed process) — spec §9 no silent gaps.
         """
         from ...storage.gaps import candle_gaps, id_gaps
-        await asyncio.sleep(120)
+        try:
+            await asyncio.wait_for(self._audit_kick.wait(), timeout=120)
+        except asyncio.TimeoutError:
+            pass
         while not self.stop.is_set():
+            if self._audit_kick.is_set():
+                self._audit_kick.clear()
+                await asyncio.sleep(5)          # let the gap-fill rows reach the hot store first
             for sink in self.sinks.values():
                 inst, rest, m = sink.inst, self.rest[sink.inst.venue], MARKETS[sink.inst.venue]
                 now = rest.binance_now()
@@ -312,11 +329,9 @@ class BinanceLiveService:
                                 n += len(rows)
                             self.appdb.add_event(inst.venue, "audit_fill", f"{spec.name}: {n} ids {g.start}..{g.end}")
                     if sink.wants("candles"):
-                        for tf in inst.timeframes:
-                            if tf.ms > 3_600_000:
-                                continue
+                        for tf in inst.timeframes:      # every TF: a missed 4h/1d close is as bad as a 1m one (F5)
                             spec = sink.spec("candles", tf)
-                            lo = tf.floor(now - 2 * 3_600_000)
+                            lo = tf.floor(now - max(2 * 3_600_000, 3 * tf.ms))
                             hi = tf.floor(now) - tf.ms                      # last closed bar open
                             c = await asyncio.to_thread(sink.hot.read_range, spec, lo, None, ["open_time"])
                             for g in candle_gaps(c["open_time"], tf, lo, hi):
@@ -326,7 +341,7 @@ class BinanceLiveService:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("audit failed for %s: %r", inst.key, exc)
             try:
-                await asyncio.wait_for(self.stop.wait(), timeout=300)
+                await asyncio.wait_for(self._audit_kick.wait(), timeout=300)
             except asyncio.TimeoutError:
                 pass
 
@@ -413,12 +428,14 @@ class BinanceLiveService:
                 last = max((c.last_msg_ms or 0) for c in conns) or None
                 ok = all(c.connected for c in conns) and last is not None and now_ms() - last < 60_000
                 sinks = [s for s in self.sinks.values() if s.inst.venue == venue]
+                recovered = ok and not self._venue_ok.get(venue, False)     # clear the old error once (BF-14)
+                self._venue_ok[venue] = ok
                 self.appdb.set_status(venue, "live" if ok else "reconnecting", last_data_ms=last, detail={
                     "messages": sum(c.messages for c in conns), "reconnects": sum(c.reconnects for c in conns),
                     "rows_written": sum(s.rows_written for s in sinks),
                     "rows_rejected": sum(s.rows_rejected for s in sinks),
                     "rest_requests": self.rest[venue].requests, "rest_errors": self.rest[venue].errors,
-                    "clock_offset_ms": round(self.rest[venue].clock_offset_ms)})
+                    "clock_offset_ms": round(self.rest[venue].clock_offset_ms)}, clear_error=recovered)
             try:
                 await asyncio.wait_for(self.stop.wait(), timeout=5)
             except asyncio.TimeoutError:

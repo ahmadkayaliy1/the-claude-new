@@ -1,7 +1,8 @@
 """Binance combined-stream WebSocket connection with reconnect, stall watchdog and planned 23 h rotation (P3.5).
 
 ``on_message(stream, data, recv_ms)`` is called for every message; ``on_state(event, detail, outage_ms)``
-reports connect/disconnect so the service can log outages and trigger gap-fill.
+reports connect/disconnect so the service can log outages and trigger gap-fill. An outage is measured from the last
+message received, so a silent stall or a suspended host is inside the gap-fill window.
 """
 from __future__ import annotations
 
@@ -68,15 +69,15 @@ class StreamConnection:
                 raise
             except Exception as exc:  # noqa: BLE001
                 self.reconnects += 1
-                if down_since is None:
-                    down_since = now_ms()
+                if down_since is None:          # data stopped at the last message (stall / host suspend), F5
+                    down_since = self.last_msg_ms or now_ms()
                 log.warning("%s disconnected: %r — retry in %.0fs", self.name, exc, backoff)
                 await self.on_state("disconnect", repr(exc)[:300], None)
             finally:
                 if self.connected:
                     self.connected = False
                     if down_since is None:
-                        down_since = now_ms()
+                        down_since = self.last_msg_ms or now_ms()
             if stop.is_set():
                 break
             try:

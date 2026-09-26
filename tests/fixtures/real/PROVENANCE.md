@@ -12,3 +12,5 @@ Produced by `research/bench/bench_prepare.py` (cached Parquet) and sliced with p
 | `payload_xauusd.json` | `SnapshotBuilder.build("XAUUSD", as_of)` on the production database (MT5 WindsorBrokers1-Demo + Binance USDⓈ-M XAUUSDT), 2026-09-25 ≈10:50 UTC | one complete real snapshot payload |
 | `claude_code_not_logged_in.json` | Claude Code CLI 2.1.282 `claude -p --output-format json --json-schema …` stdout, run with a clean environment before sign-in (no model call) | one complete result envelope (error: not logged in) |
 | `claude_code_auth_status_logged_out.json` | Claude Code CLI 2.1.282 `claude auth status --json` stdout before sign-in | complete output |
+| `XAUUSDT-1d-2025-12.zip` (+ `.CHECKSUM`) | Binance Vision `data/futures/um/monthly/klines/XAUUSDT/1d/`, downloaded unmodified 2026-09-26 (SHA-256 matches the published CHECKSUM) | the whole monthly file (1337 bytes) |
+| `vision_listing_xauusdt_1d.xml` | S3 listing `GET data.binance.vision?delimiter=/&prefix=data/futures/um/monthly/klines/XAUUSDT/1d/`, 2026-09-26 | one real ListBucketResult page |

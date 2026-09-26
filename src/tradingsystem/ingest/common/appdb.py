@@ -53,17 +53,19 @@ class AppDB:
                         raise
 
     def set_status(self, collector: str, state: str, *, last_data_ms: int | None = None, error: str | None = None,
-                   detail: dict[str, Any] | None = None) -> None:
+                   detail: dict[str, Any] | None = None, clear_error: bool = False) -> None:
+        """Upsert a collector row. ``error=None`` keeps the previous error unless ``clear_error`` (recovered)."""
         if state not in STATES:
             raise ValueError(state)
         now = now_ms()
+        err_sql = ("last_error=excluded.last_error, last_error_ms=excluded.last_error_ms" if clear_error else
+                   "last_error=COALESCE(excluded.last_error, collector_status.last_error), "
+                   "last_error_ms=COALESCE(excluded.last_error_ms, collector_status.last_error_ms)")
         self._exec(
-            """INSERT INTO collector_status(collector, state, last_data_ms, last_error, last_error_ms, detail, updated_ms)
+            f"""INSERT INTO collector_status(collector, state, last_data_ms, last_error, last_error_ms, detail, updated_ms)
                VALUES (?,?,?,?,?,?,?)
                ON CONFLICT(collector) DO UPDATE SET state=excluded.state,
-                 last_data_ms=COALESCE(excluded.last_data_ms, collector_status.last_data_ms),
-                 last_error=COALESCE(excluded.last_error, collector_status.last_error),
-                 last_error_ms=COALESCE(excluded.last_error_ms, collector_status.last_error_ms),
+                 last_data_ms=COALESCE(excluded.last_data_ms, collector_status.last_data_ms), {err_sql},
                  detail=COALESCE(excluded.detail, collector_status.detail), updated_ms=excluded.updated_ms""",
             (collector, state, last_data_ms, error, now if error else None,
              json.dumps(detail, default=str) if detail is not None else None, now))
