@@ -9,6 +9,11 @@ Modes
   multi_provider_consensus       the same per-pair prompt to several providers → deterministic aggregation
 The Cost Governor may degrade the configured mode (level ≥1 → agent_per_pair; level 3 → no calls).
 Nothing leaves this module unless it validated against the contract; everything is stored (P8.7).
+
+A cycle runs each pair (or the whole batch in the batch modes) as its own unit: one unit's failure is stored as
+status 'error' for that unit only, every record is stored as soon as its unit finishes, and units still running
+at ``ai.cycle_deadline_s`` are cancelled (F2, F4). System-owned fields of a recommendation (pair, timestamp,
+validity horizon, price reference, review timing) are set here, never taken from the model (F6).
 """
 from __future__ import annotations
 
@@ -16,17 +21,20 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import time
 from dataclasses import dataclass
+
+from pydantic import ValidationError
 
 from ..analysis.snapshot import SnapshotBuilder, payload_hash
 from ..core.instruments import InstrumentRegistry
 from ..core.settings import Settings
-from ..core.timeutil import iso, now_ms
+from ..core.timeutil import iso, now_ms, parse_date_spec
 from .budget import CostGovernor, RateLimiter, UsageStore
 from .contract import (AssessmentSet, Decision, Recommendation, RecommendationSet, RiskReview,
                        TimeframeAssessment)
 from .prompts import render
-from .providers import LLMProvider, make_provider
+from .providers import LLMProvider, ProviderError, make_provider
 from .repair import Generation, generate_validated
 from .store import DecisionRecord, DecisionStore
 
@@ -48,15 +56,51 @@ class Orchestrator:
         self._providers: dict[str, LLMProvider] = {}
         self._limiters: dict[str, RateLimiter] = {}
         self._sem = asyncio.Semaphore(max(1, settings.ai.max_parallel_calls))
+        self.route: tuple[str, str | None] = (settings.ai.active_provider, None)   # (provider in use, why rerouted)
 
     # ------------------------------------------------------------------ plumbing
     def provider(self, name: str | None = None) -> LLMProvider:
-        name = name or self.s.ai.active_provider
+        """A named provider, or (no name) the active one — rerouted to ``ai.fallback_provider`` while the active
+        provider is unavailable (not signed in, usage limit reached, missing key; D-030)."""
+        if name is not None:
+            return self._get(name)
+        active, fallback = self.s.ai.active_provider, self.s.ai.fallback
+        try:
+            prov = self._get(active)
+            why = prov.unavailable_reason()
+        except ProviderError as exc:
+            if not fallback:
+                raise
+            prov, why = None, str(exc)
+        if why is None:
+            self._set_route(active, None)
+            return prov
+        if not fallback:
+            raise ProviderError(why, retryable=False)
+        try:
+            fb = self._get(fallback)
+            fb_why = fb.unavailable_reason()
+        except ProviderError as exc:
+            fb_why = str(exc)
+        if fb_why:
+            raise ProviderError(f"{why}; fallback {fallback}: {fb_why}", retryable=False)
+        self._set_route(fallback, why)
+        return fb
+
+    def _get(self, name: str) -> LLMProvider:
         if name not in self._providers:
             prov = make_provider(self.s, name)
             self._providers[name] = prov
             self._limiters[prov.name] = RateLimiter(prov.name, prov.cfg, self.usage)
         return self._providers[name]
+
+    def _set_route(self, name: str, why: str | None) -> None:
+        if (name, why) != self.route:
+            if why:
+                log.warning("AI provider %s unavailable (%s) — using fallback %s", self.s.ai.active_provider, why, name)
+            elif self.route[1]:
+                log.info("AI provider %s available again", name)
+            self.route = (name, why)
 
     def effective_mode(self) -> tuple[str, str]:
         st = self.governor.state()
@@ -66,6 +110,24 @@ class Orchestrator:
         if st.level >= 1 and mode not in ("agent_per_pair",):
             return "agent_per_pair", f"degraded by Cost Governor: {st.reason}"
         return mode, "configured"
+
+    def quota(self, name: str | None = None) -> tuple[int | None, int | None]:
+        """(requests left in the provider's quota day, its daily cap) for ``name`` or the provider in use."""
+        lim = self._limiters.get(name or self.route[0])
+        return (lim.remaining_today(), lim.cfg.rpd) if lim else (None, None)
+
+    def default_account(self) -> dict:
+        return {"equity": self.s.execution.paper_equity, "currency": "USD", "mode": self.s.execution.mode,
+                "equity_source": "configured paper equity (live balance and open positions are not wired in yet)"}
+
+    def payload(self, pair: str, as_of: int, account: dict | None = None) -> dict:
+        """The snapshot the model receives for ``pair`` at ``as_of`` (account block + recent decisions)."""
+        return self.builder.build(pair, as_of, account=account or self.default_account(),
+                                  history=self.store.recent(pair))
+
+    def horizon_ms(self, pair: str | None) -> int:
+        """Latest allowed ``valid_until`` after the cycle time: 4 decision bars."""
+        return 4 * (self.s.pairs[pair].decision_timeframe.ms if pair else 900_000)
 
     def _system_vars(self, pair: str | None, account: dict) -> dict:
         r = self.s.risk
@@ -81,55 +143,180 @@ class Orchestrator:
         }
 
     def _user_vars(self, pair: str | None, as_of: int, reason: str, payload_json: str, **extra) -> dict:
-        tf = self.s.pairs[pair].decision_timeframe if pair else None
-        horizon = 4 * (tf.ms if tf else 900_000)
         return {"now_utc": iso(as_of), "trigger_reason": reason, "payload": payload_json,
-                "max_valid_until": iso(as_of + horizon), **extra}
+                "max_valid_until": iso(as_of + self.horizon_ms(pair)), **extra}
 
     async def _gen(self, provider: LLMProvider, model_cls, system: str, user: str, purpose: str,
                    pair: str | None) -> Generation:
-        async with self._sem:
-            return await generate_validated(provider, model_cls, system=system, user=user,
-                                            limiter=self._limiters[provider.name], governor=self.governor,
-                                            usage=self.usage, purpose=purpose, pair=pair,
-                                            est_input_tokens=max(2000, len(user) // 3))
+        try:
+            async with self._sem:
+                return await generate_validated(provider, model_cls, system=system, user=user,
+                                                limiter=self._limiters[provider.name], governor=self.governor,
+                                                usage=self.usage, purpose=purpose, pair=pair,
+                                                est_input_tokens=max(2000, len(user) // 3))
+        except Exception as exc:  # noqa: BLE001 — one failed sub-call must not take its siblings down (F4)
+            log.exception("%s %s: generation failed", pair or "*", purpose)
+            msg = f"{type(exc).__name__}: {exc}"[:300]
+            return Generation(False, None, errors=[msg], provider_error=msg)
 
     # ------------------------------------------------------------------ entry point
     async def run_cycle(self, requests: list[CycleRequest], *, as_of: int | None = None,
-                        account: dict | None = None) -> list[DecisionRecord]:
+                        account: dict | None = None, payloads: dict[str, dict] | None = None,
+                        deadline_s: float | None = None) -> list[DecisionRecord]:
+        """Run one cycle; ``payloads`` may carry snapshots the caller already built for this ``as_of``. Every
+        requested pair ends with exactly one stored record, even on failure or when the deadline cuts it off."""
         as_of = as_of or now_ms()
-        account = account or {"equity": self.s.execution.paper_equity, "currency": "USD", "mode": self.s.execution.mode}
+        account = account or self.default_account()
+        deadline_s = self.s.ai.cycle_deadline_s if deadline_s is None else deadline_s
         mode, why = self.effective_mode()
-        payloads = {}
-        for rq in requests:
-            p = self.builder.build(rq.pair, as_of, account=account, history=self.store.recent(rq.pair))
-            self.store.save_payload(p["meta"]["payload_hash"], rq.pair, p)
-            payloads[rq.pair] = p
+        label = mode if why == "configured" else f"{mode} ({why})"
         reasons = {rq.pair: rq.reason for rq in requests}
+        built: dict[str, dict] = {}
+        out: list[DecisionRecord] = []
+        for rq in requests:
+            try:
+                p = (payloads or {}).get(rq.pair) or self.payload(rq.pair, as_of, account)
+                self.store.save_payload(p["meta"]["payload_hash"], rq.pair, p)
+                built[rq.pair] = p
+            except Exception as exc:  # noqa: BLE001
+                log.exception("%s: snapshot failed", rq.pair)
+                out.append(self._finish(DecisionRecord(rq.pair, label, rq.reason, "error",
+                                                       errors=[f"snapshot failed: {exc!r}"[:300]]), label, as_of, None))
         if mode == "paused":
-            recs = [DecisionRecord(pair, mode, reasons[pair], "budget_blocked", payload_hash=payloads[pair]["meta"]["payload_hash"],
-                                   errors=[why]) for pair in payloads]
-        elif mode == "single_agent_global":
-            recs = await self._global(payloads, reasons, as_of, account)
-        elif mode == "agent_per_timeframe":
-            recs = await self._per_timeframe(payloads, reasons, as_of, account)
-        elif mode == "agent_per_pair_and_timeframe":
-            recs = await asyncio.gather(*(self._pair_and_tf(p, payloads[p], reasons[p], as_of, account) for p in payloads))
+            return out + [self._finish(self._failed(p, mode, reasons[p], built[p], why, "budget_blocked"), label,
+                                       as_of, built[p]) for p in built]
+        units = self._units(mode, built, reasons, as_of, account)
+        tasks = {asyncio.ensure_future(coro): pairs for pairs, coro in units}
+        end = time.monotonic() + deadline_s if deadline_s else None
+        pending = set(tasks)
+        try:
+            while pending:
+                timeout = None if end is None else max(0.0, end - time.monotonic())
+                done, pending = await asyncio.wait(pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    break
+                for t in done:
+                    try:
+                        recs = t.result()
+                    except Exception as exc:  # noqa: BLE001
+                        log.error("AI unit %s failed: %r", tasks[t], exc, exc_info=exc)
+                        recs = [self._failed(p, mode, reasons[p], built[p], f"{type(exc).__name__}: {exc}")
+                                for p in tasks[t]]
+                    out += [self._finish(rec, label, as_of, built.get(rec.pair)) for rec in recs]
+        finally:
+            for t in pending:                    # deadline or shutdown: cancelling kills any running CLI call
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        for t in pending:
+            log.warning("AI cycle deadline (%.0fs) reached — cancelled %s", deadline_s, tasks[t])
+            out += [self._finish(self._failed(p, mode, reasons[p], built[p],
+                                              f"cycle deadline of {deadline_s:.0f}s reached — cancelled"),
+                                 label, as_of, built[p]) for p in tasks[t]]
+        return out
+
+    def _units(self, mode: str, payloads: dict, reasons: dict, as_of: int,
+               account: dict) -> list[tuple[list[str], object]]:
+        """(pairs, coroutine → list[DecisionRecord]) per independent unit of work."""
+        if not payloads:
+            return []
+        if mode == "single_agent_global":
+            return [(list(payloads), self._global(payloads, reasons, as_of, account))]
+        if mode == "agent_per_timeframe":
+            return [(list(payloads), self._per_timeframe(payloads, reasons, as_of, account))]
+        if mode == "agent_per_pair_and_timeframe":
+            job = lambda p: self._pair_and_tf(p, payloads[p], reasons[p], as_of, account)  # noqa: E731
         elif mode == "multi_provider_consensus":
-            recs = await asyncio.gather(*(self._consensus(p, payloads[p], reasons[p], as_of, account) for p in payloads))
+            job = lambda p: self._consensus(p, payloads[p], reasons[p], as_of, account)  # noqa: E731
         else:
             review = mode == "agent_per_pair_with_risk_reviewer"
-            recs = await asyncio.gather(*(self._per_pair(p, payloads[p], reasons[p], as_of, account, review=review)
-                                          for p in payloads))
-        out = []
-        for rec in recs:
-            rec.mode = mode if why == "configured" else f"{mode} ({why})"
-            self.store.save(rec)
-            out.append(rec)
-            log.info("%s %s: %s %s conf=%s cost=$%.4f", rec.pair, rec.status,
-                     (rec.recommendation or {}).get("decision"), (rec.recommendation or {}).get("order_type"),
-                     (rec.recommendation or {}).get("confidence"), rec.cost_usd)
-        return out
+            job = lambda p: self._per_pair(p, payloads[p], reasons[p], as_of, account, review=review)  # noqa: E731
+        return [([p], _as_list(job(p))) for p in payloads]
+
+    @staticmethod
+    def _failed(pair: str, mode: str, reason: str, payload: dict, error: str, status: str = "error") -> DecisionRecord:
+        return DecisionRecord(pair, mode, reason, status, payload_hash=payload["meta"]["payload_hash"],
+                              errors=[error[:300]])
+
+    def _finish(self, rec: DecisionRecord, label: str, as_of: int, payload: dict | None) -> DecisionRecord:
+        rec.mode = label
+        if rec.status == "valid" and rec.recommendation:
+            try:
+                self._finalize(rec, as_of, payload)
+            except Exception as exc:  # noqa: BLE001 — never release what could not be normalised
+                log.exception("%s: normalisation failed", rec.pair)
+                _reject(rec, f"normalisation failed: {exc!r}"[:300])
+        self.store.save(rec)
+        log.info("%s %s: %s %s conf=%s cost=$%.4f", rec.pair, rec.status,
+                 (rec.recommendation or {}).get("decision"), (rec.recommendation or {}).get("order_type"),
+                 (rec.recommendation or {}).get("confidence"), rec.cost_usd)
+        return rec
+
+    # ------------------------------------------------------------------ system-owned fields (F6, AI-01)
+    def _finalize(self, rec: DecisionRecord, as_of: int, payload: dict | None) -> None:
+        """pair and timestamp (= the cycle's as-of) are set here; valid_until is kept in (as_of, as_of + horizon];
+        price_reference must be the analysis instrument; next_review never sooner than the review floor and without
+        conditions already met at as_of. The result is validated against the contract again."""
+        r = dict(rec.recommendation)
+        notes: list[str] = []
+        prim = self.reg.primary(rec.pair).key
+        execu = self.reg.with_role(rec.pair, "execution")[0].key
+        trade = r.get("decision") != Decision.NO_TRADE.value
+        ref = r.get("price_reference")
+        if ref != prim:
+            if trade and ref == execu:
+                return _reject(rec, f"price_reference {ref!r} is the execution instrument — levels must be in "
+                                    f"{prim} prices")
+            notes.append(f"price_reference {ref!r} -> {prim}")
+            r["price_reference"] = prim
+        r["pair"], r["timestamp"] = rec.pair, iso(as_of)
+        cap = as_of + self.horizon_ms(rec.pair)
+        vu = parse_date_spec(str(r.get("valid_until")))
+        if vu > cap:
+            r["valid_until"] = iso(cap)
+            notes.append(f"valid_until {iso(vu)} clamped to {iso(cap)}")
+        elif vu <= as_of:
+            if trade:
+                return _reject(rec, f"valid_until {iso(vu)} is not after the cycle time {iso(as_of)}")
+            r["valid_until"] = iso(as_of + self.s.pairs[rec.pair].decision_timeframe.ms)
+        r["next_review"] = self._review_plan(r.get("next_review") or {}, payload, notes)
+        try:
+            v = Recommendation.model_validate(r)
+        except ValidationError as exc:
+            return _reject(rec, f"normalised recommendation invalid: {exc.errors()[:3]}"[:300])
+        rec.recommendation = json.loads(v.model_dump_json())
+        rec.rr_computed = v.rr_computed()
+        if notes:
+            rec.errors.append("normalised: " + "; ".join(notes))
+
+    def _review_plan(self, nr: dict, payload: dict | None, notes: list[str]) -> dict:
+        """Time-based reviews never come sooner than the normal spacing; price/candle conditions (something
+        happened) may, down to ``ai.review_floor_minutes`` (enforced by the trigger policy)."""
+        floor = max(self.s.ai.review_floor_minutes, self.s.ai.min_minutes_between_calls)
+        nr = dict(nr)
+        if int(nr.get("in_minutes") or floor) < floor:
+            nr["in_minutes"] = floor
+            notes.append(f"next_review.in_minutes raised to {floor}")
+        price = _analysis_mid(payload)
+        closes = {tf: t["recent"][-1][4] for tf, t in ((payload or {}).get("timeframes") or {}).items()
+                  if t.get("recent")}
+        keep = []
+        for c in nr.get("conditions") or []:
+            k, v = c.get("kind"), c.get("value")
+            close = closes.get(c.get("timeframe") or "15m")
+            met = ((k == "price_above" and price is not None and price > v)
+                   or (k == "price_below" and price is not None and price < v)
+                   or (k == "candle_close_above" and close is not None and close > v)
+                   or (k == "candle_close_below" and close is not None and close < v))
+            if met:
+                notes.append(f"review condition {k} {v} dropped (already met at the cycle time)")
+                continue
+            if k == "minutes_elapsed" and v < floor:
+                c = {**c, "value": float(floor)}
+                notes.append(f"review condition minutes_elapsed raised to {floor}")
+            keep.append(c)
+        nr["conditions"] = keep
+        return nr
 
     # ------------------------------------------------------------------ helpers
     def _record(self, pair: str, mode: str, reason: str, payload: dict, gen: Generation, provider: LLMProvider,
@@ -143,7 +330,8 @@ class Orchestrator:
                            output_tokens=sum(a.output_tokens for a in gen.attempts))
         value = rec if rec is not None else (gen.value if gen.ok and use_gen_value else None)
         if value is None:
-            r.status = "budget_blocked" if gen.budget_blocked else "refused" if gen.refused else "invalid"
+            r.status = ("budget_blocked" if gen.budget_blocked else "refused" if gen.refused
+                        else "error" if gen.provider_error else "invalid")
             return r
         if value.pair != pair:
             value = value.model_copy(update={"pair": pair})
@@ -273,8 +461,11 @@ class Orchestrator:
 
     async def _consensus(self, pair: str, payload: dict, reason: str, as_of: int, account: dict) -> DecisionRecord:
         names = self.s.ai.consensus_providers or [self.s.ai.active_provider]
-        members = await asyncio.gather(*(self._per_pair(pair, payload, reason, as_of, account, provider_name=n)
-                                          for n in names))
+        got = await asyncio.gather(*(self._per_pair(pair, payload, reason, as_of, account, provider_name=n)
+                                     for n in names), return_exceptions=True)
+        members = [m if isinstance(m, DecisionRecord) else
+                   DecisionRecord(pair, "agent_per_pair", reason, "error", provider=n, errors=[repr(m)[:300]])
+                   for n, m in zip(names, got)]
         valid = [m for m in members if m.status == "valid"]
         base = members[0]
         rec = DecisionRecord(pair, "multi_provider_consensus", reason, "valid", provider="+".join(names),
@@ -315,3 +506,20 @@ def aggregate_consensus(recs: list[dict], n_members: int, pair: str, as_of: int)
 
 def _dump(obj) -> str:
     return json.dumps(obj, separators=(",", ":"), default=str, ensure_ascii=False)
+
+
+async def _as_list(coro) -> list[DecisionRecord]:
+    return [await coro]
+
+
+def _reject(rec: DecisionRecord, why: str) -> None:
+    rec.status, rec.recommendation, rec.rr_computed = "invalid", None, None
+    rec.errors.append(why)
+
+
+def _analysis_mid(payload: dict | None) -> float | None:
+    """Analysis-instrument price at the payload's as-of (mid of bid/ask, else the last 1m close)."""
+    ap = ((payload or {}).get("market") or {}).get("analysis_price") or {}
+    if ap.get("bid") and ap.get("ask"):
+        return (ap["bid"] + ap["ask"]) / 2
+    return ap.get("last_close_1m")

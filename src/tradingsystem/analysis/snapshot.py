@@ -2,7 +2,8 @@
 
 Only closed candles are analysed (as-of semantics); every block carries its data-quality flag from the
 capability registry; numbers are rounded to the instrument's precision; the payload is hashed so each AI
-decision can be linked to exactly what the model saw (spec §8.3).
+decision can be linked to exactly what the model saw (spec §8.3). ``data_problems`` is the gate that keeps AI
+calls off payloads whose data is missing, stale or too short (stall F5, F11).
 """
 from __future__ import annotations
 
@@ -23,13 +24,15 @@ from ..storage.tablespec import spec_for
 from . import context as ctx
 from . import indicators as ind
 from . import orderflow as of
-from .frames import Frame, load_frame
+from .frames import MIN_BARS, Frame, load_frame
 from .price_action import patterns, range_state
 from .registry import capability_matrix
 from .structure import analyze_structure, premium_discount
 from .zones import fair_value_gaps, nearest_active, order_blocks, update_mitigation
 
-PAYLOAD_VERSION = "1"
+PAYLOAD_VERSION = "2"
+HTF_GATE = ("4h", "1d")         # decision context: without enough history here the AI is not asked (F11)
+RECENT_GAP_BARS = 16            # a gap this close to the decision bar blocks the AI call; older ones are warnings
 # timeframe → (bars analysed, recent candles shown)
 TF_PLAN: dict[str, tuple[int, int]] = {"1w": (80, 6), "1d": (200, 10), "4h": (240, 12), "1h": (300, 12),
                                        "15m": (320, 16), "5m": (300, 12), "1m": (240, 10)}
@@ -82,7 +85,7 @@ class SnapshotBuilder:
             "meta": {"pair": pair, "as_of": iso(as_of), "decision_timeframe": dec_tf,
                      "price_reference": primary.key, "execution_instrument": execu.key,
                      "payload_version": PAYLOAD_VERSION, "config_hash": self.s.config_hash},
-            "account": account or {},
+            "account": self._account(account, execu, per_tf.get(pcfg.decision_timeframe.value), d),
             "market": self._market(pair, primary, execu, frames.get("1m"), as_of, exec_cal, d),
             "capabilities": {k: {"quality": v.quality, "reason": v.reason} for k, v in caps.items()},
             "levels": self._levels(frames.get("1h"), as_of, pcfg.asset_class, d),
@@ -94,8 +97,9 @@ class SnapshotBuilder:
             "derivatives": self._derivatives(pair, caps, as_of, d),
             "history": history or [],
         }
-        payload["meta"]["data_warnings"] = [f"{t}: {f.quality.get('status')}" for t, f in frames.items()
-                                            if f.quality.get("status") not in ("ok",)]
+        payload["meta"]["data_warnings"] = [
+            f"{t}: {f.quality.get('status')}" + (f" ({len(f)} bars)" if f.quality.get("short_history") else "")
+            for t, f in frames.items() if f.quality.get("status") != "ok"]
         payload["meta"]["payload_hash"] = payload_hash(payload)
         return payload
 
@@ -167,6 +171,25 @@ class SnapshotBuilder:
         return out
 
     # ------------------------------------------------------------------ blocks
+    def _account(self, account: dict | None, execu: Instrument, dec: dict | None, d: int) -> dict:
+        """The account state passed in, plus what the minimum executable position risks (rule 8): the execution
+        instrument's minimum lot at the minimum stop distance (``risk.sl_atr_min_mult`` × decision-TF ATR)."""
+        if not account:
+            return {}
+        out = dict(account)
+        eq, spec = account.get("equity"), execu.contract
+        atr = ((dec or {}).get("indicators") or {}).get("atr14")
+        if eq and spec and atr and "USD" in execu.symbol.upper():
+            per_unit = spec["volume_min"] * spec["contract_size"]          # USD per 1.0 price move at the min lot
+            sl = self.s.risk.sl_atr_min_mult * atr
+            out["min_position_risk"] = {
+                "instrument": execu.key, "volume_min": spec["volume_min"], "contract_size": spec["contract_size"],
+                "usd_per_price_unit_at_min_lot": round(per_unit, 4), "min_stop_distance": _r(sl, d),
+                "risk_pct_at_min_lot_and_min_stop": round(per_unit * sl / eq * 100, 2),
+                "max_stop_distance_at_min_lot_within_max_risk":
+                    _r(eq * self.s.risk.max_risk_per_trade_pct / 100 / per_unit, d)}
+        return out
+
     def quote_at(self, inst: Instrument, as_of: int) -> dict | None:
         """Last stored bid/ask at or before ``as_of`` (causal; works for live and replay)."""
         rd = self.reader(inst)
@@ -320,6 +343,39 @@ def _latest_quotes(app_db: Path) -> dict[str, dict]:
     finally:
         con.close()
     return {r[0]: {"ts": r[1], "bid": r[2], "ask": r[3]} for r in rows}
+
+
+def data_problems(payload: dict, as_of: int, max_staleness_s: float) -> list[str]:
+    """Why an AI call on this payload would be wasted (empty = go): the decision timeframe's last bar missing,
+    stale, too short or gapped near the decision bar; a stale live analysis price while the market is open; or
+    too little 4h/1d history (stall F5, F11)."""
+    out: list[str] = []
+    tfs = payload.get("timeframes") or {}
+    dec = payload["meta"]["decision_timeframe"]
+    t = tfs.get(dec)
+    q = (t or {}).get("quality") or {}
+    st = q.get("status")
+    if t is None or st in ("empty", "stale", "missing_last_bar", "short_history"):
+        out.append(f"{dec} decision candles: {st or 'missing'}" + (f" ({t.get('bars')} bars)" if t else ""))
+    tf_ms = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000}.get(dec, 900_000)
+    recent = [g for g in q.get("gaps") or [] if g[0] >= as_of - RECENT_GAP_BARS * tf_ms]
+    if recent:
+        out.append(f"{dec} decision candles: {sum(g[1] for g in recent)} missing bar(s) in the last "
+                   f"{RECENT_GAP_BARS} bars")
+    for h in HTF_GATE:
+        x = tfs.get(h)
+        if x is not None and (x.get("bars") or 0) < MIN_BARS:
+            out.append(f"{h}: only {x.get('bars') or 0} bars of history (< {MIN_BARS})")
+    mk = payload.get("market") or {}
+    if mk.get("execution_market_open", True):
+        age = (mk.get("analysis_price") or {}).get("age_s")
+        if age is None:
+            age = (((tfs.get("1m") or {}).get("quality") or {}).get("last_bar_end_lag_s"))
+        if age is None:
+            out.append("no recent analysis price")
+        elif age > max_staleness_s:
+            out.append(f"analysis price is {age:.0f}s old (> {max_staleness_s:.0f}s)")
+    return out
 
 
 def payload_hash(payload: dict) -> str:

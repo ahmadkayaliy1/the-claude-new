@@ -24,7 +24,7 @@ def _load(tmp_path, data=None, **env):
 
 def test_default_config_is_valid(tmp_path):
     s = _load(tmp_path)
-    assert s.ai.active_provider == "gemini"
+    assert s.ai.active_provider == "claude_code" and s.ai.fallback_provider == "gemini"   # D-030
     assert s.execution.mode == "paper"
     assert len(s.config_hash) == 16
 

@@ -1,8 +1,10 @@
 """Validated generation with a bounded repair loop (P8.3).
 
 call → parse JSON → validate against the pydantic contract (bounds + semantic risk rules) → on failure send
-the exact validation errors back and ask for a corrected object (≤ ``max_repairs``). Provider errors that are
-retryable back off; refusals and budget refusals end the attempt. Every call is recorded in ``ai_usage``.
+the exact validation errors back and ask for a corrected object (≤ ``max_repairs``). Transient provider errors
+back off briefly and retry; rate limits, refusals, budget refusals, non-retryable provider errors and any
+unexpected exception end the attempt (the next trigger tries again — no 20–60 s sleeps inside a cycle). Every
+call is recorded in ``ai_usage``.
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ class Generation(Generic[T]):
     errors: list[str] = field(default_factory=list)
     refused: bool = False
     budget_blocked: bool = False
+    provider_error: str | None = None     # the call failed at the provider (→ status 'error', not 'invalid')
 
     @property
     def cost_usd(self) -> float:
@@ -75,12 +78,22 @@ async def generate_validated(provider: LLMProvider, model_cls: type[T], *, syste
             usage.record(None, provider=provider.name, model=provider.model, purpose=purpose, pair=pair, ok=False,
                          error=str(exc)[:300])
             gen.errors.append(str(exc))
-            if not exc.retryable or retries >= max_retries:
+            gen.provider_error = str(exc)[:300]
+            if not exc.retryable or exc.rate_limited or retries >= max_retries:
                 return gen
             retries += 1
-            await asyncio.sleep(min(60, (20 if exc.rate_limited else 2) * 2 ** (retries - 1)))
+            await asyncio.sleep(2 * 2 ** (retries - 1))
             continue
+        except Exception as exc:  # noqa: BLE001 — an SDK/transport surprise must not abort the whole cycle (F4)
+            log.exception("%s: unexpected provider failure", provider.name)
+            msg = f"{provider.name}: {type(exc).__name__}: {exc}"[:300]
+            usage.record(None, provider=provider.name, model=provider.model, purpose=purpose, pair=pair, ok=False,
+                         error=msg)
+            gen.errors.append(msg)
+            gen.provider_error = msg
+            return gen
         gen.attempts.append(res)
+        gen.provider_error = None
         try:
             if res.data is None:
                 raise ValueError("output is not valid JSON")

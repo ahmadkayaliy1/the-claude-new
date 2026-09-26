@@ -15,7 +15,6 @@ from string import Template
 
 DIR = Path(__file__).parent
 _HEADER = re.compile(r"^<!-- prompt: .*? -->\s*", re.M)
-_LEFTOVER = re.compile(r"\$[A-Za-z_]\w*")
 
 ROLE_FILES = {
     "agent_per_pair": ("agent_per_pair/system.md", "agent_per_pair/instructions.md"),
@@ -35,11 +34,15 @@ def _read(rel: str) -> str:
 
 
 def _fill(text: str, values: dict[str, object], where: str) -> str:
-    out = Template(text).safe_substitute({k: str(v) for k, v in values.items()})
-    missing = sorted(set(_LEFTOVER.findall(out)))
+    """Placeholders are checked on the *template*: model-authored values (history, proposals, assessments)
+    may contain ``$PDH`` or ``$BTC`` and are inserted verbatim, never re-parsed."""
+    t = Template(text)
+    if not t.is_valid():
+        raise PromptError(f"{where}: invalid '$' in template (write $$ for a literal dollar sign)")
+    missing = sorted(set(t.get_identifiers()) - set(values))
     if missing:
         raise PromptError(f"{where}: unfilled placeholders {missing}")
-    return out
+    return t.substitute({k: str(v) for k, v in values.items()})
 
 
 @dataclass(frozen=True)

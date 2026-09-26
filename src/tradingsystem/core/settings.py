@@ -43,10 +43,11 @@ AgentMode = Literal[
 TriggerPolicy = Literal["every_close", "on_setup_event", "hybrid"]
 ExecutionMode = Literal["paper", "demo", "live"]
 ExecutionTrigger = Literal["manual", "auto"]
-ProviderKind = Literal["gemini", "anthropic", "openai", "openai_compat"]
+ProviderKind = Literal["gemini", "anthropic", "openai", "openai_compat", "claude_code"]
 
 _ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "ACTIVE_AI_PROVIDER": ("ai", "active_provider"),
+    "AI_FALLBACK_PROVIDER": ("ai", "fallback_provider"),
     "AGENT_MODE": ("ai", "agent_mode"),
     "TRIGGER_POLICY": ("ai", "trigger_policy"),
     "EXECUTION_MODE": ("execution", "mode"),
@@ -242,6 +243,9 @@ class AIProviderCfg(_Model):
     timeout_s: float = 120.0
     max_output_tokens: int = 4096
     free_tier: bool = False
+    cli_path: str | None = None            # claude_code: the Claude Code executable (default: found on PATH)
+    temperature: float | None = None      # sampling temperature; None = the model default (Gemini 3.x wants that)
+    quota_reset_tz: str | None = None      # daily-quota reset time zone (Gemini: America/Los_Angeles); None = UTC
 
 
 class AIBudgetCfg(_Model):
@@ -254,12 +258,16 @@ class AIBudgetCfg(_Model):
 
 class AICfg(_Model):
     active_provider: str
+    fallback_provider: str | None = None    # used while the active provider is unavailable (D-030)
     agent_mode: AgentMode = "agent_per_pair"
     trigger_policy: TriggerPolicy = "hybrid"
     output_language: str = "en"
     min_minutes_between_calls: int = 15     # per pair (protects free-tier quotas)
     max_idle_minutes: int = 120             # hybrid policy: review a pair at least this often (market open)
     max_parallel_calls: int = 2
+    review_floor_minutes: int = 5           # next_review price/candle triggers: not sooner after the last call
+    max_backoff_minutes: int = 120          # per-pair back-off cap after failed cycles (spacing doubles per failure)
+    cycle_deadline_s: float = 600.0         # an AI cycle is cut off after this; unfinished pairs stored as 'error'
     consensus_providers: list[str] = Field(default_factory=list)
     providers: dict[str, AIProviderCfg]
     budget: AIBudgetCfg = AIBudgetCfg()
@@ -274,7 +282,15 @@ class AICfg(_Model):
         missing = [p for p in self.consensus_providers if p not in self.providers]
         if missing:
             raise ValueError(f"ai.consensus_providers not configured: {missing}")
+        if self.fallback_provider is not None and self.fallback_provider not in self.providers:
+            raise ValueError(f"ai.fallback_provider {self.fallback_provider!r} not configured")
         return self
+
+    @property
+    def fallback(self) -> str | None:
+        """The fallback provider, or None when it is unset or the same as the active one (e.g. after the
+        one-line ``ACTIVE_AI_PROVIDER`` switch in ``.env`` — that must never stop the services from starting)."""
+        return self.fallback_provider if self.fallback_provider != self.active_provider else None
 
 
 class ApiCfg(_Model):

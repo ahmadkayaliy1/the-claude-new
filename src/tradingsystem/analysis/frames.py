@@ -1,5 +1,5 @@
 """As-of candle frames (P6.1): closed candles only, plus the forming bar flagged separately; quality flags for
-stale or gapped windows so the engine never analyses silently broken data (spec §9)."""
+stale, gapped, short or tail-missing windows so the engine never analyses silently broken data (spec §9)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -9,11 +9,13 @@ import numpy as np
 from ..core.instruments import Instrument
 from ..core.sessions import SessionCalendar
 from ..core.timeframes import Timeframe
+from ..core.timeutil import MS_PER_HOUR
 from ..storage.gaps import candle_gaps
 from ..storage.reader import InstrumentReader
 from ..storage.tablespec import FORMING, spec_for
 
 F = np.ndarray
+MIN_BARS = 30                       # below this a timeframe has no trend/indicator analysis (snapshot._analyze_tf)
 
 
 @dataclass
@@ -58,7 +60,7 @@ def load_frame(reader: InstrumentReader, inst: Instrument, tf: Timeframe, bars: 
         taker_buy=None if mt5 else cols["taker_buy_base"][sel].astype(float), as_of=as_of,
     )
     fr.forming = _forming(reader, tf)
-    fr.quality = _quality(fr, tf, as_of, calendar, mt5)
+    fr.quality = _quality(fr, tf, as_of, calendar, mt5, bars)
     return fr
 
 
@@ -73,8 +75,11 @@ def _forming(reader: InstrumentReader, tf: Timeframe) -> dict | None:
     return None
 
 
-def _quality(fr: Frame, tf: Timeframe, as_of: int, cal: SessionCalendar | None, mt5: bool) -> dict:
+def _quality(fr: Frame, tf: Timeframe, as_of: int, cal: SessionCalendar | None, mt5: bool, bars: int = 0) -> dict:
+    """status: empty > stale > missing_last_bar > short_history > gaps > ok (the first that applies)."""
     q: dict = {"bars": len(fr)}
+    if bars:
+        q["coverage"] = round(len(fr) / bars, 2)
     if not len(fr):
         q["status"] = "empty"
         return q
@@ -84,8 +89,14 @@ def _quality(fr: Frame, tf: Timeframe, as_of: int, cal: SessionCalendar | None, 
     q["last_bar_end_lag_s"] = round(lag / 1000, 1)
     stale = market_open and lag > max(2 * tf.ms, 180_000)
     q["stale"] = bool(stale)
+    # the bar that closed last is not stored yet (intraday only: MT5 H4/D1/W1 follow the broker's day, not UTC)
+    expected = tf.floor(as_of)
+    missing = tf.ms <= MS_PER_HOUR and last_end < expected and (cal.is_open(expected - 1) if cal else True)
+    q["missing_last_bar"] = bool(missing)
+    q["short_history"] = len(fr) < min(MIN_BARS, bars or MIN_BARS)
     if not mt5 and tf.ms <= 3_600_000 and len(fr) > 1:
         g = candle_gaps(fr.open_time, tf, int(fr.open_time[0]), int(fr.open_time[-1]), cal)
-        q["gaps"] = [(int(x.start), x.count) for x in g[:5]]
-    q["status"] = "stale" if stale else ("gaps" if q.get("gaps") else "ok")
+        q["gaps"] = [(int(x.start), x.count) for x in g[-5:]]           # the most recent gaps matter most
+    q["status"] = ("stale" if stale else "missing_last_bar" if missing else "short_history" if q["short_history"]
+                   else "gaps" if q.get("gaps") else "ok")
     return q

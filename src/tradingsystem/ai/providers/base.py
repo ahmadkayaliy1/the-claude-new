@@ -8,14 +8,20 @@ until it passes that validation.
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import json
+import os
 import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
-from ...core.settings import AIProviderCfg
+from dotenv import dotenv_values
+
+from ...core.settings import DEFAULT_ENV, AIProviderCfg
+from ...core.timeutil import MS_PER_DAY, MS_PER_HOUR, iso, now_ms
 
 SchemaFlavor = Literal["anthropic", "gemini", "openai_strict", "plain"]
 _DROP_ALWAYS = {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength",
@@ -48,6 +54,45 @@ class ProviderError(RuntimeError):
 class Refusal(ProviderError):
     def __init__(self, message: str) -> None:
         super().__init__(message, retryable=False)
+
+
+ENV_FILE = DEFAULT_ENV
+DOTENV_TTL_S = 60.0
+_dotenv: tuple[float, dict[str, str]] = (float("-inf"), {})
+
+
+def secret(name: str | None) -> str | None:
+    """A secret from the process environment, else from ``.env`` (re-read at most once a minute), so a key added
+    to ``.env`` is picked up by running services without a restart (OPS-07). Values are never logged."""
+    global _dotenv
+    if not name:
+        return None
+    v = os.environ.get(name, "").strip()
+    if v:
+        return v
+    t, vals = _dotenv
+    if time.monotonic() - t > DOTENV_TTL_S:
+        try:
+            vals = {k: (x or "") for k, x in dotenv_values(ENV_FILE).items()} if ENV_FILE.exists() else {}
+        except (OSError, ValueError):
+            vals = {}
+        _dotenv = (time.monotonic(), vals)
+    return vals.get(name, "").strip() or None
+
+
+def quota_day_start(ms: int, tz: str | None = None) -> int:
+    """Start of the provider's quota day containing ``ms``: UTC midnight, or midnight in ``tz`` (Gemini resets
+    its free-tier daily quota at midnight Pacific time)."""
+    if not tz:
+        return ms // MS_PER_DAY * MS_PER_DAY
+    z = ZoneInfo(tz)
+    d = dt.datetime.fromtimestamp(ms / 1000, z)
+    return int(dt.datetime(d.year, d.month, d.day, tzinfo=z).timestamp() * 1000)
+
+
+def quota_day_end(ms: int, tz: str | None = None) -> int:
+    """When the quota day containing ``ms`` resets (DST-safe: days of 23–25 h)."""
+    return quota_day_start(quota_day_start(ms, tz) + MS_PER_DAY + 3 * MS_PER_HOUR, tz)
 
 
 def transport_schema(schema: dict, flavor: SchemaFlavor) -> dict:
@@ -94,10 +139,23 @@ def extract_json(text: str) -> Any:
 class LLMProvider(ABC):
     def __init__(self, name: str, cfg: AIProviderCfg, model: str, api_key: str | None) -> None:
         self.name, self.cfg, self.model, self.api_key = name, cfg, model, api_key
+        self.cooldown_until_ms = 0
+        self.cooldown_reason = ""
 
     @abstractmethod
     async def _call(self, system: str, user: str, schema: dict | None, schema_name: str,
                     max_output_tokens: int) -> LLMResult: ...
+
+    def cool_down(self, until_ms: int, reason: str) -> None:
+        """Take the provider out of rotation until ``until_ms`` (auth/model errors, quota or usage limits): the
+        orchestrator then routes to ``ai.fallback_provider`` and the engine reports the reason (F12)."""
+        self.cooldown_until_ms, self.cooldown_reason = until_ms, reason
+
+    def unavailable_reason(self) -> str | None:
+        """Why the provider cannot take calls right now (e.g. not signed in, usage limit), or None."""
+        if now_ms() < self.cooldown_until_ms:
+            return f"{self.cooldown_reason} — retry after {iso(self.cooldown_until_ms)}"
+        return None
 
     async def generate(self, *, system: str, user: str, schema: dict | None = None, schema_name: str = "output",
                        max_output_tokens: int | None = None) -> LLMResult:
