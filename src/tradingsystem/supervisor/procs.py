@@ -142,7 +142,8 @@ def running_supervisors(older_s: float | None = None) -> dict[int, str | None]:
     except psutil.Error:
         mine, born = {os.getpid()}, None
     out: dict[int, str | None] = {}
-    for p in psutil.process_iter(["name"]):
+    parent: dict[int, int] = {}
+    for p in psutil.process_iter(["name", "ppid"]):
         if p.pid in mine or not (p.info.get("name") or "").lower().startswith("python"):
             continue
         try:
@@ -152,9 +153,12 @@ def running_supervisors(older_s: float | None = None) -> dict[int, str | None]:
             if older_s is not None and born is not None and p.create_time() > born - older_s:
                 continue
             out[p.pid] = _proc_instance(p, cmd)
+            parent[p.pid] = p.info.get("ppid") or 0
         except (psutil.Error, OSError):
             continue
-    return dict(sorted(out.items()))
+    # a venv's python.exe is a launcher that runs the real interpreter as its child with the same command line:
+    # one supervisor, two processes — keep the outermost (killing its tree ends both)
+    return {pid: inst for pid, inst in sorted(out.items()) if parent.get(pid) not in out}
 
 
 def conflicts(mine: str | None, other: str | None) -> bool:

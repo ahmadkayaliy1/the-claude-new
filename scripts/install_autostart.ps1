@@ -16,6 +16,12 @@
     TradingSystem       90 s after logon and then every 5 minutes: `run all --detach --auto`
                         = start the supervisor (hidden) if it is not running, replace it if its heartbeat is
                         dead for 5 min; do nothing after scripts\stop.bat until scripts\start.bat.
+      or, one system per pair (-Pair / -AllPairs, D-042):
+    TradingSystem-<PAIR> the same keep-alive for that pair's system (`... --instance <PAIR>`), paused by
+                        scripts\stop.bat <PAIR>. The pairs' logon delays are 30 s apart (not all at once).
+
+    The all-pairs task and the per-pair tasks exclude each other: registering one kind removes the other
+    (the two systems may not run together).
 
     Both run on battery too, at normal priority, and start as soon as possible after a missed run (PC asleep).
     Re-running this script replaces both tasks. Remove them with scripts\uninstall_autostart.bat.
@@ -26,6 +32,12 @@
     MT5 terminal to start at logon (default: config mt5.profiles[<data_profile>].terminal_path).
 .PARAMETER NoMT5Task
     Do not create TradingSystem-MT5 (e.g. you start MT5 from the Startup folder yourself).
+.PARAMETER Pair
+    One system per pair: register TradingSystem-<PAIR> for each pair given (e.g. -Pair BTCUSDT,ETHUSDT); other
+    per-pair tasks are kept, the all-pairs task TradingSystem is removed.
+.PARAMETER AllPairs
+    One system per pair for every pair in config "instances:" (per-pair tasks of pairs no longer configured are
+    removed, as is TradingSystem).
 .PARAMETER DryRun
     Show what would be registered, change nothing.
 #>
@@ -35,6 +47,8 @@ param(
     [int]$KeepAliveMinutes = 5,
     [int]$LogonDelaySeconds = 90,
     [switch]$NoMT5Task,
+    [string[]]$Pair = @(),
+    [switch]$AllPairs,
     [switch]$DryRun
 )
 $ErrorActionPreference = "Stop"
@@ -57,6 +71,29 @@ if (-not $NoMT5Task) {
     if (-not (Test-Path $TerminalPath)) { throw "MT5 terminal not found: $TerminalPath (pass -TerminalPath or -NoMT5Task)" }
 }
 
+# ---- which keep-alive tasks: the all-pairs system, or one per pair (D-042)
+$configured = @()
+Push-Location $root
+try { $configured = @(& $py -m tradingsystem config --instances | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ }) }
+finally { Pop-Location }
+if ($LASTEXITCODE -ne 0) { throw "could not read the configured pairs (config 'instances:')" }
+$Pair = @($Pair | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ })
+if ($AllPairs) { $Pair = $configured }
+foreach ($p in $Pair) {
+    if ($configured -notcontains $p) { throw "pair $p is not in config 'instances:' ($($configured -join ', '))" }
+}
+$perPair = $Pair.Count -gt 0
+
+function Get-TsTasks {
+    # schtasks, not Get-ScheduledTask: PowerShell 5.1 cannot read back a trigger that repeats indefinitely
+    $names = @()
+    foreach ($line in (schtasks /Query /FO CSV /NH 2>$null)) {
+        $n = ($line -split '","')[0].Trim('"').TrimStart('\')
+        if ($n -eq "TradingSystem" -or ($n -like "TradingSystem-*" -and $n -ne "TradingSystem-MT5")) { $names += $n }
+    }
+    return $names | Sort-Object -Unique
+}
+
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 
@@ -68,21 +105,35 @@ $mt5Action = if ($TerminalPath) {
     New-ScheduledTaskAction -Execute $TerminalPath -WorkingDirectory (Split-Path $TerminalPath -Parent)
 }
 
-# ---- TradingSystem: keep-alive for the supervisor (returns in seconds; the supervisor runs detached)
-$logon = New-ScheduledTaskTrigger -AtLogOn -User $user
-$logon.Delay = "PT$($LogonDelaySeconds)S"
-$every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-    -RepetitionInterval (New-TimeSpan -Minutes $KeepAliveMinutes)          # no duration = indefinitely
+# ---- TradingSystem[-<PAIR>]: keep-alive for a supervisor (returns in seconds; the supervisor runs detached)
 $tsSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -Priority 5
-$tsAction = New-ScheduledTaskAction -Execute $pyw -Argument "-m tradingsystem run all --detach --auto" `
-    -WorkingDirectory $root
+$keepAlive = @()          # (task name, arguments, logon delay s, first repetition minute)
+if ($perPair) {
+    $i = 0
+    foreach ($p in $Pair) {
+        $keepAlive += ,@("TradingSystem-$p", "-m tradingsystem run all --detach --auto --instance $p",
+                         ($LogonDelaySeconds + 30 * $i), (1 + $i))
+        $i++
+    }
+} else {
+    $keepAlive += ,@("TradingSystem", "-m tradingsystem run all --detach --auto", $LogonDelaySeconds, 1)
+}
+$existing = @(Get-TsTasks)
+$remove = if ($perPair) {
+    @($existing | Where-Object { $_ -eq "TradingSystem" -or ($AllPairs -and $Pair -notcontains $_.Substring(14)) })
+} else {
+    @($existing | Where-Object { $_ -ne "TradingSystem" })
+}
 
 Write-Host "project : $root"
 Write-Host "account : $user (interactive, not elevated)"
 if (-not $NoMT5Task) { Write-Host "task    : TradingSystem-MT5 -> $TerminalPath (at logon, no time limit)" }
-Write-Host "task    : TradingSystem     -> $pyw -m tradingsystem run all --detach --auto"
-Write-Host "          (at logon + $LogonDelaySeconds s, then every $KeepAliveMinutes min)"
+foreach ($k in $keepAlive) {
+    Write-Host ("task    : {0} -> {1} {2}" -f $k[0], $pyw, $k[1])
+    Write-Host ("          (at logon + {0} s, then every {1} min)" -f $k[2], $KeepAliveMinutes)
+}
+foreach ($n in $remove) { Write-Host "remove  : $n (the other kind of system - they may not run together)" }
 if ($DryRun) { Write-Host "DryRun: nothing registered."; exit 0 }
 
 if (-not $NoMT5Task) {
@@ -90,16 +141,33 @@ if (-not $NoMT5Task) {
         -Principal $principal -Settings $mt5Settings -Force `
         -Description "Trading system: MetaTrader 5 terminal at logon, outside every trading-system process (docs\ops_windows.md)" | Out-Null
 }
-Register-ScheduledTask -TaskName "TradingSystem" -Action $tsAction -Trigger @($logon, $every) `
-    -Principal $principal -Settings $tsSettings -Force `
-    -Description "Trading system: start/keep the supervisor running; paused by scripts\stop.bat (docs\ops_windows.md)" | Out-Null
+foreach ($n in $remove) {
+    schtasks /Delete /TN $n /F 2>$null | Out-Null
+    Write-Host "removed   : $n"
+}
+foreach ($k in $keepAlive) {
+    $logon = New-ScheduledTaskTrigger -AtLogOn -User $user
+    $logon.Delay = "PT$($k[2])S"
+    $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($k[3]) `
+        -RepetitionInterval (New-TimeSpan -Minutes $KeepAliveMinutes)          # no duration = indefinitely
+    $action = New-ScheduledTaskAction -Execute $pyw -Argument $k[1] -WorkingDirectory $root
+    $stop = if ($perPair) { "scripts\stop.bat $($k[0].Substring(14))" } else { "scripts\stop.bat" }
+    Register-ScheduledTask -TaskName $k[0] -Action $action -Trigger @($logon, $every) `
+        -Principal $principal -Settings $tsSettings -Force `
+        -Description "Trading system: start/keep the supervisor running; paused by $stop (docs\ops_windows.md)" | Out-Null
+}
 
 # schtasks, not Get-ScheduledTask: PowerShell 5.1 cannot read back a trigger that repeats indefinitely
 # (0x80041318 "incorrectly formatted or out of range") although the task is valid and runs
-foreach ($name in @("TradingSystem-MT5", "TradingSystem")) {
+foreach ($name in @("TradingSystem-MT5") + @($keepAlive | ForEach-Object { $_[0] })) {
     if ($NoMT5Task -and $name -eq "TradingSystem-MT5") { continue }
     $q = schtasks /Query /TN $name /FO LIST 2>$null | Select-String "Status|Next Run"
     Write-Host ("registered: {0}  {1}" -f $name, (($q | ForEach-Object { $_.Line.Trim() }) -join " | "))
 }
-Write-Host "Done. The keep-alive starts the system within $KeepAliveMinutes min unless you stopped it with stop.bat"
-Write-Host "(then run scripts\start.bat). Check: scripts\status.bat  |  remove: scripts\uninstall_autostart.bat"
+if ($perPair) {
+    Write-Host "Done. The keep-alive starts each pair's system within $KeepAliveMinutes min unless you stopped it"
+    Write-Host "(scripts\stop.bat <PAIR>; resume: scripts\start.bat <PAIR>). Check: scripts\status_all.bat"
+} else {
+    Write-Host "Done. The keep-alive starts the system within $KeepAliveMinutes min unless you stopped it with stop.bat"
+    Write-Host "(then run scripts\start.bat). Check: scripts\status.bat  |  remove: scripts\uninstall_autostart.bat"
+}

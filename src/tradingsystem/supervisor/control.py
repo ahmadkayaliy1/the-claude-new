@@ -111,7 +111,8 @@ def conflict_message(instance: str | None, found: dict[int, str | None]) -> str:
         return (f"per-pair systems are running ({procs.describe(found)}) - the all-pairs system cannot run next to "
                 "them; stop them first (scripts\\stop_all.bat)")
     if instance is not None and any(v is None for v in found.values()):
-        return (f"the all-pairs system is running ({procs.describe(found)}) - stop it first (scripts\\stop.bat), "
+        pids = ", ".join(str(p) for p, v in found.items() if v is None)
+        return (f"the all-pairs system is running (pid {pids}) - stop it first (scripts\\stop.bat), "
                 "then start one system per pair")
     return (f"a supervisor without the single-instance lock (older build, {procs.describe(found)}) is running - "
             f"stop it first with {script('stop', instance)}")

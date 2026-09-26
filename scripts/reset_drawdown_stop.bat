@@ -1,8 +1,7 @@
 @echo off
-rem Stop a trading system gracefully (services flush and exit; up to ~90 s, then forced).
-rem   stop.bat             the all-pairs system        stop.bat BTCUSDT    the system of that pair
-rem Also pauses its autostart until start.bat is run. stop_all.bat stops every system. Add /nopause from a script.
-rem Details: docs\ops_windows.md
+rem Re-arm trading after the account-wide drawdown stop tripped (risk.account_drawdown_stop_pct, D-042): every
+rem system refuses new trades once the account's equity fell that far below its peak, until you run this.
+rem Shows the recorded peaks first; the peak then restarts at the current equity. Also run it after a withdrawal.
 setlocal
 cd /d "%~dp0.."
 set "PY=.venv\Scripts\python.exe"
@@ -21,7 +20,7 @@ if not exist "%PY%" (
     set "RC=1"
     goto end
 )
-"%PY%" -m tradingsystem run --stop %INST%
+"%PY%" -m tradingsystem.execution.drawdown --reset
 set "RC=%ERRORLEVEL%"
 :end
 if not defined NOPAUSE pause

@@ -529,7 +529,7 @@ def load_settings(
     if extra_env:
         env.update(extra_env)
     raw = _apply_env_overrides(raw, env)
-    raw = _apply_instance(raw, (env.get(INSTANCE_ENV) or "").strip())
+    raw = _apply_instance(raw, (env.get(INSTANCE_ENV) or "").strip().upper())
     digest = hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()[:16]
     raw["config_hash"] = digest
     return Settings.model_validate(raw)

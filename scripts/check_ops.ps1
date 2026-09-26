@@ -84,13 +84,20 @@ $w32 | Select-Object -First 12 | ForEach-Object { Write-Host "     $_" }
 
 Write-Host ""
 Write-Host "== Autostart (Task Scheduler) - docs\ops_windows.md section 6"
-foreach ($name in "TradingSystem-MT5", "TradingSystem") {
-    $t = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-    if ($t) {
-        $i = $t | Get-ScheduledTaskInfo
-        Write-Host ("info {0,-18} {1,-8} last run {2}  result 0x{3:X}  next {4}" -f $name, $t.State, $i.LastRunTime,
-                    $i.LastTaskResult, $i.NextRunTime)
-    } else { Write-Host ("info {0,-18} not registered (scripts\install_autostart.bat)" -f $name) }
+# schtasks, not Get-ScheduledTask: PowerShell 5.1 cannot read back a trigger that repeats indefinitely (0x80041318)
+$tsNames = @()
+foreach ($line in (schtasks /Query /FO CSV /NH 2>$null)) {
+    $n = ($line -split '","')[0].Trim('"').TrimStart('\')
+    if ($n -eq "TradingSystem" -or ($n -like "TradingSystem-*" -and $n -ne "TradingSystem-MT5")) { $tsNames += $n }
+}
+if (-not $tsNames) { $tsNames = @("TradingSystem") }      # neither the all-pairs task nor a per-pair one (D-042)
+foreach ($name in @("TradingSystem-MT5") + @($tsNames | Sort-Object -Unique)) {
+    $q = schtasks /Query /TN $name /FO LIST /V 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $field = { param($k) (($q | Select-String "^\s*$k\s*:" | Select-Object -First 1).Line -replace "^\s*$k\s*:\s*", "").Trim() }
+        Write-Host ("info {0,-22} {1,-8} last run {2}  result {3}  next {4}" -f $name, (& $field "Status"),
+                    (& $field "Last Run Time"), (& $field "Last Result"), (& $field "Next Run Time"))
+    } else { Write-Host ("info {0,-22} not registered (scripts\install_autostart.bat)" -f $name) }
 }
 
 Write-Host ""
@@ -98,7 +105,12 @@ Write-Host "== Trading system"
 $py = Join-Path $root ".venv\Scripts\python.exe"
 if (Test-Path $py) {
     Push-Location $root
-    try { & $py -m tradingsystem run --status } finally { Pop-Location }
+    try {
+        $pairs = @(& $py -m tradingsystem config --instances | Where-Object { $_.Trim() })
+        $own = @($pairs | Where-Object { Test-Path (Join-Path $root "data\instances\$_\app.db") })
+        if ($own) { foreach ($p in $own) { & $py -m tradingsystem run --status --instance $p; Write-Host "" } }
+        else { & $py -m tradingsystem run --status }
+    } finally { Pop-Location }
 }
 
 Write-Host ""

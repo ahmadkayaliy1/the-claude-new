@@ -58,6 +58,9 @@ def _cmd_config(args: argparse.Namespace) -> int:
     from .core.settings import load_settings
 
     settings = load_settings(Path(args.config) if args.config else None)
+    if args.instances:                      # scripts/*_all.bat: one configured pair per line, nothing else
+        print("\n".join(settings.instances))
+        return 0
     print(f"config OK  hash={settings.config_hash}  profile={settings.profile}")
     print(f"AI: provider={settings.ai.active_provider} model={settings.provider_model(settings.ai.active_provider)} "
           f"mode={settings.ai.agent_mode} trigger={settings.ai.trigger_policy}")
@@ -95,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cf = sub.add_parser("config", help="validate and summarise the configuration")
     cf.add_argument("--config", help="path to an alternative config.yaml")
+    cf.add_argument("--instances", action="store_true", help="list the pairs configured as independent systems")
     cf.set_defaults(func=_cmd_config)
 
     st = sub.add_parser("status", help="validate PROJECT_STATUS.md structure")
