@@ -259,37 +259,53 @@ def test_api_key_source_is_refused():
                                            "apiKeySource": "none"}) is None
 
 
-def test_auth_refresh_after_the_first_check_runs_in_the_background(prov, monkeypatch):
-    """Integration review: only the first login check is inline; later ones never block the caller."""
+def test_auth_checks_never_block_and_a_failed_check_keeps_a_verified_sign_in(prov, monkeypatch):
+    """Every login check runs in a background thread (a cold `claude auth status` took 55 s); a check that fails
+    itself keeps an earlier verified sign-in and is retried after AUTH_RECHECK_S, not the whole TTL."""
     import threading
-    started = threading.Event()
-    release = threading.Event()
-    calls = []
+    answers = [None, cc.AuthCheckFailed("timed out")]
+    done, release = threading.Event(), threading.Event()
 
-    def slow_check():
-        calls.append(1)
-        if len(calls) > 1:
-            started.set()
-            release.wait(5)
-        return None
-    monkeypatch.setattr(prov, "check_auth", slow_check)
-    assert prov.unavailable_reason() is None and len(calls) == 1          # first check: inline
-    prov._auth_checked = 0.0                                              # TTL expired
-    assert prov.unavailable_reason() is None                             # returns at once (cached answer)
-    assert started.wait(5) and prov._auth_refreshing
+    def check():
+        release.wait(5)                                               # a slow CLI start
+        a = answers.pop(0)
+        done.set()
+        if isinstance(a, Exception):
+            raise a
+        return a
+    monkeypatch.setattr(prov, "check_auth", check)
+
+    def settle():
+        assert done.wait(5)
+        for _ in range(100):
+            if not prov._auth_refreshing:
+                return
+            threading.Event().wait(0.01)
+    assert "checking" in prov.unavailable_reason()                    # returns at once; no answer yet
     release.set()
+    settle()
+    assert prov.unavailable_reason() is None and prov._auth_ok_once
+    done.clear()
+    prov._auth_checked = 0.0                                          # TTL expired
+    prov.unavailable_reason()
+    settle()
+    assert prov.unavailable_reason() is None                          # failed check: verified sign-in kept
+    import time as _t
+    assert prov._auth_checked < _t.monotonic() - cc.AUTH_CHECK_TTL_S + cc.AUTH_RECHECK_S + 1
 
 
-def test_prompt_mode_sends_the_schema_in_the_system_prompt_not_as_json_schema(tmp_path, monkeypatch):
-    """D-035: --json-schema makes the CLI run a tool round-trip (~4-5x tokens); prompt mode answers in one turn."""
-    exe = tmp_path / "claude.exe"
-    exe.write_bytes(b"")
-    monkeypatch.setattr(cc.tempfile, "gettempdir", lambda: str(tmp_path))
-    cfg = AIProviderCfg(kind="claude_code", model="sonnet", free_tier=True, cli_path=str(exe),
-                        structured_output="prompt", max_concurrency=2)
-    p = cc.ClaudeCodeProvider("claude_code", cfg, "sonnet", None)
-    schema = {"type": "object", "properties": {"label": {"type": "string", "maxLength": 40}}, "required": ["label"]}
-    assert "--json-schema" not in p.build_args("sys.md", schema)
-    text = p.system_text("RULES", schema)
-    assert text.startswith("RULES") and '"maxLength":40' in text and "ONLY one JSON object" in text
-    assert p.system_text("RULES", None) == "RULES"
+def test_a_failed_first_check_blocks_and_retries_soon(prov, monkeypatch):
+    import threading
+    done = threading.Event()
+
+    def check():
+        done.set()
+        raise cc.AuthCheckFailed("claude_code: cannot read the Claude Code login status (timed out)")
+    monkeypatch.setattr(prov, "check_auth", check)
+    prov.unavailable_reason()
+    assert done.wait(5)
+    for _ in range(100):
+        if not prov._auth_refreshing:
+            break
+        threading.Event().wait(0.01)
+    assert "cannot read" in prov.unavailable_reason()

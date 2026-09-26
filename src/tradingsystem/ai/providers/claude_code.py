@@ -44,6 +44,8 @@ ENV_KEEP = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATH", "PATHEXT", "COMSPEC",
             "TEMP", "TMP", "USERNAME", "USERDOMAIN", "COMPUTERNAME", "NUMBER_OF_PROCESSORS",
             "PROCESSOR_ARCHITECTURE", "OS", "LANG", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"}
 AUTH_CHECK_TTL_S = 300
+AUTH_RECHECK_S = 60              # after the status command itself failed
+AUTH_CHECK_TIMEOUT_S = 90        # a cold CLI start on a busy machine took 55 s (2026-09-26)
 DEFAULT_COOLDOWN_MS = 30 * 60_000
 LOGIN_COOLDOWN_MS = 5 * 60_000
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -53,6 +55,10 @@ _LIMIT_RE = re.compile(r"usage limit|hit your limit|limit reached|limit will res
                        r"rate[ _-]?limit", re.I)
 _EPOCH_RE = re.compile(r"\|(\d{10})\b")
 
+
+
+class AuthCheckFailed(RuntimeError):
+    """``claude auth status`` itself failed (timeout, broken start) — not evidence of a sign-out."""
 
 def find_cli(configured: str | None) -> str | None:
     """The Claude Code executable: ``cli_path`` if set, else PATH, else the native installer's location."""
@@ -112,45 +118,55 @@ class ClaudeCodeProvider(LLMProvider):
         self.workdir = Path(tempfile.gettempdir()) / "tradingsystem-claude-code"
         self.workdir.mkdir(parents=True, exist_ok=True)
         self._auth_checked = float("-inf")
-        self._auth_problem: str | None = None
+        self._auth_problem: str | None = f"{self.name}: checking the Claude Code sign-in"
+        self._auth_ok_once = False
         self._auth_refreshing = False
         self._slots: asyncio.Semaphore | None = None
 
     # ------------------------------------------------------------------ availability
     def unavailable_reason(self) -> str | None:
-        """Cooldown, else the cached login check. Only the very first check runs inline; later refreshes run in a
-        background thread so the engine's event loop (heartbeat) never waits on ``claude auth status``."""
+        """Cooldown, else the cached login check. Every check runs in a background thread — ``claude auth status``
+        can take ~1 min on a cold, busy machine (measured 55 s) and the engine's event loop (heartbeat) must never
+        wait on it; until the first answer the provider reports "checking"."""
         why = super().unavailable_reason()
         if why:
             return why
         if time.monotonic() - self._auth_checked > AUTH_CHECK_TTL_S and not self._auth_refreshing:
-            if self._auth_checked == float("-inf"):
-                self._refresh_auth()
-            else:
-                self._auth_refreshing = True
-                threading.Thread(target=self._refresh_auth, name="claude-auth-status", daemon=True).start()
+            self._auth_refreshing = True
+            threading.Thread(target=self._refresh_auth, name="claude-auth-status", daemon=True).start()
         return self._auth_problem
 
     def _refresh_auth(self) -> None:
+        now = time.monotonic()
         try:
-            self._auth_problem = self.check_auth()
+            problem = self.check_auth()
+        except AuthCheckFailed as exc:
+            # the check itself failed (slow or broken CLI start), which says nothing about the sign-in: keep a sign-in
+            # verified before, and ask again in a minute rather than after the full TTL
+            if not self._auth_ok_once:
+                self._auth_problem = str(exc)
+            self._auth_checked = now - AUTH_CHECK_TTL_S + AUTH_RECHECK_S
+        else:
+            self._auth_problem = problem
+            self._auth_ok_once = self._auth_ok_once or problem is None
+            self._auth_checked = now
         finally:
-            self._auth_checked = time.monotonic()
             self._auth_refreshing = False
 
     def check_auth(self) -> str | None:
-        """``claude auth status`` (no model call, no usage). A long-lived token is trusted until a call fails; one
-        added to ``.env`` later is picked up here (OPS-07)."""
+        """``claude auth status`` (no model call, no usage): None when signed in with the subscription, else the
+        problem; raises :class:`AuthCheckFailed` when the command itself fails. A long-lived token is trusted until a
+        call fails; one added to ``.env`` later is picked up here (OPS-07)."""
         self.api_key = self.api_key or secret(self.cfg.api_key_env)
         if self.api_key:
             return None
         try:
             p = subprocess.run([self.exe, "auth", "status", "--json"], capture_output=True, text=True,
                                encoding="utf-8", errors="replace", env=child_env(None), cwd=self.workdir,
-                               timeout=30, creationflags=_NO_WINDOW)
+                               timeout=AUTH_CHECK_TIMEOUT_S, creationflags=_NO_WINDOW)
             st = json.loads(p.stdout or "{}")
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            return f"{self.name}: cannot read the Claude Code login status ({exc})"
+            raise AuthCheckFailed(f"{self.name}: cannot read the Claude Code login status ({exc})") from exc
         return auth_problem(self.name, st)
 
     # ------------------------------------------------------------------ call

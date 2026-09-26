@@ -91,6 +91,7 @@ def test_snapshot_is_shared_between_clients(env, monkeypatch):
     calls = []
     real = app_mod._status_snapshot
     monkeypatch.setattr(app_mod, "_status_snapshot", lambda *a, **k: calls.append(1) or real(*a, **k))
+    monkeypatch.setattr(app_mod, "_SNAP_TTL_MS", 60_000)       # the sharing, not the machine's speed, is under test
     app_mod._SNAP_CACHE["ts"] = 0
     for _ in range(5):
         env.client.get("/api/status")
