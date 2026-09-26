@@ -5,7 +5,8 @@ tokens), executions (placed / gate rejections with reasons), broker outcomes and
 Built for a periodic check by a person or an agent: short, and every problem line starts with "!!".
 
 Which system (D-042): ``--instance PAIR`` one pair's system; ``--all-pairs-system`` the single all-pairs system;
-default: every pair's system that has its own ``data/instances/<PAIR>/app.db``, else the all-pairs system.
+default: the systems that are running; when none runs, every pair's system that has its own
+``data/instances/<PAIR>/app.db``, else the all-pairs system.
 """
 from __future__ import annotations
 
@@ -36,6 +37,9 @@ def systems(a: argparse.Namespace) -> list[Settings]:
     base = load_settings()
     if base.paths.instance:
         return [base]
+    running = set(procs.running_supervisors().values())
+    if running:                                     # what runs (the per-pair app.db files stay after a switch back)
+        return [load_settings(extra_env={INSTANCE_ENV: i or ""}) for i in sorted(running, key=lambda x: x or "")]
     own = [p for p in base.instances if (base.paths.data() / "instances" / p / "app.db").exists()]
     return [load_settings(extra_env={INSTANCE_ENV: p}) for p in own] or [base]
 

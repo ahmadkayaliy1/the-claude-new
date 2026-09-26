@@ -15,7 +15,6 @@ own app.db is skipped (``--force`` replaces it after keeping a copy ``app.db.bak
 from __future__ import annotations
 
 import argparse
-import shutil
 import sqlite3
 import sys
 import time
@@ -81,6 +80,8 @@ def copy_for_pair(src: Path, dst: Path, pair: str) -> dict[str, int]:
         d.execute("VACUUM")
     finally:
         d.close()
+    for ext in ("-wal", "-shm"):                   # a stale WAL next to the new file would be replayed into it
+        Path(str(dst) + ext).unlink(missing_ok=True)
     tmp.replace(dst)
     return kept
 
@@ -111,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("pairs", nargs="*", help="pairs to give their own app.db (config 'instances:')")
     ap.add_argument("--all", action="store_true", help="every pair in config 'instances:'")
     ap.add_argument("--force", action="store_true", help="replace a pair's existing app.db (a backup is kept)")
+    ap.add_argument("--wait", type=float, default=0.0, help="seconds to wait for trading-system processes to exit")
     a = ap.parse_args(argv)
     s = load_settings()
     configured = list(s.instances)
@@ -122,6 +124,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"not in config 'instances:': {unknown} (configured: {configured})")
         return 2
     busy = running_services()
+    deadline = time.monotonic() + max(0.0, a.wait)
+    while busy and time.monotonic() < deadline:     # services of a system just stopped may take a moment to exit
+        time.sleep(2)
+        busy = running_services()
     if busy:
         print("trading-system processes are running - stop them first (scripts\\stop.bat, scripts\\stop_all.bat):")
         print("  " + "\n  ".join(busy))
@@ -137,9 +143,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if dst.exists():
             bak = dst.with_name(f"app.db.bak-{time.strftime('%Y%m%d-%H%M%S')}")
-            shutil.copy2(dst, bak)
-            for ext in ("-wal", "-shm"):
-                Path(str(dst) + ext).unlink(missing_ok=True)
+            old, copy = sqlite3.connect(dst, timeout=30), sqlite3.connect(bak)
+            try:
+                old.backup(copy)                  # with the committed transactions still in its WAL
+            finally:
+                copy.close()
+                old.close()
             print(f"{pair}: previous app.db kept as {bak.name}")
         kept = copy_for_pair(src, dst, pair)
         print(f"{pair}: {dst} - " + ", ".join(f"{t} {n}" for t, n in kept.items()))

@@ -93,7 +93,8 @@ def settings():
 @pytest.fixture()
 def bf(tmp_path, settings, monkeypatch):
     clock = types.SimpleNamespace(t=1_000.0)
-    fake_time = types.SimpleNamespace(time=lambda: clock.t, sleep=lambda s: setattr(clock, "t", clock.t + s))
+    fake_time = types.SimpleNamespace(time=lambda: clock.t, monotonic=lambda: clock.t,
+                                      sleep=lambda s: setattr(clock, "t", clock.t + s))
     monkeypatch.setattr(mt5bf, "time", fake_time)
     b = object.__new__(MT5Backfill)
     b.s, b.data = settings, tmp_path

@@ -31,10 +31,10 @@ import numpy as np
 from ..ai.store import DecisionStore
 from ..analysis import indicators as ind
 from ..analysis.frames import load_frame
-from ..core.instruments import InstrumentRegistry
+from ..core.filelock import FileLock, locks_dir
+from ..core.instruments import InstrumentRegistry, _resolve_symbol
 from ..core.logsetup import setup_from_settings
 from ..core.sessions import calendar_for
-from ..core.instruments import _resolve_symbol
 from ..core.settings import Settings, load_settings
 from ..core.timeutil import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, iso, now_ms, parse_date_spec
 from ..ingest.common.appdb import AppDB
@@ -55,6 +55,7 @@ MAX_REPLAY_TICKS = 300_000           # per instrument per loop — a long catch-
 MAX_HANDLE_ATTEMPTS = 5              # transient failures of one decision before it is rejected
 ERROR_HEARTBEAT_MS = 5 * MS_PER_MINUTE   # a loop failing longer stops refreshing its heartbeat → watchdog restart
 PEAK_EVERY_S = 5.0                   # the account peak file is read/updated at most this often by the loop
+PLACEMENT_LOCK_WAIT_S = 30.0         # MT5: gate + placement of one system at a time on the account (D-042)
 
 
 def magics(s: Settings) -> tuple[int, int, set[int]]:
@@ -66,11 +67,17 @@ def magics(s: Settings) -> tuple[int, int, set[int]]:
 
 def all_pairs_by_symbol(s: Settings, profile: str) -> dict[str, str]:
     """Execution-account MT5 symbol → pair for every configured pair (enabled here or in another system)."""
-    out = {}
+    out, enabled = {}, set(s.enabled_pairs())
     for name, pair in s.pairs.items():
         for icfg in pair.instruments:
             if icfg.venue == "mt5" and "execution" in icfg.roles:
-                out[_resolve_symbol(icfg, profile)] = name
+                try:
+                    out[_resolve_symbol(icfg, profile)] = name
+                except ValueError:
+                    if name in enabled:
+                        raise
+                    log.warning("pair %s has no symbol for MT5 profile %r - its positions are not attributed to it",
+                                name, profile)
     return out
 
 
@@ -213,10 +220,15 @@ class Executor:
         self._peak_at = time.time()
         return peak.update(float(eq))
 
-    def kill_switch(self) -> bool:
+    def kill_switch(self, pair: str | None = None) -> bool:
         """``data/KILL_SWITCH`` stops every system (scripts/kill_switch_on.bat); ``data/instances/<PAIR>/KILL_SWITCH``
-        stops this instance only."""
-        return (self.s.paths.data() / "KILL_SWITCH").exists() or (self.s.paths.state() / "KILL_SWITCH").exists()
+        (kill_switch_on.bat <PAIR>) stops that pair — in its own system and in the all-pairs system alike.
+        Without ``pair``: whether any switch that concerns this system is on (status)."""
+        data = self.s.paths.data()
+        if (data / "KILL_SWITCH").exists() or (self.s.paths.state() / "KILL_SWITCH").exists():
+            return True
+        pairs = [pair] if pair else list(self.s.enabled_pairs())
+        return any((data / "instances" / p / "KILL_SWITCH").exists() for p in pairs)
 
     def atr(self, pair: str, as_of: int | None = None) -> float:
         """Decision-TF ATR14 exactly as the snapshot computed it for the model (same bar count, as of the
@@ -244,13 +256,28 @@ class Executor:
 
     # ------------------------------------------------------------------ execution
     def handle(self, cand: dict) -> None:
+        """Gate and place one candidate. MT5: one system at a time from reading the account to the broker listing
+        the new order (``mt5_placement.lock``), so two pairs' systems never both pass the correlated-risk cap on
+        the same account snapshot; a busy lock raises (the candidate is retried with backoff)."""
+        if self.mt5 is None:
+            self._handle(cand)
+            return
+        with FileLock(locks_dir(self.s) / "mt5_placement.lock").hold(timeout=PLACEMENT_LOCK_WAIT_S) as got:
+            if not got:
+                raise RuntimeError(f"MT5 placement lock busy for {PLACEMENT_LOCK_WAIT_S:.0f}s (another system is "
+                                   "placing) - retried")
+            if self._handle(cand):
+                time.sleep(MT5_SETTLE_MS / 1000)   # the broker lists the new order before another system gates
+
+    def _handle(self, cand: dict) -> bool:
+        """True when an order reached the backend (placed or partly placed)."""
         pair, rec, did = cand["pair"], cand["rec"], cand["id"]
         if pair not in self.s.enabled_pairs():
             self.store.set_execution_state(did, "rejected", {"reason": f"pair {pair} is not enabled"})
-            return
+            return False
         if now_ms() >= parse_date_spec(rec["valid_until"]):
             self.store.set_execution_state(did, "expired", {"reason": f"expired (valid until {rec['valid_until']})"})
-            return
+            return False
         exe = self.reg.with_role(pair, "execution")[0]
         exe_symbol = self.exec_reg.with_role(pair, "execution")[0].symbol
         prim = self.reg.primary(pair)
@@ -258,13 +285,13 @@ class Executor:
         eq = self.latest_quote(exe.key)
         if eq is None:
             self.store.set_execution_state(did, "rejected", {"reason": "no execution quote"})
-            return
+            return False
         basis_ok, basis_reason, rec_x = True, "same instrument", rec
         if prim.key != exe.key:
             pq = self.latest_quote(prim.key)
             if pq is None:
                 self.store.set_execution_state(did, "rejected", {"reason": "no analysis quote for basis"})
-                return
+                return False
             bc = check_basis((pq.bid + pq.ask) / 2, (eq.bid + eq.ask) / 2, self.basis_history(pair),
                              self.s.execution.max_basis_deviation_pct)
             basis_ok, basis_reason = bc.ok, bc.reason
@@ -284,7 +311,7 @@ class Executor:
             volume_min=spec["volume_min"], volume_step=spec["volume_step"], volume_max=vmax, equity=acct["equity"],
             open_positions=acct["open_positions"], open_risk_pct_by_pair=acct.get("open_risk_pct_by_pair", {}),
             realized_pnl_today_usd=acct.get("realized_today_usd", 0.0), unrealized_pnl_usd=acct.get("unrealized_usd", 0.0),
-            kill_switch=self.kill_switch(), basis_ok=basis_ok, basis_reason=basis_reason,
+            kill_switch=self.kill_switch(pair), basis_ok=basis_ok, basis_reason=basis_reason,
             sibling_risk_pct_by_pair=acct.get("sibling_risk_pct_by_pair", {}),
             live_sides=live_sides(acct.get("exposure") or [], pair),
             account_drawdown_pct=dd.drawdown_pct if dd else None, account_drawdown_tripped=bool(dd and dd.tripped))
@@ -301,10 +328,10 @@ class Executor:
             self.store.set_execution_state(did, "rejected", detail)
             self.appdb.add_event("executor", "gate_rejected", f"{pair} {did[:8]}: {detail['reason']}"[:300])
             log.info("%s %s rejected by gate: %s", pair, did[:8], detail["reason"])
-            return
+            return False
         if not self.claim(did, detail):
             log.warning("%s %s was no longer queued (claimed elsewhere or changed) — skipped", pair, did[:8])
-            return
+            return False
         if self.paper:
             res = self.paper.place(decision_id=did, pair=pair, instrument=exe.key, rec=rec_x, lots=gate.size.lots,
                                    entry=gate.entry, contract_size=spec["contract_size"],
@@ -323,6 +350,7 @@ class Executor:
         self.appdb.add_event("executor", "order" if res.get("ok") else "order_failed",
                              f"{self.mode} {pair} {did[:8]}: {res.get('reason') or res.get('legs') or res.get('placed')}"[:300])
         log.info("%s %s → %s: %s", pair, did[:8], self.mode, "placed" if res.get("ok") else res.get("reason"))
+        return bool(res.get("ok") or partial)
 
     def claim(self, did: str, detail: dict) -> bool:
         """Atomic hand-over to 'executing' (only from queued / not_executed): a decision is never placed twice."""

@@ -90,10 +90,12 @@ class UsageStore:
         with self._lock:
             return int(self._con.execute(sql, args).fetchone()[0])
 
-    def cost_since(self, since_ms: int) -> float:
+    def cost_since(self, since_ms: int, pair: str | None = None) -> float:
+        sql, args = "SELECT COALESCE(sum(cost_usd),0) FROM ai_usage WHERE ts>=?", [since_ms]
+        if pair:
+            sql, args = sql + " AND pair=?", args + [pair]
         with self._lock:
-            return float(self._con.execute("SELECT COALESCE(sum(cost_usd),0) FROM ai_usage WHERE ts>=?",
-                                           (since_ms,)).fetchone()[0])
+            return float(self._con.execute(sql, args).fetchone()[0])
 
     def close(self) -> None:
         with self._lock:
@@ -171,15 +173,17 @@ class CostGovernor:
     (paper/demo outcomes during testing, D-004)."""
 
     def __init__(self, cfg: AIBudgetCfg, usage: UsageStore,
-                 profit_fn: Callable[[int], tuple[float, int]] | None = None) -> None:
-        self.cfg, self.usage, self.profit_fn = cfg, usage, profit_fn
+                 profit_fn: Callable[[int], tuple[float, int]] | None = None, instance: str | None = None) -> None:
+        """``instance`` (one system per pair, D-042): the cost-to-profit ratio compares this pair's AI cost with this
+        pair's profit; the daily / monthly USD caps stay account-wide (the shared ledger)."""
+        self.cfg, self.usage, self.profit_fn, self.instance = cfg, usage, profit_fn, instance
 
     def state(self) -> GovernorState:
         now = now_ms()
         today = self.usage.cost_since(utc_midnight(now))
         month = self.usage.cost_since(month_start(now))
         since = now - self.cfg.rolling_window_days * MS_PER_DAY
-        wcost = self.usage.cost_since(since)
+        wcost = self.usage.cost_since(since, pair=self.instance)
         profit, trades = self.profit_fn(since) if self.profit_fn else (None, 0)
         level, reason = 0, "within budget"
         if trades >= self.cfg.min_trades_for_ratio and wcost > 0:

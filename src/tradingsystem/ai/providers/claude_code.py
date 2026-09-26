@@ -184,12 +184,14 @@ class ClaudeCodeProvider(LLMProvider):
         return self._auth_problem
 
     def _refresh_auth(self) -> None:
-        if not self.api_key and claim_start(self.workdir) > 0:
-            self._auth_refreshing = False               # another system just started a CLI: ask again on the next look
-            return
         now = time.monotonic()
-        self._last_start = now                          # the next model call waits START_STAGGER_S after this CLI start
         try:
+            try:
+                if not self.api_key and claim_start(self.workdir) > 0:
+                    return                              # another system just started a CLI: ask again on the next look
+            except OSError as exc:                      # the shared stamp/lock file (antivirus, temp cleanup)
+                raise AuthCheckFailed(f"{self.name}: cannot space the CLI start ({exc})") from exc
+            self._last_start = now                      # the next model call waits START_STAGGER_S after this CLI start
             problem = self.check_auth()
         except AuthCheckFailed as exc:
             # the check itself failed (slow or broken CLI start), which says nothing about the sign-in: keep a sign-in

@@ -60,7 +60,8 @@ class Engine:
         self.builder = SnapshotBuilder(s, self.reg)
         self.store = DecisionStore(s.paths.state() / "app.db", s.config_hash)
         self.usage = UsageStore(usage_db(s))
-        self.governor = CostGovernor(s.ai.budget, self.usage, profit_fn=self.store.realised_since)
+        self.governor = CostGovernor(s.ai.budget, self.usage, profit_fn=self.store.realised_since,
+                                     instance=s.paths.instance)
         self.orch = Orchestrator(s, self.reg, self.builder, self.store, self.usage, self.governor)
         self.processed: dict[str, int] = {}
         self.last_call: dict[str, int] = {}          # last dispatch per pair (the DB covers restarts)
@@ -100,6 +101,9 @@ class Engine:
             if dd.get("tripped"):
                 out["account_drawdown_tripped"] = dd["tripped"]
         if pair:
+            exe = next(iter(self.reg.with_role(pair, "execution")), None) if getattr(self, "reg", None) else None
+            if exe is not None:
+                out["holdings_price_space"] = exe.key     # the execution instrument's prices (legend)
             rows = [{k: v for k, v in x.items() if k not in ("pair", "kind")} for x in d.get("exposure") or []
                     if x.get("pair") == pair]
             kinds = [x.get("kind") for x in d.get("exposure") or [] if x.get("pair") == pair]

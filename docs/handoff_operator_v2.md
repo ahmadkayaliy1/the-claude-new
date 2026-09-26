@@ -41,6 +41,25 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-09-27 — Phase 2 (P12.2, D-042) is DONE on branch `feat/instances` (it contains Phase 1 too; `main` is
+  still `7b5e5da`, production still runs the all-pairs system on `f01c86d`-era code).** 410 unit tests pass. Review:
+  3 lenses (processes/concurrency, money safety, ops scripts + migration), each finding adversarially verified: 25 of
+  26 confirmed and fixed, then the fixes re-reviewed. What the user does (H14): `git merge --ff-only feat/instances`,
+  then `scripts\switch_to_pairs.bat` (optionally with pairs, e.g. `BTCUSDT` first — RAM: the all-pairs system uses
+  ≈0.9 GB private and the laptop had 0.6 GB free with the Claude app, Chrome and ChatGPT open), then
+  `scripts\start_recorder.bat`. Or stay on the all-pairs system: `scripts\restart.bat` after the merge.
+* Phase 2 layout (details in `docs/ops_windows.md` §1a): `--instance <PAIR>` / `TS_INSTANCE`; state
+  `data/instances/<PAIR>/` (app.db, run/, STOP_ALL, KILL_SWITCH), logs `logs/<PAIR>/`, ports 8766–8768, magic base+1..3;
+  shared `data/shared/` (ai_usage.db ledger, account_peak.json, locks/); market data shared. The all-pairs system is
+  unchanged and exclusive with the per-pair ones. Exit codes of `run all`: 3 = already running, 4 = refused
+  (another kind of system, or a pair without its own app.db while `data/app.db` exists).
+* Never run `run --stop` (or stop*.bat / switch_to_pairs.bat) from a worktree while production runs: the fallback of
+  `control.stop` finds supervisors by command line machine-wide and may kill the production one after its timeout.
+  Read-only checks (`run --status`, health report, DryRun) are safe.
+* Phase 2 open points for the live check after H14: RAM with 2–3 pair systems; one AI cycle per pair (payload
+  `account.open_positions` / `pending_orders` / `holdings_price_space`); the executors' `exposure` and
+  `account_drawdown` in their status rows; `status_all.bat`; `tools\health_report.py` (one section per running system).
+
 * **2026-09-26 19:10 UTC — Phase 1 (P12.1) is DONE on branch `feat/phase1-operator-memory` (commits `c844318`,
   `47e9e24`), 361 unit tests pass, reviewed by two independent agents, live-tested with one BTCUSDT call (18.0 k
   input tokens, valid, operator notes fed back). NOT merged yet: `main` is still `f01c86d` and production runs

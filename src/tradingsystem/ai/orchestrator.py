@@ -157,7 +157,9 @@ class Orchestrator:
             async with self._sem:
                 return await generate_validated(provider, model_cls, system=system, user=user,
                                                 limiter=self._limiters[provider.name], governor=self.governor,
-                                                usage=self.usage, purpose=purpose, pair=pair,
+                                                usage=self.usage, purpose=purpose,
+                                                # one system per pair: every call counts towards its share (D-042)
+                                                pair=pair or self.s.paths.instance,
                                                 est_input_tokens=max(2000, len(user) // 3))
         except Exception as exc:  # noqa: BLE001 — one failed sub-call must not take its siblings down (F4)
             log.exception("%s %s: generation failed", pair or "*", purpose)

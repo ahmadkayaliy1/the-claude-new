@@ -10,7 +10,8 @@
 #>
 [CmdletBinding()]
 param([switch]$KeepMT5Task)
-$ErrorActionPreference = "Stop"
+# Continue, not Stop: schtasks writes errors about OTHER tasks to stderr (Stop would abort); exit codes are checked
+$ErrorActionPreference = "Continue"
 # schtasks, not Get-ScheduledTask: PowerShell 5.1 cannot read back a trigger that repeats indefinitely (0x80041318)
 $names = @()
 foreach ($line in (schtasks /Query /FO CSV /NH 2>$null)) {

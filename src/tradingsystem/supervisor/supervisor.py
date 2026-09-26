@@ -485,12 +485,19 @@ def main(argv: list[str] | None = None) -> int:
     if not acquire_instance(instance_name("supervisor", state), wait_s=10):
         log.error("another supervisor is already running for %s — not starting (%s)", state,
                   control.script("status", inst))
-        return 3
-    # an older build holds no lock, and the all-pairs system never runs next to a per-pair one (OPS-03, D-042)
-    found = {pid: i for pid, i in procs.running_supervisors(older_s=1.0).items() if procs.conflicts(inst, i)}
+        return control.EXIT_ALREADY_RUNNING
+    # an older build holds no lock, and the all-pairs system never runs next to a per-pair one (OPS-03, D-042).
+    # Our own lock is held first, then the other kind's locks are probed: of two starts racing, at least one sees
+    # the other (the command-line scan alone skips processes younger than older_s)
+    found = control.conflicting(s, older_s=1.0)
     if found:
         log.error("not starting: %s", control.conflict_message(inst, found))
-        return 3
+        same = all(i == inst for i in found.values())
+        return control.EXIT_ALREADY_RUNNING if same else control.EXIT_REFUSED
+    why = control.unmigrated(s, state)
+    if why:
+        log.error("not starting: %s", why)
+        return control.EXIT_REFUSED
     log.info("supervisor starting%s: %s", f" for {inst}" if inst else "", ", ".join(names))
     Supervisor(names, args.data_dir).run()
     return 0

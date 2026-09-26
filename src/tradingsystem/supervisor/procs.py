@@ -103,12 +103,16 @@ _CTL_FLAGS = frozenset({"--detach", "--stop", "--status", "-h", "--help"})
 
 
 def is_supervisor_cmd(cmd: list[str]) -> bool:
-    """``... -m tradingsystem run ...`` without a control flag (``--detach/--stop/--status`` only talk to one)."""
+    """``... -m tradingsystem [--instance X] run ...`` without a control flag (``--detach/--stop/--status`` only
+    talk to one). ``--instance`` may also stand before ``run`` (the CLI takes it anywhere)."""
     try:
         i = cmd.index("tradingsystem")
     except ValueError:
         return False
-    return i > 0 and cmd[i - 1] == "-m" and cmd[i + 1:i + 2] == ["run"] and not _CTL_FLAGS & set(cmd[i + 2:])
+    rest, j = cmd[i + 1:], 0
+    while j < len(rest) and (rest[j] == "--instance" or rest[j].startswith("--instance=")):
+        j += 2 if rest[j] == "--instance" else 1
+    return i > 0 and cmd[i - 1] == "-m" and rest[j:j + 1] == ["run"] and not _CTL_FLAGS & set(rest[j + 1:])
 
 
 def cmd_instance(cmd: list[str]) -> str | None:
@@ -181,7 +185,8 @@ def other_supervisors(older_s: float | None = None, *, instance: str | None = No
 def describe(pids: dict[int, str | None] | list[int]) -> str:
     """``pid 123 (BTCUSDT), pid 456 (all pairs)`` for messages."""
     found = pids if isinstance(pids, dict) else {p: running_supervisors().get(p) for p in pids}
-    return ", ".join(f"pid {pid} ({inst or 'all pairs'})" for pid, inst in found.items())
+    return ", ".join(f"{'pid ' + str(pid) if pid > 0 else 'a supervisor'} ({inst or 'all pairs'})"
+                     for pid, inst in found.items())
 
 
 def open_rotating(path: Path, max_bytes: int, backups: int) -> IO[bytes]:

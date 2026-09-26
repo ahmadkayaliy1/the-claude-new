@@ -53,6 +53,7 @@ LIVE_COLLECTOR = "mt5"
 LIVE_STALE_MS = 5_000        # live heartbeat older than this → the terminal is busy: back off
 SIBLING_DOWN_MS = 10 * 60_000  # another system's live heartbeat older than this → that system is not running
 HEAVY_LOCK_WAIT_S = 120      # a history call waits this long for another system's call, then goes ahead anyway
+HEAVY_LOCK_SKIP_S = 600      # after such a timeout the lock is only tried (no wait) for this long
 LIVE_WAIT_BEFORE_CONNECT_S = 600
 LIVE_WAIT_PER_CHUNK_S = 120
 CONNECT_RETRY_S = 600        # keep retrying initialize() this long before failing the pass (retried later)
@@ -99,6 +100,7 @@ class MT5Backfill:
         self.sibling_dbs = [d / "app.db" for d in system_state_dirs(s) if d.resolve() != own]
         self.heavy_lock = FileLock(locks_dir(s) / "mt5_history.lock")
         self._lock_warned = False
+        self._lock_busy_until = 0.0
 
     def status(self, state: str = "backfilling", error: str | None = None) -> None:
         self.appdb.set_status(COLLECTOR, state, error=error, detail=self.progress)
@@ -170,10 +172,18 @@ class MT5Backfill:
         """ndarray (possibly empty) on success; None when the terminal answered with a non-link error (unverified —
         never proof of absence); raises MT5CallError when the IPC/terminal link failed. One history call at a time
         across every system on this machine (D-042)."""
-        got = self.heavy_lock.acquire(timeout=HEAVY_LOCK_WAIT_S, poll=0.2)
-        if not got and not self._lock_warned:
-            self._lock_warned = True
-            log.warning("another system held the MT5 history lock for %ds — going ahead", HEAVY_LOCK_WAIT_S)
+        # a holder hung inside an MT5 call keeps the lock until it is restarted: after one full wait, only try it
+        # (no wait) for HEAVY_LOCK_SKIP_S, so this system's history calls are not slowed to one per 2 minutes
+        skip = time.monotonic() < getattr(self, "_lock_busy_until", 0.0)
+        got = self.heavy_lock.acquire(timeout=0 if skip else HEAVY_LOCK_WAIT_S, poll=0.2)
+        if got:
+            self._lock_busy_until, self._lock_warned = 0.0, False
+        elif not skip:
+            self._lock_busy_until = time.monotonic() + HEAVY_LOCK_SKIP_S
+            if not self._lock_warned:
+                self._lock_warned = True
+                log.warning("another system held the MT5 history lock for %ds — going ahead without it for up to "
+                            "%ds", HEAVY_LOCK_WAIT_S, HEAVY_LOCK_SKIP_S)
         try:
             r = fn(*args)
         finally:

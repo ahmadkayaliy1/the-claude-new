@@ -180,7 +180,8 @@ def test_main_refuses_a_pair_next_to_the_all_pairs_system(monkeypatch):
     monkeypatch.setattr(sv, "acquire_instance", lambda name, wait_s=0: True)
     monkeypatch.setattr(procs, "running_supervisors", lambda older_s=None: {1234: None})
     monkeypatch.setattr(sv, "Supervisor", lambda *a, **k: pytest.fail("must not start"))
-    assert sv.main(["all"]) == 3
+    monkeypatch.setattr(control, "instance_running", lambda name: False)
+    assert sv.main(["all"]) == control.EXIT_REFUSED
     monkeypatch.setattr(procs, "running_supervisors", lambda older_s=None: {1234: "ETHUSDT"})
     ran = []
     monkeypatch.setattr(sv, "Supervisor", lambda *a, **k: NS(run=lambda: ran.append(1)))

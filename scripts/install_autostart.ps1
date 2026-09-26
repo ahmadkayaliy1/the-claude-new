@@ -38,6 +38,11 @@
 .PARAMETER AllPairs
     One system per pair for every pair in config "instances:" (per-pair tasks of pairs no longer configured are
     removed, as is TradingSystem).
+.PARAMETER AllPairsSystem
+    The single all-pairs system (task TradingSystem; every TradingSystem-<PAIR> task is removed). Without any of
+    -Pair / -AllPairs / -AllPairsSystem the script keeps the layout in use: per pair when TradingSystem-<PAIR>
+    tasks exist (those pairs are kept) or the pairs were switched (data\instances\<PAIR>\app.db + the all-pairs
+    system stopped by the user: every pair), else the all-pairs system.
 .PARAMETER DryRun
     Show what would be registered, change nothing.
 #>
@@ -49,6 +54,7 @@ param(
     [switch]$NoMT5Task,
     [string[]]$Pair = @(),
     [switch]$AllPairs,
+    [switch]$AllPairsSystem,
     [switch]$DryRun
 )
 $ErrorActionPreference = "Stop"
@@ -71,21 +77,10 @@ if (-not $NoMT5Task) {
     if (-not (Test-Path $TerminalPath)) { throw "MT5 terminal not found: $TerminalPath (pass -TerminalPath or -NoMT5Task)" }
 }
 
-# ---- which keep-alive tasks: the all-pairs system, or one per pair (D-042)
-$configured = @()
-Push-Location $root
-try { $configured = @(& $py -m tradingsystem config --instances | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ }) }
-finally { Pop-Location }
-if ($LASTEXITCODE -ne 0) { throw "could not read the configured pairs (config 'instances:')" }
-$Pair = @($Pair | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ })
-if ($AllPairs) { $Pair = $configured }
-foreach ($p in $Pair) {
-    if ($configured -notcontains $p) { throw "pair $p is not in config 'instances:' ($($configured -join ', '))" }
-}
-$perPair = $Pair.Count -gt 0
-
 function Get-TsTasks {
-    # schtasks, not Get-ScheduledTask: PowerShell 5.1 cannot read back a trigger that repeats indefinitely
+    # schtasks, not Get-ScheduledTask: PowerShell 5.1 cannot read back a trigger that repeats indefinitely.
+    # Local Continue: schtasks writes errors about OTHER tasks to stderr, which "Stop" would turn into a throw
+    $ErrorActionPreference = "Continue"
     $names = @()
     foreach ($line in (schtasks /Query /FO CSV /NH 2>$null)) {
         $n = ($line -split '","')[0].Trim('"').TrimStart('\')
@@ -93,6 +88,39 @@ function Get-TsTasks {
     }
     return $names | Sort-Object -Unique
 }
+
+# ---- which keep-alive tasks: the all-pairs system, or one per pair (D-042)
+$configured = @()
+Push-Location $root
+try {
+    $configured = @(& { $ErrorActionPreference = "Continue"; & $py -m tradingsystem config --instances } |
+                    ForEach-Object { "$_".Trim().ToUpper() } | Where-Object { $_ })
+    $cfgExit = $LASTEXITCODE
+} finally { Pop-Location }
+if ($cfgExit -ne 0) { throw "could not read the configured pairs (config 'instances:')" }
+$Pair = @($Pair | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ })
+if (($AllPairsSystem -and ($AllPairs -or $Pair.Count)) -or ($AllPairs -and $Pair.Count)) {
+    throw "use only one of -Pair, -AllPairs, -AllPairsSystem"
+}
+if (-not $AllPairsSystem -and -not $AllPairs -and $Pair.Count -eq 0) {
+    # keep the layout in use (a plain double-click must never undo the switch to one system per pair)
+    $pairTasks = @(Get-TsTasks | Where-Object { $_ -ne "TradingSystem" })
+    $migrated = @($configured | Where-Object { Test-Path (Join-Path $root "data\instances\$_\app.db") })
+    $held = Test-Path (Join-Path $root "data\run\manual_stop")
+    $kept = @($pairTasks | ForEach-Object { $_.Substring(14) } | Where-Object { $configured -contains $_ })
+    if ($kept.Count) {
+        $Pair = $kept                           # the pairs that have a task now, no more and no less
+        Write-Host "layout  : one system per pair, kept: $($kept -join ', ') - -AllPairs adds every pair, -AllPairsSystem goes back"
+    } elseif ($migrated.Count -and $held) {
+        $AllPairs = $true
+        Write-Host "layout  : one system per pair (switched) - -Pair chooses pairs, -AllPairsSystem goes back to the all-pairs task"
+    }
+}
+if ($AllPairs) { $Pair = $configured }
+foreach ($p in $Pair) {
+    if ($configured -notcontains $p) { throw "pair $p is not in config 'instances:' ($($configured -join ', '))" }
+}
+$perPair = $Pair.Count -gt 0
 
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
@@ -142,8 +170,8 @@ if (-not $NoMT5Task) {
         -Description "Trading system: MetaTrader 5 terminal at logon, outside every trading-system process (docs\ops_windows.md)" | Out-Null
 }
 foreach ($n in $remove) {
-    schtasks /Delete /TN $n /F 2>$null | Out-Null
-    Write-Host "removed   : $n"
+    & { $ErrorActionPreference = "Continue"; schtasks /Delete /TN $n /F 2>$null | Out-Null }
+    if ($LASTEXITCODE -eq 0) { Write-Host "removed   : $n" } else { Write-Host "FAILED    : could not remove $n (exit $LASTEXITCODE)" }
 }
 foreach ($k in $keepAlive) {
     $logon = New-ScheduledTaskTrigger -AtLogOn -User $user
@@ -161,7 +189,7 @@ foreach ($k in $keepAlive) {
 # (0x80041318 "incorrectly formatted or out of range") although the task is valid and runs
 foreach ($name in @("TradingSystem-MT5") + @($keepAlive | ForEach-Object { $_[0] })) {
     if ($NoMT5Task -and $name -eq "TradingSystem-MT5") { continue }
-    $q = schtasks /Query /TN $name /FO LIST 2>$null | Select-String "Status|Next Run"
+    $q = & { $ErrorActionPreference = "Continue"; schtasks /Query /TN $name /FO LIST 2>$null } | Select-String "Status|Next Run"
     Write-Host ("registered: {0}  {1}" -f $name, (($q | ForEach-Object { $_.Line.Trim() }) -join " | "))
 }
 if ($perPair) {

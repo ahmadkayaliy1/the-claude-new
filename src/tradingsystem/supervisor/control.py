@@ -20,7 +20,7 @@ from typing import Callable
 
 import psutil
 
-from ..core.settings import PROJECT_ROOT, Settings
+from ..core.settings import PROJECT_ROOT, Settings, system_state_dirs
 from ..core.timeutil import now_ms
 from . import procs
 from .winops import instance_name, instance_running, sample_clock, spawn_outside
@@ -105,15 +105,48 @@ def script(name: str, instance: str | None) -> str:
     return f"scripts\\{name}.bat" + (f" {instance}" if instance else "")
 
 
+EXIT_ALREADY_RUNNING = 3      # `run all`: this system's supervisor already runs (or an older build of it)
+EXIT_REFUSED = 4              # `run all`: another kind of system runs, or this pair has not been migrated yet
+
+
+def conflicting(s: Settings, older_s: float | None = None) -> dict[int, str | None]:
+    """Supervisors that may not run next to this system (D-042), found by command line (any build) and by the
+    other systems' single-instance locks (a supervisor whose command line / environment cannot be read, or one
+    started a moment ago). Lock-only entries get pid -1, -2, …"""
+    inst, own = s.paths.instance, Path(s.paths.state()).resolve()
+    found = {pid: i for pid, i in procs.running_supervisors(older_s).items() if procs.conflicts(inst, i)}
+    base = Path(s.paths.data()).resolve()
+    n = 0
+    for d in system_state_dirs(s):
+        d = Path(d).resolve()
+        other = None if d == base else d.name
+        if d == own or not procs.conflicts(inst, other) or other in found.values():
+            continue
+        if instance_running(instance_name("supervisor", d)):
+            n -= 1
+            found[n] = other
+    return found
+
+
+def unmigrated(s: Settings, data: Path) -> str | None:
+    """A pair's system about to start without its own app.db while the all-pairs system's history exists: it would
+    begin with an empty history, and the migration would then skip it (D-042) — refuse and say how to switch."""
+    inst = s.paths.instance
+    if inst and not (Path(data) / "app.db").exists() and (s.paths.data() / "app.db").exists():
+        return (f"{inst} has no app.db of its own yet - switch with scripts\\switch_to_pairs.bat (it copies each "
+                f"pair's history first) or run tools\\migrate_instance.py {inst}")
+    return None
+
+
 def conflict_message(instance: str | None, found: dict[int, str | None]) -> str:
     """Why this system may not start next to the supervisors in ``found`` (see :func:`procs.conflicts`)."""
     if instance is None and any(v is not None for v in found.values()):
         return (f"per-pair systems are running ({procs.describe(found)}) - the all-pairs system cannot run next to "
                 "them; stop them first (scripts\\stop_all.bat)")
     if instance is not None and any(v is None for v in found.values()):
-        pids = ", ".join(str(p) for p, v in found.items() if v is None)
-        return (f"the all-pairs system is running (pid {pids}) - stop it first (scripts\\stop.bat), "
-                "then start one system per pair")
+        pids = ", ".join(str(p) for p, v in found.items() if v is None and p > 0) or "?"
+        return (f"the all-pairs system is running (pid {pids}) - to switch to one system per pair run "
+                "scripts\\switch_to_pairs.bat (it stops it and copies each pair's history first)")
     return (f"a supervisor without the single-instance lock (older build, {procs.describe(found)}) is running - "
             f"stop it first with {script('stop', instance)}")
 
@@ -162,9 +195,12 @@ def detach(run_args: list[str], data: Path, s: Settings, *, auto: bool) -> int:
         if not _wait(lambda: not instance_running(name), 30):
             return _say(1, "the old supervisor still holds the single-instance lock - see logs/supervisor.jsonl")
     else:
-        found = {pid: i for pid, i in procs.running_supervisors().items() if procs.conflicts(inst, i)}
+        found = conflicting(s)
         if found:
             return _say(1, conflict_message(inst, found), quiet=auto)
+    why = unmigrated(s, data)
+    if why:
+        return _say(1, why, quiet=auto)
     if not auto:
         hold.unlink(missing_ok=True)
     out = procs.open_rotating(s.paths.logs() / "supervisor.stderr.log", s.supervisor.child_log_max_bytes,
@@ -184,8 +220,11 @@ def detach(run_args: list[str], data: Path, s: Settings, *, auto: bool) -> int:
                            f"http://{s.api.host}:{s.api.port}")
         code = p.poll()
         if code is not None:
-            if code == 3:
+            if code == EXIT_ALREADY_RUNNING:
                 return _say(0, "supervisor already running (another start won the race)")
+            if code == EXIT_REFUSED:
+                return _say(1, f"supervisor refused to start (another kind of system is running, or the pair is not "
+                               f"migrated) - see {s.paths.logs() / 'supervisor.jsonl'}")
             logs = s.paths.logs()
             return _say(1, f"supervisor exited at start (code {code}) - see {logs / 'supervisor.stderr.log'} and "
                            f"{logs / 'supervisor.jsonl'}")
@@ -208,6 +247,10 @@ def stop(data: Path, *, instance: str | None = None, timeout: float = STOP_WAIT_
     who = f"supervisor {instance}" if instance else "supervisor"
     resume = f"autostart paused until {script('start', instance)}"
     if not _running(name, instance):
+        pairs = {p: i for p, i in procs.running_supervisors().items() if i} if instance is None else {}
+        if pairs:           # the user meant "stop trading": say that the per-pair systems still run
+            return _say(1, f"the all-pairs system is not running, but per-pair systems ARE running: "
+                           f"{procs.describe(pairs)} - stop them with scripts\\stop_all.bat or scripts\\stop.bat <PAIR>")
         return _say(0, f"{who} is not running ({resume})")
     _say(None, f"stop requested ({who}) - waiting for the services to shut down ...")
     if _wait(lambda: not _running(name, instance), timeout, 1.0):

@@ -106,10 +106,15 @@ $py = Join-Path $root ".venv\Scripts\python.exe"
 if (Test-Path $py) {
     Push-Location $root
     try {
-        $pairs = @(& $py -m tradingsystem config --instances | Where-Object { $_.Trim() })
-        $own = @($pairs | Where-Object { Test-Path (Join-Path $root "data\instances\$_\app.db") })
-        if ($own) { foreach ($p in $own) { & $py -m tradingsystem run --status --instance $p; Write-Host "" } }
-        else { & $py -m tradingsystem run --status }
+        # the all-pairs system first (exit 0 = it runs); otherwise every pair that has its own system
+        & $py -m tradingsystem run --status
+        if ($LASTEXITCODE -ne 0) {
+            $pairs = @(& $py -m tradingsystem config --instances | Where-Object { $_.Trim() })
+            foreach ($p in @($pairs | Where-Object { Test-Path (Join-Path $root "data\instances\$_\app.db") })) {
+                Write-Host ""
+                & $py -m tradingsystem run --status --instance $p
+            }
+        }
     } finally { Pop-Location }
 }
 

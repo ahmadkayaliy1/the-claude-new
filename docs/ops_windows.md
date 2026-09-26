@@ -66,6 +66,60 @@ The same actions from a terminal:
 
 ---
 
+## 1a. One system per pair (D-042)
+
+Each pair can run as its own, fully independent system: its own supervisor and services, its own
+`data\instances\<PAIR>\app.db` (decisions, memory, paper account, heartbeats), its own logs in `logs\<PAIR>\`,
+its own dashboard port and its own MT5 magic number. So the daily loss limit (10 %), the open-trade limit and the
+same-direction guard apply per pair. Market data (`data\hot`, `data\cold`) stays shared.
+
+| Pair | Dashboard | MT5 magic |
+|---|---|---|
+| BTCUSDT | http://127.0.0.1:8766 | base + 1 |
+| ETHUSDT | http://127.0.0.1:8767 | base + 2 |
+| XAUUSD | http://127.0.0.1:8768 | base + 3 |
+
+(`instances:` in `config\config.yaml`; the all-pairs system keeps port 8765 and the base magic.)
+
+**Switching once** from the all-pairs system: double-click `scripts\switch_to_pairs.bat`. It stops every
+system, gives every pair its own app.db (a copy of `data\app.db` with that pair's history, `tools\migrate_instance.py`),
+replaces the autostart task `TradingSystem` with one task per pair, and starts every pair. With pairs named
+(`switch_to_pairs.bat BTCUSDT`) only those get a task and start; every pair still gets its history, so another one
+is added later with `start.bat ETHUSDT` and `install_autostart.ps1 -Pair BTCUSDT,ETHUSDT`. Each pair's system uses
+about as much memory as the all-pairs system (≈0.9 GB on this laptop): start with one pair when RAM is short.
+`data\app.db` is not
+changed, so going back is `stop_all.bat`, then
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_autostart.ps1 -AllPairsSystem`, then `start.bat`.
+A pair's system refuses to start while it has no app.db of its own but `data\app.db` exists (it would start with an
+empty history): use `switch_to_pairs.bat` or `tools\migrate_instance.py <PAIR>` first.
+
+| Script | What it does |
+|---|---|
+| `start.bat BTCUSDT` / `stop.bat BTCUSDT` / `status.bat BTCUSDT` / `restart.bat BTCUSDT` | The same as without a pair, for that pair's system only. |
+| `start_all.bat` / `stop_all.bat` / `status_all.bat` / `restart_all.bat` | Every pair in `instances:` (stop_all also stops the all-pairs system). |
+| `kill_switch_on.bat` / `kill_switch_off.bat` | Every system (`data\KILL_SWITCH`). With a pair: that pair only (`data\instances\<PAIR>\KILL_SWITCH`), in its own system and in the all-pairs system; an unknown pair name changes nothing and says so. |
+| `reset_drawdown_stop.bat` | Re-arms trading after the account-wide drawdown stop (below). |
+
+- **The two layouts never run together.** A pair's system refuses to start while the all-pairs system runs, and
+  the all-pairs system refuses while any pair runs. Pairs run next to each other. `stop.bat` without a pair says so
+  (and exits with an error) when only per-pair systems are running: use `stop_all.bat` or `stop.bat <PAIR>`.
+- **Shared between the pairs:** the MT5 terminal (one of them starts it if it is missing; history downloads take
+  turns), the Claude sign-in (CLI starts are at least 15 s apart on the whole machine) and the AI request cap
+  (`rpd` counts every pair; one pair may use at most 60 % of it, `ai.instance_max_rpd_share`). The usage is in
+  `data\shared\ai_usage.db`.
+- **Account-wide drawdown stop (25 %, `risk.account_drawdown_stop_pct`).** Every system records the account's
+  equity peak in `data\shared\account_peak.json`. When the equity falls 25 % below that peak, every system stops
+  opening trades (open positions keep their stops) until you run `scripts\reset_drawdown_stop.bat`, even if the
+  equity recovers. Run it also after a withdrawal, which otherwise looks like a loss.
+- **The BTC/ETH correlated limit counts both systems.** Each system sees the other pairs' positions on the same
+  account when it checks the 4 % correlated-risk limit.
+- **Positions opened by the all-pairs system** (before the switch) are taken over by the pair's system: it
+  manages, counts and settles them like its own.
+- **Orders on the MT5 account are placed one system at a time** (a machine-wide lock from reading the account to the
+  broker listing the new order), so two pairs never pass the correlated-risk limit on the same account snapshot.
+
+---
+
 ## 2. Never let the laptop sleep (H2)
 
 **What happened on 2026-09-25.** The laptop was on battery. At 11:28:59 UTC the lid was closed and Windows went
@@ -249,7 +303,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_autostart.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_autostart.ps1 -DryRun
 ```
 
-The `-DryRun` form shows what would be registered and changes nothing. The script creates two tasks for
+The `-DryRun` form shows what would be registered and changes nothing. One system per pair (§1a):
+add `-AllPairs` (every pair in `instances:`) or `-Pair BTCUSDT,ETHUSDT`; that registers `TradingSystem-<PAIR>`
+tasks instead of `TradingSystem` (their logon delays 30 s apart) and removes the other layout's task.
+`switch_to_pairs.bat` does this for you. Without an option the script keeps the layout in use (a plain double-click
+after the switch re-registers the per-pair tasks); `-AllPairsSystem` goes back to the single task. The script creates two tasks for
 your account. Both run only while you are logged on (MT5 needs your desktop), not elevated, on battery too, at
 normal priority, and as soon as possible after a missed run:
 
@@ -261,7 +319,8 @@ normal priority, and as soon as possible after a missed run:
 - **If it says "Access is denied",** run it from an elevated PowerShell. The tasks still run as you, not
   elevated.
 - **Verify:** `scripts\check_ops.bat`, or `taskschd.msc` → Task Scheduler Library → `TradingSystem*`.
-- **Remove:** `scripts\uninstall_autostart.bat`. Stop the system first with `stop.bat`.
+- **Remove:** `scripts\uninstall_autostart.bat` (removes every `TradingSystem*` task, per-pair ones too). Stop
+  the system first with `stop.bat` (or `stop_all.bat`).
 
 ### 6.2 Stop, start and autostart
 
@@ -284,8 +343,9 @@ restart, the autostart brings everything back once you sign in.
 
 | Where | What |
 |---|---|
-| `scripts\status.bat` | Overall state. `NO HEARTBEAT` means the supervisor is hung. `NOT running` next to MT5 means the terminal is missing. |
-| `data\run\supervisor.json` | Rewritten every 5 s: pid, heartbeat (awake clock), services, MT5 terminals, last sleep or clock jump. |
+| `scripts\status.bat` | Overall state. `NO HEARTBEAT` means the supervisor is hung. `NOT running` next to MT5 means the terminal is missing. Per pair: `status.bat <PAIR>` or `status_all.bat`. |
+| `tools\health_report.py` | Health and performance of the last hours (every pair's system by default; `--instance <PAIR>`). |
+| `data\run\supervisor.json` | Rewritten every 5 s: pid, heartbeat (awake clock), services, MT5 terminals, last sleep or clock jump. A pair's system: `data\instances\<PAIR>\run\supervisor.json`, and its logs are in `logs\<PAIR>\`. |
 | `logs\supervisor.jsonl` | Starts, exits (with exit code and the last lines of output), watchdog kills, sleep/clock-jump detection, MT5 terminal starts. |
 | `logs\supervisor-ctl.jsonl` | `start.bat`, `stop.bat` and autostart actions. |
 | `logs\<service>.jsonl` | The service's own log. An uncaught exception appears as `uncaught <Type>` with the full traceback. |
