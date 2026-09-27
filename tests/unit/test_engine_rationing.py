@@ -230,3 +230,72 @@ def test_once_waits_for_the_first_sign_in_answer(monkeypatch):
     t0 = time.monotonic()
     wait_for_provider(Orch(slow), timeout_s=0.1, poll_s=0.01)      # bounded: gives up and lets the cycle report it
     assert time.monotonic() - t0 < 2
+
+
+# ------------------------------------------------------------------ review fixes (Phase 3 adversarial review)
+def test_a_call_without_an_answer_gives_back_its_setup_and_events(eng, monkeypatch):
+    eng.store.kv_set("XAUUSD:signature", ["old"])
+    eng.store.kv_set("XAUUSD:last_call_price", 4290.0)
+    eng._sig = {"XAUUSD": ["new"]}
+    eng._events["XAUUSD"] = [{"id": 7, "ts": 0, "event": "order", "detail": "{}"}]
+    from tradingsystem.ai.orchestrator import CycleRequest
+
+    async def failed(queue, **kw):
+        return [DecisionRecord("XAUUSD", "agent_per_pair", "t", "error", errors=["usage limit"])]
+    monkeypatch.setattr(eng.orch, "run_cycle", failed)
+
+    async def go():
+        eng._remember_call("XAUUSD", PAYLOAD, "strong")
+        assert eng.store.kv_get("XAUUSD:signature") == ["new"] and eng._events["XAUUSD"] == []
+        await eng._cycle([CycleRequest("XAUUSD", "t", "strong")], {"XAUUSD": PAYLOAD}, T0)
+    asyncio.run(go())
+    assert eng.store.kv_get("XAUUSD:signature") == ["old"] and eng.store.kv_get("XAUUSD:last_call_price") == 4290.0
+    assert [e["id"] for e in eng._events["XAUUSD"]] == [7] and eng.fails["XAUUSD"] == 1
+
+    async def answered(queue, **kw):
+        return [DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=rec_for(decision="NO_TRADE"))]
+    monkeypatch.setattr(eng.orch, "run_cycle", answered)
+
+    async def again():
+        eng._remember_call("XAUUSD", PAYLOAD, "strong")
+        await eng._cycle([CycleRequest("XAUUSD", "t", "strong")], {"XAUUSD": PAYLOAD}, T0)
+    asyncio.run(again())
+    assert eng.store.kv_get("XAUUSD:signature") == ["new"] and eng._events["XAUUSD"] == []
+
+
+def test_the_event_cursor_survives_a_restart(eng, tmp_path):
+    eng._init_event_cursor()
+    eng.appdb.add_event("executor", "order", json.dumps({"pair": "XAUUSD", "text": "placed"}))
+    assert len(eng._pair_events("XAUUSD")) == 1
+    eng._events["XAUUSD"] = []                                       # handled by a call
+    eng.appdb.add_event("executor", "mgmt_position_closed", json.dumps({"pair": "XAUUSD", "text": "stop hit"}))
+    eng.appdb.add_event("executor", "outcome", json.dumps({"pair": "XAUUSD", "text": "old"}))
+    con = sqlite3.connect(eng.s.paths.data() / "app.db")
+    con.execute("UPDATE ingestion_events SET ts=ts-? WHERE event='outcome'", (3 * 3_600_000,))
+    con.commit()
+    con.close()
+    again = Engine(eng.s)                                            # the engine restarted meanwhile
+    try:
+        again._init_event_cursor()
+        got = again._pair_events("XAUUSD")
+        assert [e["event"] for e in got] == ["mgmt_position_closed"]   # the 3-hour-old one does not wake it
+    finally:
+        again.close()
+
+
+def test_the_setup_strength_travels_with_the_call(eng, monkeypatch):
+    got = {}
+
+    async def capture(queue, payloads, as_of):
+        got["queue"] = queue
+    monkeypatch.setattr(eng, "_cycle", capture)
+    monkeypatch.setattr(eng, "ai_ready", lambda: True)
+    monkeypatch.setattr(eng_mod, "data_problems", lambda *a, **k: [])
+    eng._setup = {"XAUUSD": "strong"}
+
+    async def go():
+        eng._dispatch([("XAUUSD", ["review condition: price_above 4300"], "review", PAYLOAD)], T0)
+        await asyncio.sleep(0)
+    asyncio.run(go())
+    [q] = got["queue"]
+    assert (q.strength, q.setup) == ("review", "strong") and "XAUUSD" in eng.inflight

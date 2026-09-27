@@ -104,9 +104,9 @@ empty history): use `switch_to_pairs.bat` or `tools\migrate_instance.py <PAIR>` 
   the all-pairs system refuses while any pair runs. Pairs run next to each other. `stop.bat` without a pair says so
   (and exits with an error) when only per-pair systems are running: use `stop_all.bat` or `stop.bat <PAIR>`.
 - **Shared between the pairs:** the MT5 terminal (one of them starts it if it is missing; history downloads take
-  turns), the Claude sign-in (CLI starts are at least 15 s apart on the whole machine) and the AI request cap
-  (`rpd` counts every pair; one pair may use at most 60 % of it, `ai.instance_max_rpd_share`). The usage is in
-  `data\shared\ai_usage.db`.
+  turns), the Claude sign-in (CLI starts are at least 15 s apart on the whole machine) and the AI request caps
+  (`rpd` counts every pair; each pair may make at most `ai.daily_calls_per_pair` = 40 calls a day, every ledger
+  row counted — first attempts, repairs and escalations; Phase 3, D-043). The usage is in `data\shared\ai_usage.db`.
 - **Account-wide drawdown stop (25 %, `risk.account_drawdown_stop_pct`).** Every system records the account's
   equity peak in `data\shared\account_peak.json`. When the equity falls 25 % below that peak, every system stops
   opening trades (open positions keep their stops) until you run `scripts\reset_drawdown_stop.bat`, even if the
@@ -124,7 +124,8 @@ empty history): use `switch_to_pairs.bat` or `tools\migrate_instance.py <PAIR>` 
 
 - **Charts.** Every call carries six candle charts (1w, 1d, 4h, 1h, 15m, 5m; 720×400) with the levels, zones,
   liquidity, structure and your live trades drawn on them. The latest set is in `data\instances\<PAIR>\charts\<PAIR>\`
-  and in the dashboard (Decisions → a decision → "Charts sent to the model").
+  and in the dashboard (Decisions → a decision → "Charts rendered for the model"). A text-only fallback provider
+  (Gemini) gets no charts and is told so.
 - **Called only when something changed.** Python screens every 5-minute close; Claude is called on a new setup, one
   of its own review conditions, an executor event (fill, target or stop hit, closed position, outcome, the result of
   its own actions) or the 2-hour idle review — at most **40 calls per pair per day** (`ai.daily_calls_per_pair`;
@@ -134,7 +135,8 @@ empty history): use `switch_to_pairs.bat` or `tools\migrate_instance.py <PAIR>` 
   Claude may tighten a stop, take profit, adjust a target or cancel a pending order. It can never widen or remove a
   stop or add size; every action is checked first and listed in the dashboard ("Actions applied").
 - **The kill switch blocks new orders only.** Protective actions (tightening a stop, closing, cancelling) keep running
-  while a kill switch is on — they reduce risk.
+  while a kill switch is on — they reduce risk. While the market is closed (gold's daily break, weekends) or the
+  terminal refuses (Algo Trading off, no connection) they wait and go through when trading resumes — never dropped.
 - **Models per role** (`ai.models` in `config\config.yaml`; override in `config\config.local.yaml`): the decisions use
   the provider's model (Sonnet); `escalation.enabled: true` makes Opus (or `models.escalation.model: fable`) confirm or
   downgrade strong setups before they can be executed.
@@ -143,10 +145,32 @@ Rollback switches in `config\config.local.yaml` (then `scripts\restart_all.bat`)
 
 | Problem | Switch |
 |---|---|
-| Charts use too much RAM or time | `ai: {charts: {enabled: false}}` |
-| Trade management misbehaves | `execution: {management: {dry_run: true}}` (records what it would do) or `enabled: false` |
-| Claude's own actions on live trades misbehave | `execution: {position_actions: {enabled: false}}` |
-| Too many calls | `ai: {daily_calls_per_pair: 25}` |
+| Charts use too much RAM or time | `ai:` → `charts: {enabled: false}` (every pair) |
+| … only for one pair (e.g. keep charts for BTC only) | `instances:` → `XAUUSD: {overrides: {ai: {charts: {enabled: false}}}}` |
+| Trade management misbehaves | `execution:` → `management: {dry_run: true}` (records what it would do) or `enabled: false` |
+| Claude's own actions on live trades misbehave | `execution:` → `position_actions: {enabled: false}` |
+| Too many calls | `ai:` → `daily_calls_per_pair: 25` |
+
+**Each section once.** Several switches of one section go into ONE block — a second `execution:` or `ai:` line would
+replace the first, so the system now refuses to start with "duplicate key" instead:
+
+```yaml
+execution:
+  management: {dry_run: true}
+  position_actions: {enabled: false}
+ai:
+  charts: {enabled: false}
+  escalation: {enabled: true}
+```
+
+Check what is in force with `.venv\Scripts\python.exe -m tradingsystem config` (the "phase 3:" line) before
+`restart_all.bat`.
+
+**Going back to the code before Phase 3** (a `git` checkout of an older commit): first remove every Phase 3 key from
+`config\config.local.yaml` (`ai.charts`, `ai.models`, `ai.escalation`, `ai.daily_calls_per_pair`,
+`ai.event_calls_per_day`, `ai.screen_*`, `ai.weak_*`, `ai.liquidity_atr`, `execution.management`,
+`execution.position_actions`, `instances.*.overrides`) — the older code refuses unknown keys and no service would
+start. The databases need nothing: the older code ignores the new tables and columns.
 
 ---
 

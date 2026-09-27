@@ -118,3 +118,101 @@ def test_decision_records_carry_strength_and_library_hash(make):
     con = store._con
     row = con.execute("SELECT trigger_strength, library_hash FROM ai_decisions WHERE id=?", (r.id,)).fetchone()
     assert row == ("review", o.library_hash)
+
+
+# ------------------------------------------------------------------ review fixes (Phase 3 adversarial review)
+def with_live_sell(o):
+    o.builder.payload["account"] = {**(o.builder.payload.get("account") or {}),
+                                    "open_positions": [{"decision": "abcdef12", "side": "SELL", "volume": 0.01}]}
+    return o
+
+
+def reversal(schema, user, verdict_fn=None):
+    r = rec_for()
+    r["position_actions"] = [{"target": {"decision": "abcdef12", "kind": "position"}, "action": "close",
+                              "fraction": 1.0, "reason": "structure flipped bullish"}]
+    return r
+
+
+def test_a_withheld_trade_keeps_its_protective_actions(make):
+    def resp(schema, user):
+        return {"nonsense": True} if schema == "EscalationReview" else reversal(schema, user)
+    o, _, store = make("agent_per_pair", resp)
+    escalate_on(with_live_sell(o))
+    [r] = run(o)
+    assert r.status == "valid" and r.recommendation["decision"] == "NO_TRADE" and r.actions_state == "pending"
+    assert r.recommendation["position_actions"][0]["action"] == "close"
+    assert any("trade withheld; its position_actions stand" in e for e in r.errors)
+    assert [d["id"] for d in store.pending_actions("XAUUSD", 0)] == [r.id]
+
+
+def test_a_confirmation_keeps_the_traders_actions_whatever_the_escalation_wrote(make):
+    def resp(schema, user):
+        if schema != "EscalationReview":
+            return reversal(schema, user)
+        final = reversal(schema, user)
+        final["position_actions"] = []                               # the senior dropped them: ignored
+        return {"verdict": "confirm", "issues": [], "confidence": 60, "final_recommendation": final}
+    o, _, _ = make("agent_per_pair", resp)
+    escalate_on(with_live_sell(o))
+    [r] = run(o)
+    assert r.status == "valid" and r.recommendation["decision"] == "BUY"
+    assert r.recommendation["position_actions"][0]["action"] == "close" and r.actions_state == "pending"
+
+
+def test_a_strong_setup_labelled_review_is_still_escalated(make):
+    o, prov, _ = make("agent_per_pair", responder())
+    escalate_on(o)
+    asyncio.run(o.run_cycle([CycleRequest("XAUUSD", "review condition: price_above 4300", "review", "strong")],
+                            as_of=1790334600000))
+    assert [c[0] for c in prov.calls] == ["Recommendation", "EscalationReview"]
+
+
+def test_overlapping_cycles_keep_their_own_trigger_strength(make):
+    o, prov, store = make("agent_per_pair", responder())
+    fast = prov._call
+
+    async def slow(*a, **k):                         # both calls in flight at the same time
+        await asyncio.sleep(0.05)
+        return await fast(*a, **k)
+    prov._call = slow
+
+    async def both():
+        a = asyncio.create_task(o.run_cycle([CycleRequest("XAUUSD", "15m BOS", "strong")], as_of=1790334600000))
+        b = asyncio.create_task(o.run_cycle([CycleRequest("BTCUSDT", "event: filled", "event")], as_of=1790334600000))
+        return await a, await b
+    (ra,), (rb,) = asyncio.run(both())
+    assert (ra.trigger_strength, rb.trigger_strength) == ("strong", "event")
+
+
+def test_escalation_never_falls_back_to_another_provider(make, monkeypatch):
+    o, prov, _ = make("agent_per_pair", responder())
+    escalate_on(o, on_failure="withhold")
+    real = o._get
+
+    class Down:
+        name, model, supports_images, availability_pending = "claude_code", "opus", True, False
+
+        def unavailable_reason(self):
+            return "usage limit reached — retry after 12:00"
+    monkeypatch.setattr(o, "_get", lambda name, role="decision": Down() if role == "escalation" else real(name, role))
+    [r] = run(o)
+    assert r.status == "invalid" and any("escalation provider unavailable" in e for e in r.errors)
+    assert [c[0] for c in prov.calls] == ["Recommendation"]                  # nothing went to a fallback
+
+
+def test_no_trade_in_execution_prices_drops_its_priced_actions(make):
+    def resp(schema, user):
+        r = rec_for(decision="NO_TRADE")
+        r["price_reference"] = "mt5:BTCUSD@"
+        r["position_actions"] = [
+            {"target": {"decision": "abcdef12", "kind": "position"}, "action": "modify_sl", "value": 84250.0,
+             "reason": "tighten"},
+            {"target": {"decision": "abcdef12", "kind": "position"}, "action": "close", "fraction": 1.0,
+             "reason": "done"}]
+        return r
+    o, _, _ = make("agent_per_pair", resp)
+    with_live_sell(o)
+    [r] = asyncio.run(o.run_cycle([CycleRequest("BTCUSDT", "test")], as_of=1790334600000))
+    assert r.status == "valid" and [a["action"] for a in r.recommendation["position_actions"]] == ["close"]
+    assert any("priced position action(s) dropped" in e for e in r.errors)

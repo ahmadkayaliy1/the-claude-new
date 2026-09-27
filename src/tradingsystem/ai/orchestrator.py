@@ -45,8 +45,10 @@ log = logging.getLogger(__name__)
 ANALYST_TFS = ["1w", "1d", "4h", "1h", "15m", "5m"]
 NO_CHARTS = "No charts this cycle."
 NO_PLAYBOOK = "(no playbook yet)"
-# a confirmed escalation must keep every one of these exactly as the trader proposed them
-ESCALATION_FIXED = ("decision", "order_type", "entry", "stop_loss", "take_profits", "management", "position_actions")
+# a confirmed escalation must keep every one of these exactly as the trader proposed them (the trader's
+# position_actions always stand: the escalation judges the new trade, not the protective actions on live ones)
+ESCALATION_FIXED = ("decision", "order_type", "entry", "stop_loss", "take_profits", "management")
+ESCALATION_SIGN_IN_WAIT_S = 60.0         # a new escalation provider instance waits this long for its sign-in check
 
 
 @dataclass
@@ -54,6 +56,8 @@ class CycleRequest:
     pair: str
     reason: str
     strength: str | None = None          # the trigger strength (strong | weak | review | event | idle | close | manual)
+    setup: str | None = None             # a setup that fired with it (strong | weak), also when the call is labelled
+    #                                      review/event (escalation looks at both)
 
 
 class Orchestrator:
@@ -112,6 +116,10 @@ class Orchestrator:
         if key not in self._providers:
             prov = make_provider(self.s, name, model=model, effort=effort) if (model or effort) \
                 else make_provider(self.s, name)
+            if (adopt := getattr(prov, "adopt_sign_in", None)) is not None:
+                for (n, *_), other in self._providers.items():   # the sign-in is the machine's: reuse a verified one
+                    if n == name:
+                        adopt(other)
             self._providers[key] = prov
             if prov.name not in self._limiters:        # one limiter per provider: every role shares the daily cap
                 self._limiters[prov.name] = RateLimiter(prov.name, prov.cfg, self.usage,
@@ -168,6 +176,8 @@ class Orchestrator:
             "min_confidence": r.min_confidence, "max_rec_age_min": round(r.max_recommendation_age_s / 60),
             "price_reference": self.reg.primary(pair).key if pair else "each pair's meta.price_reference",
             "output_language": "English" if self.s.ai.output_language == "en" else self.s.ai.output_language,
+            "sl_change_minutes": self.s.execution.position_actions.min_minutes_between_sl_changes,
+            "actions_per_day": self.s.execution.position_actions.max_per_pair_per_day,
         }
 
     def _user_vars(self, pair: str | None, as_of: int, reason: str, payload_json: str, *,
@@ -211,12 +221,24 @@ class Orchestrator:
             imgs = self.charts.render_set(self.builder.reader(inst), inst, as_of, payload, cal)
             try:                                  # the latest set, for the dashboard (never a reason to fail)
                 out.mkdir(parents=True, exist_ok=True)
-                for c in imgs:
+            except OSError as exc:
+                log.warning("%s: could not store the chart PNGs: %s", pair, exc)
+                return imgs
+            done = set()
+            for c in imgs:                        # each file on its own: one locked file never stops the others
+                try:
                     tmp = out / f"{c.tf}.png.tmp"
                     tmp.write_bytes(c.png)
                     tmp.replace(out / f"{c.tf}.png")
-            except OSError as exc:
-                log.warning("%s: could not store the chart PNGs: %s", pair, exc)
+                    done.add(c.tf)
+                except OSError as exc:
+                    log.warning("%s: could not store the %s chart: %s", pair, c.tf, exc)
+            for tf in self.s.ai.charts.timeframes:    # a timeframe not rendered this time: no stale picture left
+                if tf not in done and tf not in {c.tf for c in imgs}:
+                    try:
+                        (out / f"{tf}.png").unlink(missing_ok=True)
+                    except OSError:
+                        pass
             return imgs
 
         try:
@@ -242,7 +264,8 @@ class Orchestrator:
         mode, why = self.effective_mode()
         label = mode if why == "configured" else f"{mode} ({why})"
         reasons = {rq.pair: rq.reason for rq in requests}
-        self._strength = {rq.pair: rq.strength for rq in requests}
+        # per call, never shared state: cycles of different pairs overlap in the all-pairs layout
+        trig = {rq.pair: (rq.strength, rq.setup) for rq in requests}
         built: dict[str, dict] = {}
         out: list[DecisionRecord] = []
         for rq in requests:
@@ -253,11 +276,12 @@ class Orchestrator:
             except Exception as exc:  # noqa: BLE001
                 log.exception("%s: snapshot failed", rq.pair)
                 out.append(self._finish(DecisionRecord(rq.pair, label, rq.reason, "error",
-                                                       errors=[f"snapshot failed: {exc!r}"[:300]]), label, as_of, None))
+                                                       errors=[f"snapshot failed: {exc!r}"[:300]]), label, as_of, None,
+                                        trig))
         if mode == "paused":
             return out + [self._finish(self._failed(p, mode, reasons[p], built[p], why, "budget_blocked"), label,
-                                       as_of, built[p]) for p in built]
-        units = self._units(mode, built, reasons, as_of, account)
+                                       as_of, built[p], trig) for p in built]
+        units = self._units(mode, built, reasons, as_of, account, trig)
         tasks = {asyncio.ensure_future(coro): pairs for pairs, coro in units}
         end = time.monotonic() + deadline_s if deadline_s else None
         pending = set(tasks)
@@ -274,7 +298,7 @@ class Orchestrator:
                         log.error("AI unit %s failed: %r", tasks[t], exc, exc_info=exc)
                         recs = [self._failed(p, mode, reasons[p], built[p], f"{type(exc).__name__}: {exc}")
                                 for p in tasks[t]]
-                    out += [self._finish(rec, label, as_of, built.get(rec.pair)) for rec in recs]
+                    out += [self._finish(rec, label, as_of, built.get(rec.pair), trig) for rec in recs]
         finally:
             for t in pending:                    # deadline or shutdown: cancelling kills any running CLI call
                 t.cancel()
@@ -284,11 +308,11 @@ class Orchestrator:
             log.warning("AI cycle deadline (%.0fs) reached — cancelled %s", deadline_s, tasks[t])
             out += [self._finish(self._failed(p, mode, reasons[p], built[p],
                                               f"cycle deadline of {deadline_s:.0f}s reached — cancelled"),
-                                 label, as_of, built[p]) for p in tasks[t]]
+                                 label, as_of, built[p], trig) for p in tasks[t]]
         return out
 
     def _units(self, mode: str, payloads: dict, reasons: dict, as_of: int,
-               account: dict) -> list[tuple[list[str], object]]:
+               account: dict, trig: dict | None = None) -> list[tuple[list[str], object]]:
         """(pairs, coroutine → list[DecisionRecord]) per independent unit of work."""
         if not payloads:
             return []
@@ -303,7 +327,7 @@ class Orchestrator:
         else:
             review = mode == "agent_per_pair_with_risk_reviewer"
             job = lambda p: self._per_pair(p, payloads[p], reasons[p], as_of, account, review=review,  # noqa: E731
-                                           charts=True)
+                                           charts=True, trigger=(trig or {}).get(p))
         return [([p], _as_list(job(p))) for p in payloads]
 
     @staticmethod
@@ -311,10 +335,11 @@ class Orchestrator:
         return DecisionRecord(pair, mode, reason, status, payload_hash=payload["meta"]["payload_hash"],
                               errors=[error[:300]])
 
-    def _finish(self, rec: DecisionRecord, label: str, as_of: int, payload: dict | None) -> DecisionRecord:
+    def _finish(self, rec: DecisionRecord, label: str, as_of: int, payload: dict | None,
+                trig: dict | None = None) -> DecisionRecord:
         rec.mode = label
         rec.library_hash = rec.library_hash or self.library_hash
-        rec.trigger_strength = rec.trigger_strength or getattr(self, "_strength", {}).get(rec.pair)
+        rec.trigger_strength = rec.trigger_strength or ((trig or {}).get(rec.pair) or (None, None))[0]
         if rec.status == "valid" and rec.recommendation:
             try:
                 self._finalize(rec, as_of, payload)
@@ -339,9 +364,21 @@ class Orchestrator:
         trade = r.get("decision") != Decision.NO_TRADE.value
         ref = r.get("price_reference")
         if ref != prim:
-            if trade and ref == execu:
-                return _reject(rec, f"price_reference {ref!r} is the execution instrument — levels must be in "
-                                    f"{prim} prices")
+            if ref == execu:
+                # the prices were read in the execution instrument: priced actions would be shifted by the basis
+                # a second time — dropped (close / cancel_order carry no price and stand)
+                acts = r.get("position_actions") or []
+                keep = [a for a in acts if a.get("action") not in ("modify_sl", "modify_tp")]
+                if len(keep) != len(acts):
+                    notes.append(f"{len(acts) - len(keep)} priced position action(s) dropped: price_reference "
+                                 f"{ref!r} is the execution instrument")
+                r["position_actions"] = keep
+                if trade:
+                    why = f"price_reference {ref!r} is the execution instrument — levels must be in {prim} prices"
+                    if not keep:
+                        return _reject(rec, why)
+                    r, trade = _as_no_trade(r), False
+                    rec.errors.append(f"{why} — the trade is withheld; its position_actions stand")
             notes.append(f"price_reference {ref!r} -> {prim}")
             r["price_reference"] = prim
         r["pair"], r["timestamp"] = rec.pair, iso(as_of)
@@ -352,7 +389,11 @@ class Orchestrator:
             notes.append(f"valid_until {iso(vu)} clamped to {iso(cap)}")
         elif vu <= as_of:
             if trade:
-                return _reject(rec, f"valid_until {iso(vu)} is not after the cycle time {iso(as_of)}")
+                why = f"valid_until {iso(vu)} is not after the cycle time {iso(as_of)}"
+                if not r.get("position_actions"):
+                    return _reject(rec, why)
+                r, trade = _as_no_trade(r), False
+                rec.errors.append(f"{why} — the trade is withheld; its position_actions stand")
             r["valid_until"] = iso(as_of + self.s.pairs[rec.pair].decision_timeframe.ms)
         r["next_review"] = self._review_plan(r.get("next_review") or {}, payload, notes)
         r["position_actions"] = self._action_targets(r.get("position_actions") or [], payload, notes)
@@ -435,17 +476,20 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ modes
     async def _per_pair(self, pair: str, payload: dict, reason: str, as_of: int, account: dict, *,
-                        review: bool = False, provider_name: str | None = None, charts: bool = False) -> DecisionRecord:
+                        review: bool = False, provider_name: str | None = None, charts: bool = False,
+                        trigger: tuple[str | None, str | None] | None = None) -> DecisionRecord:
         prov = self.provider(provider_name)
+        # a provider that cannot read images (e.g. the text-only fallback) gets no charts and is not told of any
+        charts = charts and bool(getattr(prov, "supports_images", False))
         images, note = await self.charts_for(pair, as_of, payload) if charts else ([], NO_CHARTS)
         uv = self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account,
                              charts_note=note)
         pr = render("agent_per_pair", self._system_vars(pair, account), uv)
         gen = await self._gen(prov, Recommendation, pr.system, pr.user, "agent_per_pair", pair, images=images)
         rec = self._record(pair, "agent_per_pair", reason, payload, gen, prov, pr.prompt_hash)
-        rec.trigger_strength = getattr(self, "_strength", {}).get(pair)
+        rec.trigger_strength, setup = trigger or (None, None)
         if rec.status == "valid" and rec.recommendation["decision"] != Decision.NO_TRADE.value:
-            await self._escalate(rec, pair, payload, reason, as_of, account, uv, images)
+            await self._escalate(rec, pair, payload, reason, as_of, account, uv, images, setup=setup)
         if not review or rec.status != "valid" or rec.recommendation["decision"] == Decision.NO_TRADE.value:
             return rec
         rv = render("risk_reviewer", self._system_vars(pair, account),
@@ -466,15 +510,19 @@ class Orchestrator:
             rec.rr_computed = final.rr_computed()
             rec.errors.append(f"risk review: {g2.value.verdict}: " + "; ".join(g2.value.issues[:5]))
         else:
-            # a trade that could not be reviewed is not released
-            rec.status = "invalid"
-            rec.errors.append("risk review failed — trade withheld")
+            _withhold(rec, "risk review failed")         # a trade that could not be reviewed is not released
         return rec
 
-    def escalation_due(self, rec: DecisionRecord, pair: str) -> str | None:
-        """Why a strong trade idea goes to the stronger model first (None = no escalation)."""
+    def escalation_due(self, rec: DecisionRecord, pair: str, setup: str | None = None) -> str | None:
+        """Why a strong trade idea goes to the stronger model first (None = no escalation). ``setup``: the setup
+        strength when a setup fired together with a review condition or an executor event (the call is labelled by
+        the review/event, the setup is still strong)."""
         esc = self.s.ai.escalation
-        if not esc.enabled or rec.trigger_strength not in esc.on_strength:
+        if not esc.enabled:
+            return None
+        why = rec.trigger_strength if rec.trigger_strength in esc.on_strength else setup if setup in esc.on_strength \
+            else None
+        if why is None:
             return None
         if int(rec.recommendation.get("confidence") or 0) < esc.min_confidence:
             return None
@@ -484,19 +532,35 @@ class Orchestrator:
         left, _ = self.quota()
         if left is not None and left < 2:
             return None
-        return f"{rec.trigger_strength} setup, confidence {rec.recommendation.get('confidence')}"
+        return f"{why} setup, confidence {rec.recommendation.get('confidence')}"
+
+    async def _escalation_provider(self, wait_s: float) -> LLMProvider:
+        """The escalation role's provider: the ACTIVE provider with ``ai.models.escalation`` — never rerouted to the
+        fallback (a text-only fallback confirming for "Opus" would defeat the check). A new instance waits (bounded)
+        for its sign-in check; unavailable → raises, and ``escalation.on_failure`` decides."""
+        prov = self._get(self.s.ai.active_provider, "escalation")
+        end = time.monotonic() + wait_s
+        why = prov.unavailable_reason()
+        while getattr(prov, "availability_pending", False) and time.monotonic() < end:
+            await asyncio.sleep(0.5)
+            why = prov.unavailable_reason()
+        if why:
+            raise ProviderError(f"escalation provider unavailable: {why}", retryable=False)
+        return prov
 
     async def _escalate(self, rec: DecisionRecord, pair: str, payload: dict, reason: str, as_of: int, account: dict,
-                        uv: dict, images: list[ImageInput]) -> None:
+                        uv: dict, images: list[ImageInput], *, setup: str | None = None) -> None:
         """D-043: a stronger model (``ai.models.escalation``) may confirm the trade unchanged or downgrade it to
         NO_TRADE; it can never change levels, raise confidence or add risk."""
-        why = self.escalation_due(rec, pair)
+        why = self.escalation_due(rec, pair, setup)
         if why is None:
             return
         esc = self.s.ai.escalation
         first = rec.recommendation
         try:
-            prov = self.provider(role="escalation")
+            prov = await self._escalation_provider(min(ESCALATION_SIGN_IN_WAIT_S, esc.timeout_s / 2))
+            if not getattr(prov, "supports_images", False):
+                images, uv = [], {**uv, "charts_note": NO_CHARTS}
             pr = render("escalation", self._system_vars(pair, account), {**uv, "proposal": json.dumps(first)})
             g = await asyncio.wait_for(self._gen(prov, EscalationReview, pr.system, pr.user, "escalation", pair,
                                                  images=images, role="escalation"), esc.timeout_s)
@@ -514,8 +578,7 @@ class Orchestrator:
         if g is None or not g.ok:
             msg = err if g is None else "escalation invalid: " + "; ".join(g.errors[:3])
             if esc.on_failure == "withhold":
-                rec.status = "invalid"
-                rec.errors.append(f"{msg} — trade withheld")
+                _withhold(rec, msg)
             else:
                 rec.errors.append(f"{msg} — trader's decision kept")
             return
@@ -523,8 +586,7 @@ class Orchestrator:
         if g.value.verdict == "confirm":
             changed = [k for k in ESCALATION_FIXED if final.get(k) != first.get(k)]
             if changed:
-                rec.status, rec.recommendation, rec.rr_computed = "invalid", None, None
-                rec.errors.append(f"escalation altered levels ({', '.join(changed)}) — trade withheld")
+                _withhold(rec, f"escalation altered levels ({', '.join(changed)})")
                 return
             conf = min(int(first.get("confidence") or 0), int(g.value.confidence), int(final.get("confidence") or 0))
             rec.recommendation = {**first, "confidence": conf}
@@ -683,6 +745,25 @@ async def _as_list(coro) -> list[DecisionRecord]:
 def _reject(rec: DecisionRecord, why: str) -> None:
     rec.status, rec.recommendation, rec.rr_computed = "invalid", None, None
     rec.errors.append(why)
+
+
+def _as_no_trade(r: dict) -> dict:
+    """The recommendation without its new trade (NO_TRADE carries no order, entry, stop or targets)."""
+    return {**r, "decision": Decision.NO_TRADE.value, "order_type": None, "entry": None, "stop_loss": None,
+            "take_profits": [], "risk_management": None, "management": []}
+
+
+def _withhold(rec: DecisionRecord, why: str) -> None:
+    """A new trade that is not released (escalation failed or altered it, risk review failed). Its
+    ``position_actions`` on live trades still stand — the record becomes a valid NO_TRADE carrying them, exactly as
+    a downgrade does; without actions the record is invalid, as before."""
+    r = rec.recommendation or {}
+    if not r.get("position_actions"):
+        rec.status, rec.recommendation, rec.rr_computed = "invalid", None, None
+        rec.errors.append(f"{why} — trade withheld")
+        return
+    rec.status, rec.recommendation, rec.rr_computed = "valid", _as_no_trade(r), None
+    rec.errors.append(f"{why} — trade withheld; its position_actions stand")
 
 
 def _analysis_mid(payload: dict | None) -> float | None:

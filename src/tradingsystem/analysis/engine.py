@@ -56,6 +56,9 @@ EVENT_COALESCE_MS = 60_000  # executor events are gathered this long before they
 # executor events that wake the model (Phase 3): a placement, a fill, a closed position, a settled outcome, and the
 # result of its own position_actions
 WAKE_EVENTS = ("order", "mgmt_filled", "mgmt_position_closed", "outcome", "action_applied", "action_rejected")
+EVENT_CURSOR_KEY = "executor_event_id"   # engine_kv: the last executor event handed to a pair (survives restarts)
+EVENT_MAX_AGE_MS = 2 * 3_600_000          # … but an event older than this at start-up no longer wakes the model
+ANSWERED = ("valid", "invalid", "refused")   # the model answered: the setup and events it was called for are seen
 
 
 class Engine:
@@ -74,7 +77,9 @@ class Engine:
         self.processed_screen: dict[str, int] = {}   # last screen-TF (5m) bar evaluated at its close
         self._closes: dict[str, dict[str, float]] = {}   # last closed bar close per TF (candle review conditions)
         self._events: dict[str, list[dict]] = {}     # executor events waiting to wake the model, per pair
-        self._event_id = 0                            # set from the DB in run() (older events never wake)
+        self._event_id = 0                            # set in run() from engine_kv / the DB
+        self._prev_call: dict[str, tuple] = {}        # pair → (signature, price, events) before the call in flight
+        self._setup: dict[str, str | None] = {}       # pair → setup strength of the last evaluation
         self._build_ms: deque[int] = deque(maxlen=20)   # snapshot build times (5-min screening cost on this PC)
         self.last_call: dict[str, int] = {}          # last dispatch per pair (the DB covers restarts)
         self.fails: dict[str, int] = {}              # consecutive failed cycles per pair → back-off
@@ -163,12 +168,25 @@ class Engine:
         tfs = {Timeframe.parse(t).value for t in (pcfg.timeframes or self.s.timeframes)}
         return stf if stf.ms < dec.ms and stf.value in tfs else dec
 
+    def _init_event_cursor(self) -> None:
+        """Executor events: from where the last run stopped (events written during a restart still wake the model,
+        when younger than EVENT_MAX_AGE_MS); the very first run starts after the newest event."""
+        stored = self.store.kv_get(EVENT_CURSOR_KEY)
+        self._event_id = int(stored) if isinstance(stored, int) else self.store.last_event_id()
+
     def _pair_events(self, pair: str) -> list[dict]:
         """New executor events of ``pair`` (the all-pairs system has every pair's events in one table)."""
         rows = self.store.events_after(self._event_id, WAKE_EVENTS)
         if rows:
             self._event_id = rows[-1]["id"]
+            try:
+                self.store.kv_set(EVENT_CURSOR_KEY, self._event_id)
+            except Exception:  # noqa: BLE001 — the cursor is a restart aid; the events are handled anyway
+                log.warning("could not persist the executor event cursor", exc_info=True)
+        cutoff = now_ms() - EVENT_MAX_AGE_MS
         for r in rows:
+            if int(r["ts"] or 0) < cutoff:
+                continue                     # from before a long stop: history, not a reason to call now
             owner = None
             try:
                 owner = (json.loads(r["detail"]) or {}).get("pair") if r["detail"] else None
@@ -252,6 +270,7 @@ class Engine:
         self._sig = getattr(self, "_sig", {})
         if d.signature or payload:
             self._sig[pair] = sorted(d.signature)
+        self._setup[pair] = d.setup
         return d.fire, d.reasons, d.strength
 
     async def tick(self) -> None:
@@ -325,27 +344,53 @@ class Engine:
                 log.warning("%s: AI call skipped — %s", pair, "; ".join(problems)[:300])
                 continue
             payloads[pair] = p
-            queue.append(CycleRequest(pair, "; ".join(reasons)[:600], strength))
+            queue.append(CycleRequest(pair, "; ".join(reasons)[:600], strength, self._setup.get(pair)))
         if not queue:
             return
         task = asyncio.create_task(self._cycle(queue, payloads, now))
-        for q in queue:
+        for q in queue:                          # mark every pair first: a failure below never leaves one unmarked
             self.last_call[q.pair] = now          # counted at dispatch, whatever the outcome (F15)
             self.inflight[q.pair] = task
             self.inflight_since[q.pair] = now
-            self._remember_call(q.pair, payloads[q.pair], q.strength)
+        for q in queue:
+            try:
+                self._remember_call(q.pair, payloads[q.pair], q.strength)
+            except Exception:  # noqa: BLE001 — the call is on its way; the next screens compare with older values
+                log.exception("%s: could not record the call's setup signature", q.pair)
 
     def _remember_call(self, pair: str, payload: dict, strength: str | None) -> None:
         """At dispatch: the setup signature and price the next "did anything change?" test compares against, and
-        the executor events this call now covers."""
+        the executor events this call now covers. The values before are kept until the call ends: a call that got
+        no answer gives them back (:meth:`_restore_call`), so its setup and events can call again after the
+        back-off."""
+        prev_sig, prev_px = self.store.kv_get(f"{pair}:signature"), self.store.kv_get(f"{pair}:last_call_price")
+        consumed = list(self._events.get(pair) or [])
+        self._prev_call[pair] = (prev_sig, prev_px, consumed)
         sig = getattr(self, "_sig", {}).get(pair)
         if sig is not None:
             self.store.kv_set(f"{pair}:signature", sig)
         mid = _payload_mid(payload)
         if mid:
             self.store.kv_set(f"{pair}:last_call_price", mid)
-        if strength == "event" or self._events.get(pair):
+        if strength == "event" or consumed:
             self._events[pair] = []
+
+    def _restore_call(self, pair: str) -> None:
+        """The call for ``pair`` got no answer (error, budget block, deadline, crash): the setup it was called for
+        is not seen and its executor events are not handled."""
+        prev = self._prev_call.pop(pair, None)
+        if prev is None:
+            return
+        sig, px, consumed = prev
+        try:
+            if sig is not None:
+                self.store.kv_set(f"{pair}:signature", sig)
+            if px is not None:
+                self.store.kv_set(f"{pair}:last_call_price", px)
+        except Exception:  # noqa: BLE001
+            log.exception("%s: could not restore the setup signature", pair)
+        if consumed:
+            self._events[pair] = consumed + [e for e in self._events.get(pair, []) if e not in consumed]
 
     def _event_budget(self, pair: str, now: int) -> bool:
         """Event-woken calls per pair and UTC day (``ai.event_calls_per_day``)."""
@@ -369,16 +414,24 @@ class Engine:
 
     async def _cycle(self, queue: list[CycleRequest], payloads: dict[str, dict], as_of: int) -> None:
         pairs = [q.pair for q in queue]
+        answered: set[str] = set()
         try:
             recs = await self.orch.run_cycle(queue, as_of=as_of, payloads=payloads, account=self.live_account(None))
             for r in recs:
                 self.fails[r.pair] = 0 if r.status in ("valid", "skipped") else self.fails.get(r.pair, 0) + 1
+                if r.status in ANSWERED:
+                    answered.add(r.pair)
         except Exception as exc:  # noqa: BLE001
             log.exception("AI cycle failed")
             self.appdb.add_event("engine", "cycle_error", repr(exc)[:300])
             for p in pairs:
                 self.fails[p] = self.fails.get(p, 0) + 1
         finally:
+            for p in pairs:
+                if p in answered:
+                    self._prev_call.pop(p, None)
+                else:
+                    self._restore_call(p)
             me = asyncio.current_task()
             for p in pairs:
                 if self.inflight.get(p) is me:
@@ -432,7 +485,7 @@ class Engine:
             self.processed[pair] = tf.floor(now) - tf.ms
             stf = self.screen_tf(pair)
             self.processed_screen[pair] = stf.floor(now) - stf.ms
-        self._event_id = self.store.last_event_id()          # events from before the start do not wake the model
+        self._init_event_cursor()
         hb = asyncio.create_task(self._heartbeat())
         try:
             while not self.stop:

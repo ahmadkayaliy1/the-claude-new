@@ -23,7 +23,7 @@ from pathlib import Path
 
 from ...core.timeutil import now_ms, parse_date_spec
 from ...storage.sqlite_store import connect
-from ..sizing import split_volume  # noqa: F401 — one split rule for the gate and both backends
+from ..sizing import single_leg_index, split_volume  # noqa: F401 — one split rule for the gate and both backends
 from ..exposure import aggregate, leg
 
 _DDL = [
@@ -156,25 +156,26 @@ class PaperBackend:
         tps = rec["take_profits"]
         vols = split_volume(lots, [tp["close_fraction"] for tp in tps], volume_step, volume_min) if len(tps) > 1 else [lots]
         note = None
+        idx = list(range(1, len(tps) + 1))           # each leg keeps the index of its target in the decision
         if vols is None:
-            k = max(range(len(tps)), key=lambda i: (tps[i]["close_fraction"], -i))
-            tps, vols = [tps[k]], [lots]
+            k = single_leg_index([tp["close_fraction"] for tp in tps])
+            tps, vols, idx = [tps[k]], [lots], [k + 1]
             note = f"volume {lots} too small to split across {len(rec['take_profits'])} targets — single leg at TP{k + 1}"
         expires = parse_date_spec(rec["valid_until"]) if rec["order_type"] != "MARKET" else None
         mgmt = json.dumps(rec.get("management", []))
         created = quote.time_msc
         mark = quote.order_key                     # ticks at/before the placement quote are never evaluated
         rows = []
-        for i, (tp, v) in enumerate(zip(tps, vols)):
-            leg_id = f"{decision_id}:{i + 1}"
+        for i, tp, v in zip(idx, tps, vols):
+            leg_id = f"{decision_id}:{i}"
             if rec["order_type"] == "MARKET":
                 fill = quote.ask if side == "BUY" else quote.bid
                 rows.append((leg_id, decision_id, pair, instrument, side, "MARKET", None, v, contract_size,
-                             rec["stop_loss"], tp["price"], i + 1, OPEN, created, None, fill, created, None, None,
+                             rec["stop_loss"], tp["price"], i, OPEN, created, None, fill, created, None, None,
                              None, None, mgmt, mark))
             else:
                 rows.append((leg_id, decision_id, pair, instrument, side, rec["order_type"], entry, v, contract_size,
-                             rec["stop_loss"], tp["price"], i + 1, PENDING, created, expires, None, None, None, None,
+                             rec["stop_loss"], tp["price"], i, PENDING, created, expires, None, None, None, None,
                              None, None, mgmt, mark))
         with self._lock:
             self._con.execute("BEGIN")

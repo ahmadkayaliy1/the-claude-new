@@ -76,6 +76,11 @@ async def generate_validated(provider: LLMProvider, model_cls: type[T], *, syste
     prompt = user
     first_text = user                              # the first attempt's text (gains a note if the charts are dropped)
     pending = list(images or [])                   # still to be sent: cleared after the first answer
+    if pending and not getattr(provider, "supports_images", False):
+        # a text-only provider (e.g. the fallback) must not read "Attached: N charts" without seeing them
+        gen.charts_dropped = f"{provider.name} does not take images"
+        pending = []
+        first_text = prompt = first_text + NO_CHARTS_NOTE
     record = functools.partial(usage.record, provider=provider.name, purpose=purpose, pair=pair, role=role)
     repairs = retries = 0
     while True:

@@ -16,7 +16,9 @@ from tradingsystem.ai.triggers import (Reason, TriggerDecision, decide, review_d
 FIXTURE = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "real" / "payload_xauusd.json").read_text())
 MIN = 60_000
 NOW = 1790334600000                      # 2026-09-25T11:10:00Z
-SWEEP_1H = "1h:sweep:bearish:4295.76"      # the fixture's one setup: a 1h sweep on its last bar (keyed by its pool)
+# the fixture's one setup: a 1h sweep on its last bar, keyed by its pool and the first bar of the run of bars sweeping
+# it (the 08:00 and 09:00 bars both swept 4295.76)
+SWEEP_1H = "1h:sweep:bearish:4295.76:2026-09-25T08:00:00.000Z"
 
 
 def payload() -> dict:
@@ -285,6 +287,15 @@ def test_a_repeated_sweep_of_the_same_pool_is_one_setup():
     assert SWEEP_1H in setup_signature(scan_setups(q)) and not screen(q, last_signature=first.signature).fire
     q["timeframes"]["1h"]["structure"]["events"][-1]["level"] = 4290.0          # a different pool → a new setup
     assert screen(q, last_signature=first.signature).fire
+    # the same pool swept again after a bar without a sweep: a new setup (a second sweep is information)
+    r = payload()
+    last = r["timeframes"]["1h"]["recent"][-1]
+    r["timeframes"]["1h"]["recent"] += [["2026-09-25T10:00:00.000Z"] + last[1:], ["2026-09-25T11:00:00.000Z"] + last[1:]]
+    r["timeframes"]["1h"]["structure"]["events"].append({"time": "2026-09-25T11:00:00.000Z", "kind": "sweep",
+                                                         "dir": "bearish", "level": 4295.76})
+    keys = setup_signature(scan_setups(r))
+    assert "1h:sweep:bearish:4295.76:2026-09-25T11:00:00.000Z" in keys
+    assert screen(r, last_signature=first.signature).fire
 
 
 def test_5m_candles_and_flow_alone_at_a_seen_location_wait_for_the_models_review():

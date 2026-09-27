@@ -119,3 +119,17 @@ def test_process_scan_opens_only_python_processes(monkeypatch):
     rows = app_mod._process_list()
     assert opened == ["python.exe", "python.exe"] and [r["pid"] for r in rows] == [3] and rows[0]["rss_mb"] == 50
     json.dumps(rows)
+
+
+def test_chart_routes_serve_only_configured_files_and_nothing_while_charts_are_off(env):
+    d = env.s.paths.state() / "charts" / "XAUUSD"
+    d.mkdir(parents=True)
+    (d / "15m.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    assert [c["tf"] for c in env.client.get("/api/charts/XAUUSD").json()] == ["15m"]
+    assert env.client.get("/api/charts/XAUUSD/15m").status_code == 200
+    assert env.client.get("/api/charts/XAUUSD/..%5C..%5Capp.db").status_code == 404      # never a path
+    assert env.client.get("/api/charts/NOPE").status_code == 404
+    off = env.s.model_copy(update={"ai": env.s.ai.model_copy(update={"charts": env.s.ai.charts.model_copy(
+        update={"enabled": False})})})
+    client = TestClient(app_mod.create_app(off), base_url=env.origin)
+    assert client.get("/api/charts/XAUUSD").json() == []                                # a rollback shows no leftovers

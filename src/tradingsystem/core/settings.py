@@ -429,6 +429,9 @@ class InstanceCfg(_Model):
     """One fully independent system for one pair (D-042): ``run all --instance <PAIR>``."""
     api_port: int = Field(ge=1024, le=65535)
     magic_offset: int = Field(ge=1, le=999)   # MT5 magic = execution.magic + offset → per-instance risk limits
+    # settings of this system only, merged over the rest (e.g. ``{ai: {charts: {enabled: false}}}`` to keep charts
+    # for one pair on a tight-RAM machine); validated like the rest; never paths/pairs/instances
+    overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class Settings(_Model):
@@ -525,6 +528,29 @@ def _resolve(p: str) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a repeated key: ``execution: {…}`` written twice in config.local.yaml would silently
+    drop the first block (e.g. a rollback switch) — a named error at start-up instead."""
+
+
+def _construct_unique(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False) -> dict:
+    seen: set = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"duplicate key {key!r} — merge the two blocks into one", key_node.start_mark)
+        seen.add(key)
+    return loader.construct_mapping(node, deep=deep)
+
+
+_UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique)
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader) or {}
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(base)
     for k, v in override.items():
@@ -562,6 +588,12 @@ def _apply_instance(raw: dict[str, Any], instance: str) -> dict[str, Any]:
     if instance not in pairs or icfg is None:
         raise ValueError(f"{INSTANCE_ENV}={instance!r}: not a configured instance (config 'instances:' has "
                          f"{sorted(out.get('instances') or {})})")
+    ov = icfg.get("overrides") or {}
+    bad = sorted(set(ov) & {"paths", "pairs", "instances", "config_hash"})
+    if bad:
+        raise ValueError(f"instances.{instance}.overrides may not set {bad}")
+    out = _deep_merge(out, ov)
+    pairs = out.get("pairs") or {}
     for name, p in pairs.items():
         p["enabled"] = name == instance
     out.setdefault("paths", {})["instance"] = instance
@@ -598,10 +630,10 @@ def load_settings(
     path = config_path or DEFAULT_CONFIG
     if not path.exists():
         raise FileNotFoundError(f"config file not found: {path}")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    raw = _load_yaml(path)
     local = local_path if local_path is not None else (LOCAL_CONFIG if config_path is None else None)
     if local is not None and local.exists():
-        raw = _deep_merge(raw, yaml.safe_load(local.read_text(encoding="utf-8")) or {})
+        raw = _deep_merge(raw, _load_yaml(local))
     env = dict(os.environ)
     if extra_env:
         env.update(extra_env)

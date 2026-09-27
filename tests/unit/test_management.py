@@ -296,7 +296,9 @@ class SimLegs:
         self.bid, self.ask, self.stops = bid, ask, stops
         self.calls: list[tuple] = []
         self.fail_sl = None
+        self.fail_code = 10031
         self.raise_on: str | None = None
+        self.close_status: str | None = None
 
     def legs_of(self, decision_id):
         if self.raise_on == "legs_of":
@@ -311,7 +313,7 @@ class SimLegs:
         if self.raise_on == "set_sl":
             raise RuntimeError("connection reset")
         if self.fail_sl:
-            return ActionResult(False, "failed", self.fail_sl, 10031)
+            return ActionResult(False, "failed", self.fail_sl, self.fail_code)
         self.legs[leg.key].sl = sl
         return ActionResult(True, "applied", "done", 10009)
 
@@ -324,6 +326,10 @@ class SimLegs:
         lg.volume = round(lg.volume - volume, 8)
         if lg.volume <= 1e-9:
             lg.kind, lg.closed_reason = "closed", "other"
+        if self.close_status == "unknown":            # executed, but the confirmation never came (MT5 timeout)
+            return ActionResult(False, "unknown", "10012 TIMEOUT: outcome unknown", 10012)
+        if self.close_status == "failed_but_done":    # executed, reported as failed (settlement could not be read)
+            return ActionResult(False, "failed", "could not verify", 10012)
         return ActionResult(True, "applied", "closed", 10009)
 
     def cancel(self, leg):
@@ -433,10 +439,32 @@ def test_manager_deferred_move_is_closed_out_when_the_leg_closes(tmp_path, setti
     assert json.loads(r["requested"])["rule"] == "move_sl_to_breakeven"          # the original request is kept
 
 
-def test_manager_failed_action_is_retried_after_a_minute_then_given_up(tmp_path, settings):
+def test_manager_venue_refusals_wait_and_are_never_given_up(tmp_path, settings):
+    """Market closed / algo trading off / no connection: the protective action waits (retried every minute) until the
+    venue takes it — never dropped after N tries — and it is reported once, not every loop (review money-path-2)."""
     db = tmp_path / "app.db"
     sim = SimLegs([closed_tp(), pos()], 103.0, 103.2, stops=0.5)
-    sim.fail_sl = "10031 CONNECTION"
+    sim.fail_sl = "10018 MARKET_CLOSED"
+    sim.fail_code = 10018
+    events = []
+    pm = PositionManager(settings, ActionLog(db), sim, FixedMarket(), lambda k, p: events.append(k))
+    rules = [rule("move_sl_to_breakeven", "tp_hit", 1)]
+    for t in (0, 1_000, 61_000, 62_000, 122_000, 200_000, 400_000):
+        pm.manage([decision(rules)], 10 * MIN + t)
+    assert len(sim.calls) == 5 and events.count("mgmt_error") == 1          # 0, 61 s, 122 s, 200 s, 400 s
+    [r] = rows(db)
+    assert r["status"] == "failed" and json.loads(r["detail"])["waiting"] is True
+    sim.fail_sl = None                                                       # the market reopens
+    pm.manage([decision(rules)], 10 * MIN + 470_000)
+    [r] = rows(db)
+    assert r["status"] == "applied" and sim.legs["d:2"].sl == sim.calls[-1][2]
+
+
+def test_manager_refused_request_is_retried_then_given_up(tmp_path, settings):
+    """A refusal of the request itself (invalid stops …) is retried a minute later, at most 3 times."""
+    db = tmp_path / "app.db"
+    sim = SimLegs([closed_tp(), pos()], 103.0, 103.2, stops=0.5)
+    sim.fail_sl, sim.fail_code = "10016 INVALID_STOPS", 10016
     events = []
     pm = PositionManager(settings, ActionLog(db), sim, FixedMarket(), lambda k, p: events.append(k))
     rules = [rule("move_sl_to_breakeven", "tp_hit", 1)]
@@ -445,6 +473,55 @@ def test_manager_failed_action_is_retried_after_a_minute_then_given_up(tmp_path,
     assert len(sim.calls) == 3 and events.count("mgmt_error") == 1
     [r] = rows(db)
     assert r["status"] == "failed" and json.loads(r["detail"])["attempt"] == 3
+
+
+def test_manager_waits_while_the_market_is_closed(tmp_path, settings):
+    db = tmp_path / "app.db"
+    sim = SimLegs([pos(opened=0)], 103.0, 103.2)
+    market = FixedMarket()
+    market.market_open = lambda pair: False
+    pm = PositionManager(settings, ActionLog(db), sim, market, lambda k, p: None)
+    rules = [rule("close_all", "minutes_elapsed", 5)]
+    pm.manage([decision(rules)], 20 * MIN)
+    assert sim.calls == [] and rows(db) == []                                # nothing sent, nothing given up
+    market.market_open = lambda pair: True
+    pm.manage([decision(rules)], 21 * MIN)
+    assert sim.calls and sim.calls[0][0] == "close"
+
+
+def test_manager_unknown_close_outcome_is_re_read_never_resent(tmp_path, settings):
+    """A close whose confirmation never came stays pending; the leg is re-read and the close is found applied —
+    a partial close is never sent twice (review money-path-5)."""
+    db = tmp_path / "app.db"
+    sim = SimLegs([pos(vol=0.04, opened=0)], 103.0, 103.2)
+    sim.close_status = "unknown"
+    pm = PositionManager(settings, ActionLog(db), sim, FixedMarket(), lambda k, p: None)
+    rules = [rule("partial_close", "minutes_elapsed", 5, fraction=0.5)]
+    for t in (0, 1_000, 40_000, 100_000):
+        pm.manage([decision(rules)], 20 * MIN + t)
+    assert [c[0] for c in sim.calls] == ["close"] and sim.legs["d:2"].volume == pytest.approx(0.02)
+    [r] = rows(db)
+    assert r["status"] == "applied" and "interruption" in json.loads(r["detail"])["reconciled"]
+    # the same when the backend reported 'failed' although the close went through: re-read before a retry
+    db2 = tmp_path / "app2.db"
+    sim2 = SimLegs([pos(vol=0.04, opened=0)], 103.0, 103.2)
+    sim2.close_status = "failed_but_done"
+    pm2 = PositionManager(settings, ActionLog(db2), sim2, FixedMarket(), lambda k, p: None)
+    for t in (0, 70_000, 140_000):
+        pm2.manage([decision(rules)], 20 * MIN + t)
+    assert len(sim2.calls) == 1 and sim2.legs["d:2"].volume == pytest.approx(0.02)
+
+
+def test_two_closes_in_one_pass_record_the_leg_as_it_was_before_each(tmp_path, settings):
+    db = tmp_path / "app.db"
+    sim = SimLegs([pos(vol=0.04, opened=0)], 103.0, 103.2)
+    pm = PositionManager(settings, ActionLog(db), sim, FixedMarket(), lambda k, p: None)
+    rules = [rule("partial_close", "minutes_elapsed", 5, fraction=0.5),
+             rule("partial_close", "minutes_elapsed", 6, fraction=0.5)]
+    pm.manage([decision(rules)], 20 * MIN)
+    got = sorted(rows(db), key=lambda r: r["seq"])
+    assert [json.loads(r["requested"])["leg_volume_before"] for r in got] == [0.04, 0.02]
+    assert [c[2] for c in sim.calls] == [0.02, 0.01]
 
 
 def test_manager_backend_exception_leaves_pending_and_reconciles_without_resending(tmp_path, settings):
@@ -703,16 +780,28 @@ def test_paper_two_leg_sell_breakeven_trail_and_time_stop_on_real_ticks(tmp_path
     assert acct["balance"] == pytest.approx(10_000 + sum(lg["pnl_usd"] for lg in legs.values()), abs=1e-6)
 
 
-def test_paper_partial_close_books_the_closed_part(tmp_path, settings, xticks):
+def test_paper_partial_close_is_a_share_of_the_whole_trade(tmp_path, settings, xticks):
+    """0.06 lots in two legs of 0.03: "take half off" closes the TP1 leg, not half of every leg (review money-path-4)."""
     rules = [rule("partial_close", "price_reached", 4347.0, fraction=0.5)]
     pb, got, _, fill = run_paper(tmp_path, settings, xticks, rules, lots=0.06)
-    [r1, r2] = [r for r in got if r["status"] == "applied"]
-    assert {r1["leg"], r2["leg"]} == {"d1:1", "d1:2"} and json.loads(r1["requested"])["volume"] == 0.01
+    [r1] = [r for r in got if r["status"] == "applied"]
+    assert r1["leg"] == "d1:1" and json.loads(r1["requested"])["volume"] == 0.03
+    [r2] = [r for r in got if r["leg"] == "d1:2"]
+    assert r2["status"] == "skipped" and "nothing to close" in json.loads(r2["detail"])["reason"]
     legs = {lg["id"]: lg for lg in pb.decision_legs("d1")}
-    part = legs["d1:2:p1"]
+    assert legs["d1:1"]["close_reason"] == "rule" and legs["d1:2"]["volume"] == pytest.approx(0.03)
+
+
+def test_paper_partial_close_books_the_closed_part(tmp_path, settings, xticks):
+    rules = [rule("partial_close", "price_reached", 4347.0, fraction=0.25)]
+    pb, got, _, fill = run_paper(tmp_path, settings, xticks, rules, lots=0.06)
+    [r1] = [r for r in got if r["status"] == "applied"]
+    assert r1["leg"] == "d1:1" and json.loads(r1["requested"])["volume"] == 0.01
+    legs = {lg["id"]: lg for lg in pb.decision_legs("d1")}
+    part = legs["d1:1:p1"]
     assert (part["status"], part["close_reason"], part["volume"]) == ("closed", "rule", 0.01)
     assert part["pnl_usd"] == pytest.approx((fill - part["close_price"]) * 0.01 * 100, abs=1e-6)
-    assert legs["d1:2"]["volume"] == pytest.approx(0.02)
+    assert legs["d1:1"]["volume"] == pytest.approx(0.02) and legs["d1:2"]["volume"] == pytest.approx(0.03)
 
 
 def test_paper_modify_leg_refuses_widening_and_wrong_side(tmp_path, xticks):

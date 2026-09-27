@@ -268,3 +268,125 @@ def test_a_too_close_stop_waits_and_keeps_the_decision_pending(live):
     assert [d["id"] for d in ex.store.pending_actions("XAUUSD", 0)] == [src]      # retried on the next loop
     assert ex.paper.decision_legs(did)[0]["sl"] == pytest.approx(r["stop_loss"])
     assert not events(ex, "action_applied") and not events(ex, "action_rejected")
+
+
+# ------------------------------------------------------------------ review fixes (Phase 3 adversarial review)
+def test_a_deferred_stop_keeps_waiting_when_crossed_aged_or_the_market_closes():
+    held = ctx(deferred_legs=frozenset({"t1"}), rec_ts_ms=NOW - 7_200_000)          # 2 h old: waits anyway
+    crossed = evaluate(act("modify_sl", value=104.1), [leg()], lambda lg: venue(bid=103.9, ask=104.1), held)
+    assert status(crossed) == [("set_sl", "deferred")]
+    fresh = evaluate(act("modify_sl", value=104.1), [leg()], lambda lg: venue(bid=103.9, ask=104.1), ctx())
+    assert status(fresh) == [("set_sl", "rejected")]                                # a new wrong-side stop: refused
+    closed = evaluate(act("modify_sl", value=103.0), [leg()], lambda lg: venue(),
+                      ctx(deferred_legs=frozenset({"t1"}), market_open=False))
+    assert status(closed) == [("set_sl", "deferred")]
+    fits = evaluate(act("modify_sl", value=103.0), [leg()], lambda lg: venue(), held)
+    assert status(fits) == [("set_sl", "apply")]                                    # it fits now: applied
+    looser = evaluate(act("modify_sl", value=103.0), [leg(sl=103.5)], lambda lg: venue(), held)
+    assert status(looser) == [("set_sl", "rejected")]                               # already tighter: final
+
+
+def test_single_leg_management_turns_nearer_targets_into_prices():
+    from tradingsystem.execution.executor import single_leg_management
+    tps = [{"price": 101.0, "close_fraction": 0.3}, {"price": 104.0, "close_fraction": 0.7}]
+    rules = [{"action": "move_sl_to_breakeven", "trigger": "tp_hit", "value": 1, "params": {}},
+             {"action": "trail_atr", "trigger": "tp_hit", "value": 2, "params": {"atr_mult": 1.5}},
+             {"action": "close_all", "trigger": "minutes_elapsed", "value": 240, "params": {}}]
+    out, notes = single_leg_management(rules, tps, 1)
+    assert out[0] == {"action": "move_sl_to_breakeven", "trigger": "price_reached", "value": 101.0, "params": {}}
+    assert out[1]["trigger"] == "minutes_elapsed" and len(out) == 2 and len(notes) == 2 and "dropped" in notes[1]
+
+
+def test_a_single_leg_is_numbered_by_its_target_and_its_plan_rewritten(live):
+    ex, ticks = live
+    q = ticks[-1]
+    r = {"decision": "BUY", "order_type": "MARKET", "stop_loss": round(q.bid - 20, 2),
+         "valid_until": iso(now_ms() + 3_600_000),
+         "take_profits": [{"price": round(q.ask + 10, 2), "close_fraction": 0.3},
+                          {"price": round(q.ask + 30, 2), "close_fraction": 0.7}],
+         "management": [{"action": "move_sl_to_breakeven", "trigger": "tp_hit", "value": 1, "params": {}}],
+         "entry": {"price": None}}
+    res = ex.paper.place(decision_id="e" * 32, pair="XAUUSD", instrument=XAU, rec=r, lots=0.01, entry=q.ask,
+                         contract_size=100, volume_step=0.01, volume_min=0.01, quote=q)
+    assert res["legs"] == ["e" * 32 + ":2"] and "single leg at TP2" in res["note"]
+    [lg] = ex.paper.decision_legs("e" * 32)
+    assert lg["tp_index"] == 2 and lg["tp"] == r["take_profits"][1]["price"]
+
+
+def test_an_unknown_close_outcome_is_re_read_and_never_sent_twice(live, monkeypatch):
+    from tradingsystem.execution.management import ActionResult
+    ex, ticks = live
+    did, _ = trade_decision(ex, ticks)
+    real_close, sent = ex.model_legs.close, []
+
+    def close_no_confirmation(lg, volume, reason=None):
+        sent.append(volume)
+        real_close(lg, volume, reason=reason)                         # it happens at the venue …
+        return ActionResult(False, "unknown", "10012 TIMEOUT: outcome unknown", 10012)   # … unconfirmed
+    monkeypatch.setattr(ex.model_legs, "close", close_no_confirmation)
+    src = model_decision(ex, [{"target": {"decision": did[:8], "kind": "position"}, "action": "close",
+                               "fraction": 1.0, "reason": "done"}])
+    ex.process_actions()
+    assert [(a, st) for _, a, _, st, _ in rows(ex)] == [("close", "pending")]
+    ex.process_actions()                                              # re-read: the leg is closed → applied
+    assert [(a, st) for _, a, _, st, _ in rows(ex)] == [("close", "applied")] and len(sent) == 1
+    assert ex.store.pending_actions("XAUUSD", 0) == [] and events(ex, "action_applied")
+    assert "reconciled" in json.loads(rows(ex)[0][4])
+
+
+def test_an_infrastructure_error_is_reported_once_and_never_wakes_the_model(live, monkeypatch):
+    ex, ticks = live
+    did, _ = trade_decision(ex, ticks)
+    model_decision(ex, [{"target": {"decision": did[:8], "kind": "position"}, "action": "close", "fraction": 1.0,
+                         "reason": "x"}])
+
+    def down(_):
+        raise RuntimeError("MT5 could not list positions")
+    monkeypatch.setattr(ex.model_legs, "legs_of", down)
+    for _ in range(5):
+        ex.process_actions()
+    assert events(ex, "action_rejected") == [] and len(events(ex, "action_error")) == 1
+    assert len(ex.store.pending_actions("XAUUSD", 0)) == 1                           # still to do
+
+
+def test_the_decision_frame_waits_for_the_bar_just_closed(live, monkeypatch):
+    ex, _ = live
+    bar = ex.decision_bar_open_ms("XAUUSD")
+
+    class Fr:
+        def __init__(self, last):
+            import numpy as np
+            self.open_time = np.array([last - 900_000, last], dtype=np.int64)
+            self.close = np.array([99.0, 105.0])
+            self.high = self.low = self.close
+
+        def __len__(self):
+            return 2
+    frames = {"last": bar - 900_000}                                  # the store still ends one bar earlier
+    monkeypatch.setattr(ex_mod, "load_frame", lambda *a, **k: Fr(frames["last"]))
+    assert ex._decision_frame("XAUUSD") is None and ex.decision_bar_close("XAUUSD") is None
+    frames["last"] = bar                                              # the closing bar is stored now
+    assert ex.decision_bar_close("XAUUSD") == pytest.approx(105.0)
+
+
+def test_the_live_basis_needs_fresh_quotes_and_a_basis_in_line_with_its_history():
+    from types import SimpleNamespace as NS
+    ex = object.__new__(Executor)
+
+    class Reg:
+        def primary(self, pair):
+            return NS(key="binance_spot:BTCUSDT")
+
+        def with_role(self, pair, role):
+            return [NS(key="mt5:BTCUSD@")]
+    quotes = {"binance_spot:BTCUSDT": Tick(0, 100.0, 100.2, 0), "mt5:BTCUSD@": Tick(0, 150.0, 150.2, 0)}
+    ex.reg, ex._basis, ex._warned = Reg(), {}, set()
+    ex.s = NS(execution=NS(max_basis_deviation_pct=0.5))
+    ex.latest_quote = lambda key, max_age_ms=None: quotes.get(key)
+    ex.basis_history = lambda pair: [50.0] * 60
+    assert ex._live_basis("BTCUSDT") == pytest.approx(50.0)
+    ex._basis = {}
+    ex.basis_history = lambda pair: [10.0] * 60                    # the analysis feed stalled: 40 off its median
+    assert ex._live_basis("BTCUSDT") is None
+    ex._basis, quotes["binance_spot:BTCUSDT"] = {}, None          # no fresh analysis quote
+    assert ex._live_basis("BTCUSDT") is None

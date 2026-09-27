@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+from pathlib import Path
 
 import pytest
 
@@ -140,3 +141,57 @@ def test_actions_on_trades_the_model_did_not_see_are_dropped():
     assert [(a["action"], a["target"]["decision"]) for a in kept] == [("modify_sl", "abcd1234"),
                                                                       ("cancel_order", "ef012345")]
     assert len(notes) == 2 and all("dropped" in n for n in notes)
+
+
+# ------------------------------------------------------------------ review fixes (Phase 3 adversarial review)
+def test_a_repeated_section_in_the_local_config_is_refused(tmp_path):
+    import yaml
+    from tradingsystem.core.settings import DEFAULT_CONFIG
+    local = tmp_path / "config.local.yaml"
+    local.write_text("execution: {management: {dry_run: true}}\nexecution: {position_actions: {enabled: false}}\n",
+                     encoding="utf-8")
+    with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key 'execution'"):
+        load_settings(DEFAULT_CONFIG, local_path=local, env_path=Path("nope.env"))
+    local.write_text("execution:\n  management: {dry_run: true}\n  position_actions: {enabled: false}\n",
+                     encoding="utf-8")
+    s = load_settings(DEFAULT_CONFIG, local_path=local, env_path=Path("nope.env"))
+    assert s.execution.management.dry_run and not s.execution.position_actions.enabled
+
+
+def test_one_system_can_turn_its_charts_off(tmp_path):
+    from tradingsystem.core.settings import DEFAULT_CONFIG
+    local = tmp_path / "config.local.yaml"
+    local.write_text("instances:\n  XAUUSD: {api_port: 8768, magic_offset: 3, overrides: {ai: {charts: {enabled: false}}}}\n",
+                     encoding="utf-8")
+    xau = load_settings(DEFAULT_CONFIG, local_path=local, env_path=Path("nope.env"), extra_env={"TS_INSTANCE": "XAUUSD"})
+    btc = load_settings(DEFAULT_CONFIG, local_path=local, env_path=Path("nope.env"), extra_env={"TS_INSTANCE": "BTCUSDT"})
+    assert not xau.ai.charts.enabled and btc.ai.charts.enabled
+    local.write_text("instances:\n  XAUUSD: {api_port: 8768, magic_offset: 3, overrides: {paths: {data_dir: x}}}\n",
+                     encoding="utf-8")
+    with pytest.raises(ValueError, match="may not set"):
+        load_settings(DEFAULT_CONFIG, local_path=local, env_path=Path("nope.env"), extra_env={"TS_INSTANCE": "XAUUSD"})
+
+
+def test_holdings_without_a_basis_are_not_drawn_in_the_wrong_prices():
+    from tradingsystem.analysis.charts import overlay_spec
+    p = {"meta": {"price_reference": "binance_spot:BTCUSDT"}, "market": {},
+         "account": {"holdings_price_space": "mt5:BTCUSD@",
+                     "open_positions": [{"decision": "abcdef12", "price": 84343.0, "sl": 84085.6, "tps": [84595.15]}]}}
+    assert overlay_spec(p, "15m", ["holdings"])["holdings"] == []
+    p["market"]["basis_exec_minus_analysis"] = 43.0
+    [h] = overlay_spec(p, "15m", ["holdings"])["holdings"]
+    assert h["entry"] == pytest.approx(84300.0)
+    same = {"meta": {"price_reference": "mt5:XAUUSD@"}, "market": {},
+            "account": {"holdings_price_space": "mt5:XAUUSD@", "open_positions": [{"decision": "x", "price": 4300.0}]}}
+    assert overlay_spec(same, "15m", ["holdings"])["holdings"][0]["entry"] == 4300.0
+
+
+def test_the_action_limits_in_rule_13_are_the_configured_ones():
+    from tradingsystem.ai.prompts import render
+    s = load_settings(extra_env={"TS_INSTANCE": "BTCUSDT"})
+    o = object.__new__(Orchestrator)
+    o.s, o.reg = s, InstrumentRegistry.from_settings(s)
+    pr = render("agent_per_pair", o._system_vars("BTCUSDT", {}), o._user_vars("BTCUSDT", 1790334600000, "t", "{}"))
+    pa = s.execution.position_actions
+    assert f"every {pa.min_minutes_between_sl_changes} minutes and {pa.max_per_pair_per_day} applied actions" in pr.system
+    assert "turns it into `price_reached`" in pr.system and "re-enter on a later cycle" in pr.system

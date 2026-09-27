@@ -5,7 +5,7 @@ import pytest
 from tradingsystem.ai.prompts import PromptError, ROLE_FILES, library_hash, render
 
 SYS = dict(pair="XAUUSD", pair_list="BTCUSDT, ETHUSDT, XAUUSD", decision_tf="15m", sl_min_atr=0.5, min_rr=1.5,
-           sl_max_atr=5.0, max_spread_pct=20, min_confidence=55, max_rec_age_min=5,
+           sl_max_atr=5.0, max_spread_pct=20, min_confidence=55, max_rec_age_min=5, sl_change_minutes=15, actions_per_day=12,
            max_risk_pct=1.0, account_equity=158, account_currency="USD", price_reference="mt5:XAUUSD@",
            output_language="English", timeframe="1h", scope_text=" for XAUUSD")
 USER = dict(now_utc="2026-09-25T10:00:00Z", trigger_reason="15m close", payload="{}", max_valid_until="x",

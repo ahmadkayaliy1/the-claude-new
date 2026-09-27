@@ -274,7 +274,7 @@ async function loadCharts(box) {
   try {
     const list = await api(`/api/charts/${encodeURIComponent(box.dataset.pair)}`);
     if (!list.length) return;
-    box.innerHTML = `<h2>Charts sent to the model (latest)</h2>` + list.map((c) =>
+    box.innerHTML = `<h2>Charts rendered for the model (latest)</h2>` + list.map((c) =>
       `<figure class="chart-thumb"><img loading="lazy" alt="${esc(c.tf)} chart" src="/api/charts/${encodeURIComponent(box.dataset.pair)}/${encodeURIComponent(c.tf)}?t=${c.updated_ms}"><figcaption class="small muted">${esc(c.tf)} · ${fmtT(c.updated_ms)}</figcaption></figure>`).join("");
   } catch (e) { /* charts are optional */ }
 }

@@ -61,8 +61,11 @@ ERROR_HEARTBEAT_MS = 5 * MS_PER_MINUTE   # a loop failing longer stops refreshin
 PEAK_EVERY_S = 5.0                   # the account peak file is read/updated at most this often by the loop
 PLACEMENT_LOCK_WAIT_S = 20.0         # MT5: gate + placement of one system at a time on the account (D-042)
 ACTION_WINDOW_MS = 3_600_000         # the model's position actions: decisions of the last hour are handled
-DEFERRED_MAX_S = 3_600               # a valid tighter stop that is still too close is retried this long
 SWING_BARS = 150                     # decision-TF bars for the trailing-structure swing
+BASIS_QUOTE_MAX_MS = 60_000          # management / model actions: both quotes at most this old for the live basis
+BASIS_CACHE_S = 15.0                 # … checked against its 60-min history at most this often per pair
+ACTION_SETTLE_MS = 30_000            # a model action sent with an unknown outcome is re-read (not re-sent) this long
+ACTION_ERROR_REPEAT_MS = 10 * MS_PER_MINUTE   # a failing decision's action_error event at most this often
 
 
 class PlacementBusy(RuntimeError):
@@ -140,6 +143,8 @@ class Executor:
             self.model_legs = PaperLegs(self.paper, self._leg_quote, self._leg_specs, reason="model")
         self.manager = PositionManager(s, self.actions, self.legs, self, self._emit)
         self._mkt: dict[tuple, object] = {}
+        self._basis: dict[str, tuple[float, float | None]] = {}      # pair → (checked at, basis or None)
+        self._action_errs: dict[str, tuple[str, int]] = {}           # decision → (error, last reported)
         self.peak: AccountPeak | None = None                # the account's high-water mark (shared by every system)
         self._peak_at = 0.0
 
@@ -353,6 +358,10 @@ class Executor:
         if gate.single_leg_tp is not None:        # one position at the minimum lot: that is the target placed
             detail["executed_levels"]["take_profits"] = [rec_x["take_profits"][gate.single_leg_tp]["price"]]
             detail["single_leg"] = f"TP{gate.single_leg_tp + 1}"
+            detail["executed_management"], notes = single_leg_management(detail["executed_management"],
+                                                                         rec_x["take_profits"], gate.single_leg_tp)
+            if notes:
+                detail["management_notes"] = notes
         if not gate.approved:
             detail["reason"] = "; ".join(gate.failures())
             self.store.set_execution_state(did, "rejected", detail)
@@ -660,14 +669,31 @@ class Executor:
                 "volume_min": c.get("volume_min", 0.01), "volume_step": c.get("volume_step", 0.01)}
 
     def _live_basis(self, pair: str) -> float | None:
-        """Execution mid − analysis mid now (0 when both are the same instrument; None without fresh quotes)."""
+        """Execution mid − analysis mid now, for the model's actions and the management levels (0 when both are the
+        same instrument). None — the actions and the rules that need it wait — when a quote is older than
+        BASIS_QUOTE_MAX_MS or the basis deviates from its 60-min history (``check_basis``, as for new orders)."""
         prim, exe = self.reg.primary(pair), self.reg.with_role(pair, "execution")[0]
         if prim.key == exe.key:
             return 0.0
-        pq, eq = self.latest_quote(prim.key), self.latest_quote(exe.key)
-        if pq is None or eq is None:
-            return None
-        return (eq.bid + eq.ask) / 2 - (pq.bid + pq.ask) / 2
+        t, basis = self._basis.get(pair, (-1e18, None))
+        if time.monotonic() - t < BASIS_CACHE_S:
+            return basis
+        pq, eq = self.latest_quote(prim.key, BASIS_QUOTE_MAX_MS), self.latest_quote(exe.key, BASIS_QUOTE_MAX_MS)
+        basis = None
+        if pq is not None and eq is not None:
+            bc = check_basis((pq.bid + pq.ask) / 2, (eq.bid + eq.ask) / 2, self.basis_history(pair),
+                             self.s.execution.max_basis_deviation_pct)
+            basis = bc.basis if bc.ok else None
+            if not bc.ok and f"basis:{pair}" not in self._warned:
+                self._warned.add(f"basis:{pair}")
+                log.warning("%s: %s — model actions and price-based management wait", pair, bc.reason)
+        self._basis[pair] = (time.monotonic(), basis)
+        return basis
+
+    def market_open(self, pair: str) -> bool:
+        """MarketView: whether the execution venue trades this pair now (nothing is sent while it is closed)."""
+        exe = self.reg.with_role(pair, "execution")[0]
+        return calendar_for(exe.venue, exe.symbol, self.s.pairs[pair].asset_class).is_open(now_ms())
 
     def decision_bar_open_ms(self, pair: str) -> int | None:
         """MarketView: open time of the latest closed decision-TF bar."""
@@ -675,14 +701,19 @@ class Executor:
         return tf.floor(now_ms()) - tf.ms
 
     def _decision_frame(self, pair: str):
-        """The decision-TF frame of the analysis instrument, cached per closed bar (swing / close lookups)."""
+        """The decision-TF frame of the analysis instrument once it holds the latest closed bar (cached for that
+        bar); None while that bar is not stored yet (the first seconds after a close) — the rules needing it wait
+        instead of reading the bar before (a candle_close must never judge a candle older than the trade)."""
         bar = self.decision_bar_open_ms(pair)
         key = ("frame", pair, bar)
         if key not in self._mkt:
-            self._mkt = {k: v for k, v in self._mkt.items() if k[2] == bar}      # drop older bars' entries
             prim = self.reg.primary(pair)
             tf = self.s.pairs[pair].decision_timeframe
-            self._mkt[key] = load_frame(self.reader(prim.key), prim, tf, SWING_BARS, now_ms())
+            fr = load_frame(self.reader(prim.key), prim, tf, SWING_BARS, now_ms())
+            if not len(fr) or int(fr.open_time[-1]) != bar:
+                return None                                  # not stored yet: asked again on the next loop
+            self._mkt = {k: v for k, v in self._mkt.items() if k[2] == bar}      # drop older bars' entries
+            self._mkt[key] = fr
         return self._mkt[key]
 
     def swing(self, pair: str, side: str) -> float | None:
@@ -694,7 +725,7 @@ class Executor:
         key = ("swing", pair, bar)
         if key not in self._mkt:
             fr = self._decision_frame(pair)
-            if len(fr) < 20:
+            if fr is None or len(fr) < 20:
                 return None
             st = analyze_structure(fr.high, fr.low, fr.close, ind.atr(fr.high, fr.low, fr.close))
             self._mkt[key] = (st.last_low.price if st.last_low else None, st.last_high.price if st.last_high else None)
@@ -706,7 +737,7 @@ class Executor:
         """MarketView (optional): the latest closed decision bar's close, in execution prices."""
         basis = self._live_basis(pair)
         fr = self._decision_frame(pair)
-        if basis is None or not len(fr):
+        if basis is None or fr is None or not len(fr):
             return None
         return float(fr.close[-1]) + basis
 
@@ -731,15 +762,38 @@ class Executor:
             self.manager.manage(decisions, now_ms())
 
     def _action_status(self, source_decision: str, seq: int, target: str, leg: str) -> str | None:
+        return self._action_row(source_decision, seq, target, leg)[0]
+
+    def _action_row(self, source_decision: str, seq: int, target: str, leg: str) -> tuple[str | None, dict, int]:
+        """(status, detail, ts) of one model action row; (None, {}, 0) when there is none."""
         con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True, timeout=10)
         try:
-            r = con.execute("SELECT status FROM position_actions WHERE source='model' AND source_decision=? AND seq=? "
-                            "AND target_decision=? AND leg=?", (source_decision, seq, target, leg)).fetchone()
+            r = con.execute("SELECT status, detail, ts FROM position_actions WHERE source='model' AND "
+                            "source_decision=? AND seq=? AND target_decision=? AND leg=?",
+                            (source_decision, seq, target, leg)).fetchone()
         except sqlite3.OperationalError:
-            return None
+            return None, {}, 0
         finally:
             con.close()
-        return r[0] if r else None
+        if not r:
+            return None, {}, 0
+        try:
+            det = json.loads(r[1]) if r[1] else {}
+        except ValueError:
+            det = {}
+        return r[0], det, int(r[2] or 0)
+
+    def _deferred_sources(self, pair: str) -> set[str]:
+        """Decisions of ``pair`` with a model stop move still deferred (kept past ACTION_WINDOW_MS)."""
+        con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True, timeout=10)
+        try:
+            rows = con.execute("SELECT DISTINCT source_decision FROM position_actions WHERE source='model' AND "
+                               "pair=? AND status='deferred'", (pair,)).fetchall()
+        except sqlite3.OperationalError:
+            return set()
+        finally:
+            con.close()
+        return {r[0] for r in rows}
 
     def _resolve_target(self, pair: str, short_id: str) -> str | None:
         """The executed decision of ``pair`` whose id starts with ``short_id`` — exactly one, else None."""
@@ -758,14 +812,25 @@ class Executor:
             return
         now = now_ms()
         for pair in self.s.enabled_pairs():
-            for d in self.store.pending_actions(pair, max(self.started, now) - ACTION_WINDOW_MS):
+            since, waiting = now - ACTION_WINDOW_MS, self._deferred_sources(pair)
+            for d in self.store.pending_actions(pair, 0 if waiting else since):
+                if d["ts"] < since and d["id"] not in waiting:
+                    continue
                 try:
                     if self._actions_of(d, pair, now):
                         self.store.set_actions_state(d["id"], "done")
+                    self._action_errs.pop(d["id"], None)
                 except Exception as exc:  # noqa: BLE001 — one decision's actions never block another's
-                    log.exception("%s %s: position actions failed", pair, d["id"][:8])
-                    self._emit("action_rejected", {"pair": pair, "decision": d["id"][:8],
-                                                   "text": f"{pair} actions of {d['id'][:8]} failed: {exc!r}"[:200]})
+                    # an infrastructure error (terminal down, no quote) is not a refusal: it must not wake the model
+                    # every loop — reported once per distinct error, then every ACTION_ERROR_REPEAT_MS
+                    sig, prev = repr(exc)[:120], self._action_errs.get(d["id"])
+                    if prev is not None and prev[0] == sig and now - prev[1] < ACTION_ERROR_REPEAT_MS:
+                        continue
+                    self._action_errs[d["id"]] = (sig, now)
+                    log.warning("%s %s: position actions failed (retried every loop): %r", pair, d["id"][:8], exc,
+                                exc_info=prev is None)
+                    self._emit("action_error", {"pair": pair, "decision": d["id"][:8],
+                                                "text": f"{pair} actions of {d['id'][:8]} could not run yet: {exc!r}"[:200]})
 
     def _actions_of(self, d: dict, pair: str, now: int) -> bool:
         """Handle one decision's actions; True when every action has a final result."""
@@ -797,15 +862,39 @@ class Executor:
                                                    "text": f"{a['action']} on {short}: unknown or ambiguous target"})
                 continue
             legs = self.model_legs.legs_of(target)
-            prior = [self._action_status(d["id"], seq, target, lg.key) for lg in legs]
-            ctx = ActionContext(now_ms=now, pair=pair, rec_ts_ms=rec_ts,
-                                max_age_s=DEFERRED_MAX_S if "deferred" in prior else self.s.risk.max_recommendation_age_s,
+            rows = {lg.key: self._action_row(d["id"], seq, target, lg.key) for lg in legs}
+            settling = False
+            for lg in legs:
+                st, det, ts = rows[lg.key]
+                if st == "pending" and _action_took_effect(det, lg):
+                    # sent before an interruption / with an unknown outcome, and the leg shows it: never sent twice
+                    self.actions.record("model", d["id"], seq, target, lg.key, a["action"], a, "applied",
+                                        {**det, "reconciled": "found applied at the venue"}, pair=pair)
+                    self._emit("action_applied", {"pair": pair, "decision": d["id"][:8], "target": target[:8],
+                                                  "leg": lg.key, "text": f"{a['action']} on {target[:8]} leg "
+                                                                         f"{lg.key}: applied (reconciled)"[:200]})
+                    rows[lg.key] = ("applied", det, ts)
+                elif st == "pending" and now - ts < ACTION_SETTLE_MS:
+                    settling = True                           # re-read on the next loops before anything is re-sent
+                elif st == "deferred" and lg.kind == "closed":
+                    self.actions.record("model", d["id"], seq, target, lg.key, a["action"], a, "skipped",
+                                        {**det, "reason": "the leg closed before the stop could be moved"}, pair=pair)
+                    rows[lg.key] = ("skipped", det, ts)
+            if settling:
+                done = False
+                continue
+            final = {k for k, r in rows.items() if r[0] in ("applied", "rejected", "skipped")}
+            if any(r[0] == "applied" for r in rows.values()) and                     {lg.key for lg in legs if lg.kind in ("position", "order")} <= final:
+                continue                                      # already carried out (e.g. reconciled just now)
+            ctx = ActionContext(now_ms=now, pair=pair, rec_ts_ms=rec_ts, max_age_s=self.s.risk.max_recommendation_age_s,
                                 market_open=market_open, cfg=cfg,
                                 applied_today=self.actions.applied_today(pair, "model"),
-                                last_sl_change_ms=self.actions.last_sl_change_ms)
+                                last_sl_change_ms=self.actions.last_sl_change_ms,
+                                deferred_legs=frozenset(k for k, r in rows.items() if r[0] == "deferred"))
             for plan in gate_action(a, legs, self.model_legs.venue, ctx):
                 leg_key = plan.leg.key if plan.leg else "-"
-                if self._action_status(d["id"], seq, target, leg_key) in ("applied", "rejected", "skipped"):
+                if (rows.get(leg_key) or self._action_row(d["id"], seq, target, leg_key))[0] in \
+                        ("applied", "rejected", "skipped"):
                     continue
                 checks = [{"check": n, "ok": ok, "detail": x} for n, ok, x in plan.checks]
                 if plan.status == "deferred":
@@ -819,9 +908,15 @@ class Executor:
                     self._emit("action_rejected", {"pair": pair, "decision": d["id"][:8], "target": target[:8],
                                                    "text": f"{a['action']} on {target[:8]} refused: {plan.reason}"[:200]})
                     continue
+                lg = plan.leg
+                before = {"op": plan.op, "value": plan.value, "volume": plan.volume, "leg_volume_before": lg.volume,
+                          "sl_before": lg.sl, "tp_before": lg.tp, "kind_before": lg.kind}
                 self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a, "pending",
-                                    {"checks": checks}, pair=pair)           # write-ahead: never applied twice
+                                    {"checks": checks, "pending": before}, pair=pair)   # write-ahead: never twice
                 res = self._apply_plan(plan)
+                if res.status == "unknown":                   # sent, no confirmation: stays pending, re-read first
+                    done = False
+                    continue
                 status = res.status if res.status in ("applied", "deferred", "rejected") else "failed"
                 self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a,
                                     "rejected" if status == "failed" else status,
@@ -859,6 +954,42 @@ class Executor:
                 "failing_since": iso(self.error_since)})
         except Exception:  # noqa: BLE001
             log.exception("could not report the executor error status")
+
+
+def _action_took_effect(det: dict, lg) -> bool:
+    """A model action recorded as pending (sent, outcome unknown) that the leg already shows."""
+    pend = det.get("pending") or {}
+    op, val = pend.get("op"), pend.get("value")
+    if op in ("set_sl", "set_tp") and val is not None:
+        cur = lg.sl if op == "set_sl" else lg.tp
+        return cur is not None and abs(cur - float(val)) <= 1e-6 * max(1.0, abs(float(val)))
+    if op == "close":
+        return lg.kind == "closed" or lg.volume <= float(pend.get("leg_volume_before") or 0) \
+            - float(pend.get("volume") or 0) + 1e-9
+    if op == "cancel":
+        return lg.kind != "order"
+    return False
+
+
+def single_leg_management(rules: list[dict], tps: list[dict], placed: int) -> tuple[list[dict], list[str]]:
+    """The management plan of a trade placed as ONE position at take-profit ``placed`` (0-based) because the minimum
+    lot cannot be split: no other take-profit leg exists, so ``tp_hit k`` could never fire. A nearer target k
+    becomes ``price_reached`` at that target's (execution) price — the moment its leg would have closed; ``tp_hit``
+    of the placed or a farther target is dropped (the position is gone by then). Returns (rules, notes)."""
+    out, notes = [], []
+    for r in rules or []:
+        if r.get("trigger") != "tp_hit" or r.get("value") is None:
+            out.append(r)
+            continue
+        k = int(r["value"]) - 1
+        if 0 <= k < placed and k < len(tps):
+            out.append({**r, "trigger": "price_reached", "value": tps[k]["price"]})
+            notes.append(f"{r.get('action')} on TP{k + 1} hit → price_reached {tps[k]['price']} (single leg at "
+                         f"TP{placed + 1})")
+        else:
+            notes.append(f"{r.get('action')} on TP{k + 1} hit dropped: the single leg at TP{placed + 1} closes the "
+                         "whole trade")
+    return out, notes
 
 
 def evaluate_virtual(rec: dict, reader: InstrumentReader, inst) -> tuple[str | None, float | None]:

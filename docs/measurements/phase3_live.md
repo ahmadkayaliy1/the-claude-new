@@ -70,7 +70,7 @@ History of the tuning (same data): the first screening version (5m zones and liq
 calls/day for BTC; with "5m = confirmation only" (no 5m zones/liquidity; a 5m reversal candle counts only at a 15m/1h
 location) and `ai.weak_needs_location` BTC was still 42 on the Friday — mostly the same pool swept by consecutive bars
 (each bar a new key) and 5m candles/order flow repeating inside a zone the model had already seen. Final rules: a sweep
-is keyed by its pool (`1h:sweep:bearish:<level>`), and a weak call needs a location **and** new price action there (a new
+is keyed by its pool and the first bar of its run of consecutive sweeping bars (`1h:sweep:bearish:<level>:<run start>` — a later sweep of the same pool after a bar without one is new; re-run after the review: the same 36 / 35 / 32 calls/day), and a weak call needs a location **and** new price action there (a new
 location, a structure break, or a decision-TF reversal candle); 5m candles or order flow alone at a known location wait
 for the model's own `next_review` conditions. Integration test: `tests/unit/test_replay_budget.py -m integration`
 (≤ `ai.daily_calls_per_pair` per pair on the last 24 h).

@@ -65,6 +65,12 @@ def _cmd_config(args: argparse.Namespace) -> int:
     print(f"AI: provider={settings.ai.active_provider} model={settings.provider_model(settings.ai.active_provider)} "
           f"mode={settings.ai.agent_mode} trigger={settings.ai.trigger_policy}")
     print(f"execution: mode={settings.execution.mode} trigger={settings.execution.trigger}")
+    a, x = settings.ai, settings.execution          # Phase 3 switches: what is really in force after the merges
+    print(f"phase 3: charts={'on' if a.charts.enabled else 'OFF'} escalation={'on' if a.escalation.enabled else 'off'} "
+          f"({a.models.escalation.model}/{a.models.escalation.effort}) management="
+          f"{'on' if x.management.enabled else 'OFF'}{' (DRY RUN)' if x.management.dry_run else ''} "
+          f"position_actions={'on' if x.position_actions.enabled else 'OFF'} "
+          f"calls/pair/day={a.daily_calls_per_pair}")
     reg = InstrumentRegistry.from_settings(settings)
     for pair in reg.pairs():
         print(f"  {pair}:")

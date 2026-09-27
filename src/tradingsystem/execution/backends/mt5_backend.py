@@ -24,6 +24,7 @@ from ...ingest.mt5.terminal import MT5Terminal
 from ..exposure import aggregate, leg
 from ..management import Leg
 from ..retcodes import SUCCESS, describe, retryable
+from ..sizing import single_leg_index
 from .paper import Tick, split_volume
 
 log = logging.getLogger(__name__)
@@ -210,9 +211,10 @@ class MT5Backend:
         vols = split_volume(lots, [t["close_fraction"] for t in tps], spec["volume_step"], spec["volume_min"]) \
             if len(tps) > 1 else [lots]
         note = None
+        idx = list(range(1, len(tps) + 1))           # the tag carries the index of the leg's target in the decision
         if vols is None:
-            k = max(range(len(tps)), key=lambda i: (tps[i]["close_fraction"], -i))
-            tps, vols = [tps[k]], [lots]
+            k = single_leg_index([t["close_fraction"] for t in tps])
+            tps, vols, idx = [tps[k]], [lots], [k + 1]
             note = f"volume too small to split — single position at TP{k + 1}"
         m = self.mt5
         otype = {("BUY", "MARKET"): m.ORDER_TYPE_BUY, ("SELL", "MARKET"): m.ORDER_TYPE_SELL,
@@ -221,7 +223,7 @@ class MT5Backend:
             (rec["decision"], rec["order_type"])]
         reqs = []
         q = self.mt5.symbol_info_tick(symbol)
-        for i, (tp, v) in enumerate(zip(tps, vols), start=1):
+        for i, tp, v in zip(idx, tps, vols):
             r = {"symbol": symbol, "volume": float(v), "type": otype, "sl": round(rec["stop_loss"], spec["digits"]),
                  "tp": round(tp["price"], spec["digits"]), "magic": self.magic, "comment": tag(decision_id, i),
                  "type_filling": self._filling(spec), "deviation": 0}
@@ -304,10 +306,16 @@ class MT5Backend:
                     done = settled()
                 except Exception as exc:  # noqa: BLE001 — cannot verify → never resend blindly
                     attempts[-1]["note"] = f"could not verify after the timeout: {exc!r}"[:200]
+                    attempts[-1]["unknown"] = True
                     return False, code, res, attempts
                 if done:
                     attempts[-1]["note"] = "took effect despite the missing confirmation"
                     return True, code, res, attempts
+                # the server may still be processing it: the outcome is unknown, never resent here — the caller
+                # re-reads the position on a later loop before anything is sent again
+                attempts[-1]["note"] = "no confirmation and not visible yet — outcome unknown, not resent"
+                attempts[-1]["unknown"] = True
+                return False, code, res, attempts
             if not retryable(code) or attempt == max_retries:
                 return False, code, res, attempts
             time.sleep(RETRY_SLEEP_S * (attempt + 1))
@@ -445,8 +453,9 @@ class MT5Backend:
             attempts += [{**a, "filling": filling} for a in att]
             if ok or code != INVALID_FILL:
                 break
-        return _res(ok, "applied" if ok else "failed", code, describe(code), price=getattr(res, "price", None),
-                    volume=vol, attempts=attempts)
+        unknown = not ok and bool(attempts) and bool(attempts[-1].get("unknown"))
+        return _res(ok, "applied" if ok else "unknown" if unknown else "failed", code, describe(code),
+                    price=getattr(res, "price", None), volume=vol, attempts=attempts)
 
     def cancel_order(self, ticket: int, *, max_retries: int = 2) -> dict:
         """Remove one of our pending orders; every attempt with its retcode meaning."""
@@ -459,7 +468,9 @@ class MT5Backend:
 
         ok, code, _, attempts = self._send({"action": m.TRADE_ACTION_REMOVE, "order": ticket, "magic": self.magic},
                                            max_retries=max_retries, settled=settled)
-        return _res(ok, "applied" if ok else "failed", code, describe(code), attempts=attempts)
+        unknown = not ok and bool(attempts) and bool(attempts[-1].get("unknown"))
+        return _res(ok, "applied" if ok else "unknown" if unknown else "failed", code, describe(code),
+                    attempts=attempts)
 
     # ------------------------------------------------------------------ a decision's legs
     def _utc(self, server_ms) -> int | None:

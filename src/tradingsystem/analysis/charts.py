@@ -128,9 +128,17 @@ def overlay_spec(payload: dict, tf: str, overlays: list[str]) -> dict:
     if "holdings" in want:
         acct = _as_dict(payload.get("account"))
         basis = _as_dict(payload.get("market")).get("basis_exec_minus_analysis")
-        basis = float(basis) if _finite(basis) else 0.0
-        spec["holdings"] = [h for kind, key in (("position", "open_positions"), ("order", "pending_orders"))
-                            for h in (_holding(kind, r, basis) for r in _rows(acct.get(key))) if h]
+        space = acct.get("holdings_price_space")
+        ref = _as_dict(payload.get("meta")).get("price_reference")
+        if _finite(basis):
+            basis = float(basis)
+        elif space and ref and space != ref:
+            basis = None                  # holdings in another instrument's prices and no basis: not drawn at all
+        else:
+            basis = 0.0                   # the same instrument (or nothing to translate)
+        spec["holdings"] = [] if basis is None else [
+            h for kind, key in (("position", "open_positions"), ("order", "pending_orders"))
+            for h in (_holding(kind, r, basis) for r in _rows(acct.get(key))) if h]
     return spec
 
 

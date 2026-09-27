@@ -194,6 +194,11 @@ def test_parse_real_stream_json_capture(prov):
 def test_input_rejected_rules(monkeypatch):
     assert cc.input_rejected("", "boom", 1.0)                          # fast exit, no model turn
     assert not cc.input_rejected("", "boom", 30.0)                     # slow: may have reached the API
+    # a known failure or a clean exit is not a shape problem: it goes through the normal error handling
+    assert not cc.input_rejected("", "boom", 1.0, 0)
+    assert not cc.input_rejected("", "Not logged in · Please run /login", 1.0, 1)
+    assert not cc.input_rejected("", "Claude AI usage limit reached|1790000000", 1.0, 1)
+    assert cc.input_rejected("", "boom", 1.0, 1)
     assert cc.input_rejected("", PARSER_REJECT[1].decode(), 30.0)      # slow, but the CLI says it could not read it
     assert not cc.input_rejected(stream(INIT, ASSISTANT), "", 1.0)     # a model turn started
     assert not cc.input_rejected(stream(INIT, RESULT), "", 1.0)
@@ -360,6 +365,8 @@ def test_text_only_provider_drops_images_with_one_warning(usage, caplog):
         res = asyncio.run(p.generate(system="s", user="again", images=IMGS))
     assert g.ok and g.images_sent == 0 and res.extra == {"images": 0, "image_tokens_est": 0}
     assert ledger(usage) == [("decision", 0, 0, 1)]
+    # the text-only model is told that no chart came with the message (it must not read "Attached: …" as seen)
+    assert p.calls[0] == "u" + NO_CHARTS_NOTE and "does not take images" in g.charts_dropped
     assert len([r for r in caplog.records if "dropped" in r.getMessage()]) == 1
 
 
@@ -418,3 +425,16 @@ def test_make_provider_passes_effort_only_to_claude_code(monkeypatch):
     assert seen["gemini"][0][2] == "gemini-x" and seen["gemini"][1] == {}
     make_provider(s, "openai", effort="high")
     assert seen["openai"][1] == {}
+
+
+def test_a_new_role_instance_adopts_the_verified_sign_in(monkeypatch):
+    monkeypatch.setattr(cc, "find_cli", lambda configured: "claude.exe")
+    cfg = AIProviderCfg(kind="claude_code", model="sonnet", free_tier=True)
+    dec = cc.ClaudeCodeProvider("claude_code", cfg, "sonnet", None)
+    esc = cc.ClaudeCodeProvider("claude_code", cfg, "opus", None, effort="high")
+    assert dec.availability_pending and esc.availability_pending
+    esc.adopt_sign_in(dec)                                             # nothing verified yet: still checking
+    assert esc.availability_pending
+    dec._auth_problem, dec._auth_ok_once = None, True                  # the decision instance's check passed
+    esc.adopt_sign_in(dec)
+    assert not esc.availability_pending and esc._auth_problem is None

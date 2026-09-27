@@ -76,6 +76,7 @@ START_STAMP = "last_start.txt"   # in the CLI work folder, shared by every syste
 CAPS_FILE = "cli_capabilities.json"   # in the CLI work folder: the stream-json user-line shape this CLI accepts
 SHAPES = ("message", "content")       # documented SDK shape first; the alternate is tried once if a CLI refuses it
 SHAPE_REJECT_WINDOW_S = 5.0      # a parser rejection exits within ~2 s of the start (console.error + exit(1))
+SHAPE_RETRY_UNEXPLAINED_S = 600.0   # images off after two fast failures the CLI did not explain
 SHAPE_RETRY_S = 3600.0           # after both shapes failed: text-only calls for this long, then probe again
 LAST_STREAM = "last_stream_json.jsonl"   # in the CLI work folder: the last image call's output (diagnosis, fixture)
 # the CLI's own words for an unreadable stream-json line (2.1.28x: "Error parsing streaming input line (type=…")
@@ -193,12 +194,19 @@ def failure_text(stdout: str, stderr: str, returncode: int | None) -> str:
     return text[:300] or f"CLI exited with code {returncode}"
 
 
-def input_rejected(stdout: str, stderr: str, elapsed_s: float) -> bool:
+def input_rejected(stdout: str, stderr: str, elapsed_s: float, returncode: int | None = None) -> bool:
     """True when the CLI refused the stream-json input line itself: no model turn started (no assistant or result
-    line) and it ended quickly or said so. No API request was made — trying the other shape costs nothing."""
+    line) and it said so, or it failed quickly for no known reason. A known failure (not signed in, usage limit,
+    the OAuth refresh race) or a clean exit is not a shape problem — it goes through the normal error handling.
+    No API request was made — trying the other shape costs nothing."""
     if any(d.get("type") in ("assistant", "result") for d in json_lines(stdout)):
         return False
-    return elapsed_s <= SHAPE_REJECT_WINDOW_S or bool(_INPUT_REJECT_RE.search(f"{stderr}\n{stdout}"))
+    text = f"{stderr}\n{stdout}"
+    if _INPUT_REJECT_RE.search(text):
+        return True
+    if returncode == 0 or any(r.search(text) for r in (_LOGIN_RE, _LIMIT_RE, _REFRESH_RACE_RE, _AUTH_TRANSIENT_RE)):
+        return False
+    return elapsed_s <= SHAPE_REJECT_WINDOW_S
 
 
 def find_cli(configured: str | None) -> str | None:
@@ -287,6 +295,13 @@ class ClaudeCodeProvider(LLMProvider):
     @property
     def availability_pending(self) -> bool:
         return self._auth_problem == self._auth_pending_msg
+
+    def adopt_sign_in(self, other: "LLMProvider") -> None:
+        """The CLI sign-in belongs to the machine, not to a model: a new role instance (e.g. the escalation's Opus)
+        starts from another instance's verified check instead of "checking" (which would reroute its first call)."""
+        if isinstance(other, ClaudeCodeProvider) and other is not self and other._auth_ok_once \
+                and other._auth_problem is None and self.availability_pending:
+            self._auth_problem, self._auth_ok_once, self._auth_checked = None, True, other._auth_checked
 
     def unavailable_reason(self, refresh: bool = True) -> str | None:
         """Cooldown, else the cached login check. Every check runs in a background thread — ``claude auth status``
@@ -419,7 +434,7 @@ class ClaudeCodeProvider(LLMProvider):
         refused: list[str] = []
         for shape in (first, *(x for x in SHAPES if x != first)):
             out, err, rc, elapsed = await self._run(args, user_message_line(user, images, shape).encode("utf-8"))
-            if input_rejected(out, err, elapsed):
+            if input_rejected(out, err, elapsed, rc):
                 refused.append(f"{shape}: {failure_text(out, err, rc)[:100]}")
                 log.warning("%s: the CLI refused the stream-json %r user line after %.1fs (%s)", self.name, shape,
                             elapsed, refused[-1])
@@ -428,9 +443,12 @@ class ClaudeCodeProvider(LLMProvider):
             if shape != known and result_doc(out) is not None:
                 self._remember_shape(shape, out)
             return self.parse(out, err, rc)
-        self._shapes_failed_until = time.monotonic() + SHAPE_RETRY_S
-        log.error("%s: %s — the CLI accepts neither stream-json user shape; calls go out as text only",
-                  self.name, CHARTS_DISABLED)
+        # the CLI said it cannot read the line → images off for SHAPE_RETRY_S; two unexplained fast failures (a
+        # start problem, not necessarily the shape) → only for a few minutes
+        explicit = any(_INPUT_REJECT_RE.search(x) for x in refused)
+        self._shapes_failed_until = time.monotonic() + (SHAPE_RETRY_S if explicit else SHAPE_RETRY_UNEXPLAINED_S)
+        log.error("%s: %s — the CLI accepted neither stream-json user shape%s; calls go out as text only",
+                  self.name, CHARTS_DISABLED, "" if explicit else " (fast failures without a reason)")
         raise ProviderError(f"{self.name}: {CHARTS_DISABLED} ({'; '.join(refused)})"[:400], retryable=False)
 
     def _remember_shape(self, shape: str, stdout: str) -> None:

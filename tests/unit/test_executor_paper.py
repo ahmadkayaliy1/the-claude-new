@@ -113,7 +113,8 @@ def test_reads_are_bounded_and_skipped_without_legs(settings, xticks, monkeypatc
 
 
 def test_replayed_ticks_are_never_applied_twice(tmp_path, xticks):
-    """Breakeven after TP1 must not be re-applied to ticks that the remaining leg already saw."""
+    """Ticks a leg already saw are never applied again (fills, TP/SL hits). The declared management rules are carried
+    but executed by execution.management.PositionManager (Phase 3), not by the paper backend's tick loop."""
     pb = PaperBackend(tmp_path / "app.db", 10_000)
     t0 = xticks[0]
     r = rec("SELL", "MARKET", round(t0.ask + 30, 2), [(round(t0.bid - 0.3, 2), 0.5), (round(t0.bid - 40, 2), 0.5)],

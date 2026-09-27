@@ -6,8 +6,9 @@ pending orders, the *legs*). Every action is checked here, deterministically, be
 * ownership and freshness: the legs belong to this system and pair; the decision is younger than
   ``risk.max_recommendation_age_s``; the quote is fresh and the market open;
 * ``modify_sl``: only TIGHTER than the current stop and on the protective side of the price; a tighter stop that is
-  still closer to the price than the venue's stops level + spread is *deferred* (retried until it fits), never
-  loosened, never removed;
+  still closer to the price than the venue's stops level + spread is *deferred* — kept and retried every loop until
+  it fits or the leg closes (also when the price crosses it meanwhile, the market closes or the decision ages) —
+  never loosened, never removed;
 * ``modify_tp``: on the profit side of the price, at least the stops level away; one leg (``leg``) when several
   are open;
 * ``close``: a fraction of the open volume, rounded down to the volume step; at the minimum lot a fraction ≥ 0.5
@@ -41,6 +42,7 @@ class ActionContext:
     cfg: PositionActionsCfg
     applied_today: int                  # actions already applied for this pair today
     last_sl_change_ms: Callable[[str], int | None]
+    deferred_legs: frozenset[str] = frozenset()   # legs whose stop move of this action is already deferred
 
 
 @dataclass
@@ -73,7 +75,9 @@ def evaluate(action: dict, legs: list[Leg], venue_for: Callable[[Leg], Venue], c
         return bool(ok)
 
     age = (ctx.now_ms - ctx.rec_ts_ms) / 1000
-    add("not_expired", age <= ctx.max_age_s, f"decision {age:.0f}s old (≤{ctx.max_age_s}s)")
+    waiting = op == "modify_sl" and bool(ctx.deferred_legs)
+    add("not_expired", age <= ctx.max_age_s or waiting,
+        f"decision {age:.0f}s old (≤{ctx.max_age_s}s)" + ("; a deferred stop waits until it fits" if waiting else ""))
     add("market_open", ctx.market_open, "open" if ctx.market_open else "execution market closed")
     add("daily_limit", ctx.applied_today < ctx.cfg.max_per_pair_per_day,
         f"{ctx.applied_today} actions applied today (< {ctx.cfg.max_per_pair_per_day})")
@@ -82,6 +86,11 @@ def evaluate(action: dict, legs: list[Leg], venue_for: Callable[[Leg], Venue], c
     add("own_target", bool(mine), f"{len(mine)} live {want}(s) of {ctx.pair} for this decision"
         if mine else f"no live {want} of {ctx.pair} for this decision")
     if not all(ok for _, ok, _ in base):
+        held = [lg for lg in mine if lg.key in ctx.deferred_legs]
+        if waiting and held and all(ok or n in ("market_open", "daily_limit") for n, ok, _ in base):
+            # a deferred stop keeps waiting through a closed session / a full daily count
+            return [LegPlan(lg, "set_sl", value=float(action["value"]), status="deferred", checks=list(base))
+                    for lg in held]
         return [LegPlan(None, "none", status="rejected", checks=list(base))]
 
     if op == "cancel_order":
@@ -112,8 +121,9 @@ def _fresh(v: Venue, checks: list) -> bool:
 def _plan_sl(lg: Leg, sl: float, v: Venue, base: list, ctx: ActionContext) -> LegPlan:
     checks = list(base)
     p = LegPlan(lg, "set_sl", value=round(sl, v.digits), checks=checks)
+    held = lg.key in ctx.deferred_legs                   # already waiting: only a final reason ends it
     if not _fresh(v, checks):
-        p.status = "rejected"
+        p.status = "deferred" if held else "rejected"
         return p
     buy = lg.side == "BUY"
     cur = lg.sl
@@ -126,8 +136,13 @@ def _plan_sl(lg: Leg, sl: float, v: Venue, base: list, ctx: ActionContext) -> Le
     gap_ok = last is None or ctx.now_ms - last >= ctx.cfg.min_minutes_between_sl_changes * 60_000
     checks.append(("sl_change_spacing", gap_ok, f"last stop change {((ctx.now_ms - last) / 60_000) if last else 0:.0f} min ago "
                                                  f"(≥ {ctx.cfg.min_minutes_between_sl_changes} min)"))
-    if not (tighter and side_ok and gap_ok):
-        p.status = "rejected"
+    if not tighter:
+        p.status = "rejected"                            # final: the stop is already at least as tight
+        return p
+    if not (side_ok and gap_ok):
+        # a waiting stop the price crossed (or a spacing clash) keeps waiting for the price to come back, as the
+        # position manager does; a new request on the wrong side is refused
+        p.status = "deferred" if held else "rejected"
         return p
     need = v.stops_level + v.spread
     dist = (price - sl) if buy else (sl - price)

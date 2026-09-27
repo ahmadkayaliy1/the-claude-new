@@ -15,7 +15,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 | # | Action | Needed by | Status |
 |---|---|---|---|
 | H1 | MT5 terminal → Tools → Options → Charts → **Max bars in chart = Unlimited**, then restart terminal | P1.6 | ✅ done by the agent at the user's request (common.ini MaxBars → terminal now reports 100,000,000; backup `common.ini.bak-20260925`) |
-| H2 | Stop the laptop from sleeping (lid close = Do nothing on AC **and** battery, keep the charger in, Wi-Fi power saving off) — double-click `scriptspply_power_settings.bat` (run as administrator if refused); exact steps and `powercfg` commands in `docs/ops_windows.md` §2–§4; `scripts\check_ops.bat` verifies. The 41-min stall on 2026-09-25 and the 21:39 one were lid-close sleeps | P1.12 / P5.3 | ⏳ |
+| H2 | Stop the laptop from sleeping (lid close = Do nothing on AC **and** battery, keep the charger in, Wi-Fi power saving off) — double-click `scripts\apply_power_settings.bat` (run as administrator if refused); exact steps and `powercfg` commands in `docs/ops_windows.md` §2–§4; `scripts\check_ops.bat` verifies. The 41-min stall on 2026-09-25 and the 21:39 one were lid-close sleeps | P1.12 / P5.3 | ⏳ |
 | H3 | Allow one close/reopen of the MT5 terminal during the multi-client probe | P1.9 | ✅ |
 | H4 | Put `GOOGLE_API_KEY` in `.env` and copy the actual free-tier RPM/RPD limits from AI Studio into config (since D-030 Gemini is the *fallback* provider, used while Claude is unavailable) | P8.2 | ⏳ |
 | H5 | Review the price-matching decision (Binance vs Windsor execution for BTC/ETH) | P7.2 | ⏳ |

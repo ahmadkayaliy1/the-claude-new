@@ -49,7 +49,13 @@ FINAL = ("applied", "rejected", "skipped")          # a row in one of these stat
 SL_ACTIONS = ("set_sl", "modify_sl")               # position_actions.action values that moved a stop
 STEP = 1000                  # trailing rules write one row per step: seq = rule_idx + STEP × step (step 0 = rule_idx)
 FAIL_RETRY_MS = 60_000       # a broker refusal is retried after this long …
-MAX_FAIL_ATTEMPTS = 3        # … at most this many times per action
+MAX_FAIL_ATTEMPTS = 3        # … at most this many times per action when the request itself is refused
+PENDING_SETTLE_MS = 30_000   # an action sent with an unknown outcome is re-read (never re-sent) for this long
+ERROR_REPEAT_MS = 15 * 60_000   # the same error of one decision is logged with a traceback / emitted this often
+# refusals that say the venue cannot trade NOW (market closed, trading/algo trading disabled, no connection, no
+# prices, busy, frozen) — or no answer at all: the action waits and is retried until it goes through or the leg
+# closes, never given up (a protective close or stop must not be lost to a daily break or a terminal outage)
+VENUE_WAIT = {10004, 10017, 10018, 10020, 10021, 10024, 10026, 10027, 10028, 10029, 10031}
 
 
 # --------------------------------------------------------------------------- venue-neutral view of a trade
@@ -111,7 +117,8 @@ class MarketView(Protocol):
     def decision_bar_open_ms(self, pair: str) -> int | None: ...        # open time of the latest CLOSED bar
     def atr(self, pair: str) -> float: ...
     def swing(self, pair: str, side: Literal["low", "high"]) -> float | None: ...   # last confirmed swing
-    # optional: ``decision_bar_close(pair) -> float | None`` (close of that bar) — needed by candle_close triggers
+    # optional: ``decision_bar_close(pair) -> float | None`` (close of that bar) — needed by candle_close triggers;
+    # ``market_open(pair) -> bool`` — while False nothing is sent (the rules wait for the session)
 
 
 # --------------------------------------------------------------------------- pure rule evaluation
@@ -206,6 +213,36 @@ def partial_volume(volume: float, fraction: float, step: float, vmin: float) -> 
     return None, f"cannot split the minimum lot: {fraction:.0%} of {volume:g} lots (min {vmin:g}, step {step:g})"
 
 
+def partial_allocation(legs: list[Leg], fraction: float, vol_left: dict[str, float],
+                       v: Venue) -> dict[str, tuple[float | None, str]]:
+    """``partial_close`` of a trade held in several legs: ``fraction`` of the trade's live volume, taken from whole
+    legs nearest target first, then a step-rounded part of the next leg when both parts stay ≥ the minimum lot.
+    Per leg: (volume to close or None, note). The same rule the model's own ``close`` uses (action_gate)."""
+    legs = sorted(legs, key=lambda lg: lg.tp_index)
+    total = round(sum(vol_left[lg.key] for lg in legs), 8)
+    step, vmin = v.volume_step, v.volume_min
+    want = round(math.floor(total * fraction / step + 1e-7) * step, 8) if step > 0 else total * fraction
+    out: dict[str, tuple[float | None, str]] = {}
+    left = want
+    for lg in legs:
+        vol = vol_left[lg.key]
+        head = f"{fraction:.0%} of the trade's {total:g} lots = {want:g}"
+        if left <= EPS:
+            out[lg.key] = (None, f"{head}: nothing to close on leg {lg.tp_index}")
+        elif left >= vol - EPS:
+            out[lg.key] = (vol, f"{head}: close the whole leg {lg.tp_index} ({vol:g} lots)")
+            left = round(left - vol, 8)
+        else:
+            part = round(math.floor(left / step + 1e-7) * step, 8) if step > 0 else left
+            if part >= vmin - EPS and vol - part >= vmin - EPS:
+                out[lg.key] = (part, f"{head}: close {part:g} of leg {lg.tp_index} ({vol:g} lots)")
+            else:
+                out[lg.key] = (None, f"{head}: the rest ({left:g}) cannot be split from leg {lg.tp_index} "
+                                     f"({vol:g} lots, min {vmin:g})")
+            left = 0.0
+    return out
+
+
 def _trigger(rule: dict, leg: Leg, legs: list[Leg], ven: Callable[[Leg], Venue], ctx: RuleContext) -> str:
     """Why the rule's trigger holds for ``leg`` ("" = not met). Price triggers use the side of the level relative
     to the leg's entry (fill, or the order price of a pending order) to know which way "crossed" is."""
@@ -256,7 +293,9 @@ def _mode(st: dict | None, trailing: bool, ctx: RuleContext) -> str:
     s = st.get("status")
     if s == "dry_run":
         return "skip" if ctx.cfg.dry_run else "check"
-    if s in ("pending", "deferred"):
+    if s == "pending":
+        return "replan" if ctx.now_ms - int(st.get("applied_ms") or 0) >= PENDING_SETTLE_MS else "reconcile"
+    if s == "deferred":
         return "replan"
     if s == "failed":
         return "replan" if ctx.now_ms - int(st.get("applied_ms") or 0) >= FAIL_RETRY_MS else "skip"
@@ -286,7 +325,8 @@ def _stop_plan(base: dict, leg: Leg, v: Venue, target: float, label: str, runnin
 
 
 def _plan(idx: int, rule: dict, leg: Leg, ven: Callable[[Leg], Venue], running: dict[str, float | None],
-          vol_left: dict[str, float], ctx: RuleContext, why: str) -> PlannedAction:
+          vol_left: dict[str, float], ctx: RuleContext, why: str,
+          alloc: dict[str, tuple[float | None, str]] | None = None) -> PlannedAction:
     act = rule["action"]
     base = {"rule_idx": idx, "leg_key": leg.key, "rule": act, "trailing": act in TRAILING,
             "bar_ms": ctx.decision_bar_open_ms}
@@ -296,8 +336,11 @@ def _plan(idx: int, rule: dict, leg: Leg, ven: Callable[[Leg], Venue], running: 
         return PlannedAction(**base, action="close", volume=vol_left[leg.key], reason=f"{why} → close the position")
     v = ven(leg)
     if act == "partial_close":
-        vol, note = partial_volume(vol_left[leg.key], float((rule.get("params") or {}).get("fraction", 0)),
-                                   v.volume_step, v.volume_min)
+        if alloc is not None and leg.key in alloc:           # the trade is held in several legs
+            vol, note = alloc[leg.key]
+        else:
+            vol, note = partial_volume(vol_left[leg.key], float((rule.get("params") or {}).get("fraction", 0)),
+                                       v.volume_step, v.volume_min)
         if vol is None:
             return PlannedAction(**base, action="close", status="skipped", reason=f"{why} → {note}")
         return PlannedAction(**base, action="close", volume=vol, reason=f"{why} → {note}")
@@ -354,9 +397,18 @@ def evaluate_rules(rules: list[dict], legs: list[Leg], venue_for: Callable[[Leg]
         trailing = act in TRAILING
         targets = [lg for lg in live if lg.key not in gone and (lg.kind == "position" or act == "close_all")]
         fired_any: str | None = None
+        alloc: dict[str, tuple[float | None, str]] | None = None
+        if act == "partial_close" and len(targets) > 1:
+            alloc = partial_allocation(targets, float((rule.get("params") or {}).get("fraction", 0)), vol_left,
+                                       ven(targets[0]))
         for lg in targets:
             mode = _mode(ctx.rule_state(lg.decision_id, idx, lg.key), trailing, ctx)
             if mode == "skip":
+                continue
+            if mode == "reconcile":            # only checked against the leg (PositionManager), never re-sent yet
+                plans.append(PlannedAction(rule_idx=idx, leg_key=lg.key, action="reconcile", status="noop",
+                                           rule=act, trailing=trailing, bar_ms=ctx.decision_bar_open_ms,
+                                           reason="waiting for the outcome of the action sent"))
                 continue
             why = "armed" if trailing else "retry"
             if mode == "check":
@@ -368,7 +420,7 @@ def evaluate_rules(rules: list[dict], legs: list[Leg], venue_for: Callable[[Leg]
                     why = _trigger(rule, lg, legs, ven, ctx)
                 if not why:
                     continue
-            p = _plan(idx, rule, lg, ven, running, vol_left, ctx, why)
+            p = _plan(idx, rule, lg, ven, running, vol_left, ctx, why, alloc)
             plans.append(p)
             if p.status != "apply":
                 continue
@@ -731,6 +783,22 @@ class PositionManager:
         self.s, self.log, self.backend, self.market, self._emit_fn = s, log, backend, market, emit
         self.cfg: ManagementCfg = s.execution.management
         self._warned: set[str] = set()
+        self._errs: dict[str, tuple[str, int]] = {}      # key → (error signature, last time it was reported)
+
+    def _report(self, key: str, exc_or_text, now: int, payload: dict, *, traceback: bool = True) -> None:
+        """Log + emit ``mgmt_error`` for ``key`` — once per distinct error, then at most every ERROR_REPEAT_MS (a
+        closed market or an MT5 outage must not write one traceback and one event row per loop)."""
+        sig = repr(exc_or_text)[:120]
+        prev = self._errs.get(key)
+        if prev is not None and prev[0] == sig and now - prev[1] < ERROR_REPEAT_MS:
+            log.debug("%s: %s (repeated)", key, sig)
+            return
+        self._errs[key] = (sig, now)
+        if traceback and isinstance(exc_or_text, BaseException):
+            log.error("%s: %r", key, exc_or_text, exc_info=exc_or_text)
+        else:
+            log.warning("%s: %s", key, exc_or_text)
+        self._emit("mgmt_error", payload)
 
     def _emit(self, kind: str, payload: dict) -> None:
         try:
@@ -742,12 +810,14 @@ class PositionManager:
         """One pass over the executed, unsettled decisions. Each is isolated: an exception is logged and emitted as
         ``mgmt_error`` and the next decision is managed."""
         for d in decisions:
+            key = f"position management of {d.get('pair')} {str(d.get('id'))[:8]}"
             try:
                 self._one(d, now_ms)
+                self._errs.pop(key, None)
             except Exception as exc:  # noqa: BLE001
-                log.exception("position management of %s %s failed", d.get("pair"), str(d.get("id"))[:8])
-                self._emit("mgmt_error", {"pair": d.get("pair"), "decision": d.get("id"), "error": repr(exc)[:300],
-                                          "text": f"{d.get('pair')} management error: {exc!r}"[:200]})
+                self._report(key, exc, now_ms, {"pair": d.get("pair"), "decision": d.get("id"),
+                                                "error": repr(exc)[:300],
+                                                "text": f"{d.get('pair')} management error: {exc!r}"[:200]})
 
     # ---------------------------------------------------------------- one decision
     def _one(self, d: dict, now: int) -> None:
@@ -762,6 +832,9 @@ class PositionManager:
         rules = rules_of(d)
         if not rules or not live:
             return
+        if (is_open := getattr(self.market, "market_open", None)) is not None \
+                and self._fact("market_open", is_open, d["pair"]) is False:
+            return                                   # nothing can be sent while the session is closed: rules wait
         states = self.log.states_of(did)
         ctx = self._context(d, rules, now, lambda _d, i, k: states.get((i, k)))
         venues: dict[str, Venue] = {}
@@ -772,7 +845,14 @@ class PositionManager:
             return venues[lg.symbol]
 
         for p in evaluate_rules(rules, legs, venue_for, ctx):
-            self._execute(d, rules[p.rule_idx], p, live[p.leg_key], states.get((p.rule_idx, p.leg_key)), now)
+            lg = live[p.leg_key]
+            if self._execute(d, rules[p.rule_idx], p, lg, states.get((p.rule_idx, p.leg_key)), now):
+                # later plans of this pass see the leg as it is now (their write-ahead records must describe the
+                # leg just before their own send)
+                if p.action == "set_sl":
+                    lg.sl = p.value
+                elif p.action == "close":
+                    lg.volume = round(lg.volume - float(p.volume if p.volume is not None else lg.volume), 8)
 
     def _fact(self, name: str, fn: Callable, *args):
         """One market fact, or None when it cannot be computed now (missing bars, no data yet): only the rules that
@@ -846,23 +926,24 @@ class PositionManager:
             self.log.set_rule_state(did, p.rule_idx, key, "done", applied_ms=now,
                                     detail={"reason": note or p.reason})
 
-    def _execute(self, d: dict, rule: dict, p: PlannedAction, lg: Leg, st: dict | None, now: int) -> None:
+    def _execute(self, d: dict, rule: dict, p: PlannedAction, lg: Leg, st: dict | None, now: int) -> bool:
+        """Carry out one plan; True when it was applied at the venue now."""
         did, pair, key = lg.decision_id, d["pair"], lg.key
         det = dict((st or {}).get("detail") or {})
         last_bar = (st or {}).get("last_bar_ms")
         pend = det.get("pending")
-        if (st or {}).get("status") == "pending" and pend and _took_effect(pend, lg):
+        if (st or {}).get("status") in ("pending", "failed") and pend and _took_effect(pend, lg):
             # sent before an interruption (crash / exception) and the venue shows it: done — never sent twice
             self.log.record("rule", did, int(det.get("seq", p.rule_idx)), did, key, pend.get("op") or p.action,
                             {**pend, "rule": p.rule}, "applied",
                             {"reason": p.reason, "reconciled": "found applied at the venue after an interruption"},
                             pair=pair, now_ms=now)
             self._finish(did, p, key, det, now, wrote=True, note="reconciled after an interruption")
-            return
+            return False
         if p.status == "noop":
             if p.trailing and st is None:            # triggered: from now on it trails without re-checking the trigger
                 self.log.set_rule_state(did, p.rule_idx, key, "armed", detail={"steps": 0, "reason": p.reason})
-            return
+            return False
         seq = p.rule_idx if not p.trailing else int(det.get("seq", p.rule_idx + STEP * int(det.get("steps", 0))))
         req = {"rule": p.rule, "trigger": rule.get("trigger"), "trigger_value": rule.get("value"),
                "params": rule.get("params") or {}, "op": p.action, "value": p.value, "volume": p.volume,
@@ -877,51 +958,68 @@ class PositionManager:
             if "seq" in det:                         # this step's deferred row is superseded
                 rec("skipped", superseded=True)
             self._finish(did, p, key, det, now, wrote="seq" in det)
-            return
+            return False
         if p.status == "skipped":
             rec("skipped")
             self._finish(did, p, key, det, now, wrote=True)
-            return
+            return False
         if p.status == "deferred":
             if (st or {}).get("status") != "deferred":
                 rec("deferred")
                 self.log.set_rule_state(did, p.rule_idx, key, "deferred", last_bar_ms=last_bar, applied_ms=now,
                                         detail={**open_row, "reason": p.reason})
-            return
+            return False
         if self.cfg.dry_run:                         # record what would be done, touch nothing
             rec("skipped", dry_run=True)
             if p.trailing:
                 self._finish(did, p, key, det, now, wrote=True)
             else:
                 self.log.set_rule_state(did, p.rule_idx, key, "dry_run", applied_ms=now, detail={"reason": p.reason})
-            return
+            return False
         if not rec("pending"):                       # a final row exists: never apply the same action twice
             self._finish(did, p, key, det, now, wrote=p.trailing, note="already recorded")
-            return
+            return False
+        pending = {"op": p.action, "value": p.value, "volume": p.volume, "leg_volume_before": lg.volume}
+        counters = {"attempts": int(det.get("attempts", 0)), "waits": int(det.get("waits", 0))}
         self.log.set_rule_state(did, p.rule_idx, key, "pending", last_bar_ms=last_bar, applied_ms=now,
-                                detail={**open_row, "attempts": int(det.get("attempts", 0)),
-                                        "pending": {"op": p.action, "value": p.value, "volume": p.volume,
-                                                    "leg_volume_before": lg.volume}})
+                                detail={**open_row, **counters, "pending": pending})
+        ekey = f"{pair} {did[:8]} rule {p.rule_idx} ({p.rule}) on leg {key}"
         try:
             res = self._apply(p, lg)
-        except Exception as exc:  # noqa: BLE001 — outcome unknown: stays 'pending', reconciled on the next loop
-            log.exception("%s %s rule %d on leg %s: backend error", pair, did[:8], p.rule_idx, key)
-            self._emit("mgmt_error", {"pair": pair, "decision": did, "leg": key, "rule": p.rule,
-                                      "error": repr(exc)[:300], "text": f"{pair} {p.rule} error: {exc!r}"[:200]})
-            return
+        except Exception as exc:  # noqa: BLE001 — outcome unknown: stays 'pending', re-read (not re-sent) first
+            self._report(ekey, exc, now, {"pair": pair, "decision": did, "leg": key, "rule": p.rule,
+                                          "error": repr(exc)[:300], "text": f"{pair} {p.rule} error: {exc!r}"[:200]})
+            return False
         extra = {"result": res.detail, "retcode": res.retcode}
         if res.status == "applied":
+            self._errs.pop(ekey, None)
             rec("applied", **extra)
             self._finish(did, p, key, det, now, wrote=True)
             self._emit("mgmt_applied", {"pair": pair, "decision": did, "leg": key, "tp_index": lg.tp_index,
                                         "rule": p.rule, "op": p.action, "value": p.value, "volume": p.volume,
                                         "reason": p.reason, "text": _applied_text(pair, p, lg)})
-        elif res.status == "deferred":
+            return True
+        if res.status == "unknown":                  # sent, no confirmation: stays 'pending', re-read before a resend
+            self._report(ekey, f"outcome unknown: {res.detail}", now,
+                         {"pair": pair, "decision": did, "leg": key, "rule": p.rule, "error": res.detail,
+                          "text": f"{pair} {p.rule}: outcome unknown ({res.detail})"[:200]}, traceback=False)
+            return False
+        if res.status == "deferred":
             rec("deferred", **extra)
             self.log.set_rule_state(did, p.rule_idx, key, "deferred", last_bar_ms=last_bar, applied_ms=now,
                                     detail={**open_row, "reason": res.detail})
+        elif res.status == "failed" and (res.retcode is None or res.retcode in VENUE_WAIT):
+            # the venue cannot trade now (closed, algo trading off, no connection …): wait, never give up
+            w = counters["waits"] + 1
+            rec("failed", waiting=True, wait=w, **extra)
+            self.log.set_rule_state(did, p.rule_idx, key, "failed", last_bar_ms=last_bar, applied_ms=now,
+                                    detail={**open_row, **counters, "waits": w, "reason": res.detail,
+                                            "pending": pending})
+            self._report(ekey, f"waiting for the venue: {res.detail}", now,
+                         {"pair": pair, "decision": did, "leg": key, "rule": p.rule, "error": res.detail,
+                          "text": f"{pair} {p.rule} waits for the venue: {res.detail}"[:200]}, traceback=False)
         elif res.status == "failed":
-            n = int(det.get("attempts", 0)) + 1
+            n = counters["attempts"] + 1
             rec("failed", attempt=n, **extra)
             if n >= MAX_FAIL_ATTEMPTS:
                 self._finish(did, p, key, det, now, wrote=True, note=f"gave up after {n} attempts: {res.detail}")
@@ -929,10 +1027,12 @@ class PositionManager:
                                           "error": res.detail, "text": f"{pair} {p.rule} failed {n}×: {res.detail}"[:200]})
             else:
                 self.log.set_rule_state(did, p.rule_idx, key, "failed", last_bar_ms=last_bar, applied_ms=now,
-                                        detail={**open_row, "attempts": n, "reason": res.detail})
+                                        detail={**open_row, **counters, "attempts": n, "reason": res.detail,
+                                                "pending": pending})
         else:                                        # rejected/skipped by the venue check (e.g. the stop moved meanwhile)
             rec(res.status if res.status in FINAL else "rejected", **extra)
             self._finish(did, p, key, det, now, wrote=True, note=res.detail)
+        return False
 
     def _apply(self, p: PlannedAction, lg: Leg) -> ActionResult:
         if p.action == "set_sl":
@@ -953,5 +1053,5 @@ def _applied_text(pair: str, p: PlannedAction, lg: Leg) -> str:
 
 
 __all__ = ["ActionLog", "ActionResult", "Leg", "LegBackend", "MarketView", "MT5Legs", "PaperLegs", "PlannedAction",
-           "PositionManager", "RuleContext", "Venue", "breakeven_level", "evaluate_rules", "exit_price",
-           "partial_volume", "rules_of", "sl_room", "tighter", "to_tick"]
+           "PositionManager", "RuleContext", "VENUE_WAIT", "Venue", "breakeven_level", "evaluate_rules", "exit_price",
+           "partial_allocation", "partial_volume", "rules_of", "sl_room", "tighter", "to_tick"]

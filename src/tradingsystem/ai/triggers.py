@@ -31,6 +31,8 @@ class TriggerDecision:
     reasons: list[str]
     strength: str          # "strong" | "weak" | "none" | "review" | "idle" | "close" | "event"
     signature: frozenset[str] = frozenset()     # every current setup key — persisted by the engine at dispatch
+    setup: str | None = None   # "strong" | "weak" when a new setup would have fired by itself (also under a
+    #                            review/event label — the escalation of strong setups looks at it)
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,20 @@ class Reason:
 
 
 # ------------------------------------------------------------------ setup scan
+def _sweep_anchor(e: dict, events: list[dict], recent: list) -> str:
+    """``<level>:<first bar of the unbroken run of bars sweeping that level in that direction>``."""
+    same = {x["time"] for x in events if x.get("kind") == "sweep" and x.get("dir") == e["dir"]
+            and x.get("level") == e["level"]}
+    times = [r[0] for r in recent]
+    try:
+        i = times.index(e["time"])
+    except ValueError:
+        return f"{e['level']}:{e['time']}"
+    while i > 0 and times[i - 1] in same:
+        i -= 1
+    return f"{e['level']}:{times[i]}"
+
+
 def _scan_tf(tf: str, t: dict, bias: str | None, liquidity_atr: float,
              structure: Literal["strong", "weak"], *, location: bool = True,
              at_location: bool = False) -> list[Reason]:
@@ -66,8 +82,10 @@ def _scan_tf(tf: str, t: dict, bias: str | None, liquidity_atr: float,
             text = f"{tf} liquidity sweep ({e['dir']}) at {e['level']}"
         else:
             continue
-        # a sweep is keyed by its pool, so consecutive bars sweeping the same level are one setup, not one per bar
-        anchor = e["level"] if e["kind"] == "sweep" else e["time"]
+        # a sweep is keyed by its pool and the first bar of its run: consecutive bars sweeping the same level are
+        # one setup, a later sweep of that pool after a bar without one is a new setup
+        anchor = _sweep_anchor(e, (t.get("structure") or {}).get("events") or [], recent) \
+            if e["kind"] == "sweep" else e["time"]
         out.append(Reason(f"{tf}:{e['kind']}:{e['dir']}:{anchor}", text, structure, "structure"))
     ind = t.get("indicators") or {}
     close, atr = ind.get("close"), ind.get("atr14")
@@ -330,6 +348,7 @@ def decide(policy: str, payload: dict | None, *, last_call_ms: int | None, now: 
 
     kind, first = cands[0]
     strength, floor = _KINDS[kind]
+    setup = next((k for k, _ in cands if k in ("strong", "weak")), None)
     need = max(backoff_ms, (min(review_floor_min, min_spacing_min) if floor else min_spacing_min) * 60_000)
     block = _spacing_block(last_call_ms, now, need)
     reasons = list(first)
@@ -338,4 +357,4 @@ def decide(policy: str, payload: dict | None, *, last_call_ms: int | None, now: 
             reasons += [r for r in rs if r not in reasons]
     if block:
         return TriggerDecision(False, [f"{block}; waiting: {kind}"] + reasons, "none", sig)
-    return TriggerDecision(True, reasons, strength, sig)
+    return TriggerDecision(True, reasons, strength, sig, setup)

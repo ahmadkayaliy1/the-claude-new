@@ -172,9 +172,11 @@ def create_app(s: Settings) -> FastAPI:
 
     @app.get("/api/charts/{pair}")
     def charts_list(pair: str) -> list[dict]:
-        """The latest chart images the model received for ``pair`` (Phase 3)."""
+        """The latest chart images rendered for the model for ``pair`` (Phase 3); none while charts are off."""
         if pair not in pair_names:
             raise HTTPException(404, "unknown pair")
+        if not s.ai.charts.enabled:
+            return []
         d = s.paths.state() / "charts" / pair
         return [{"tf": tf, "updated_ms": int((d / f"{tf}.png").stat().st_mtime * 1000)}
                 for tf in s.ai.charts.timeframes if (d / f"{tf}.png").exists()]
