@@ -42,11 +42,11 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 ## 0b. Progress log (newest first — read this before §4)
 
 * **2026-09-27 — Phase 3 (P12.3, D-044) is DONE on branch `feat/phase3-sees-manages` (worktree
-  `C:\the_claude_new_wt\phase3`); production still runs Phase 2 on `main` until the user's H16.** 604 unit tests.
+  `C:\the_claude_new_wt\phase3`); production still runs Phase 2 on `main` until the user's H16.** 606 unit tests.
   The ONE live call (BTCUSDT, scratch data root, 6 charts, Sonnet): valid, 24.9 k input (target 23 k missed by 8 %),
   43 s, 1 turn, stream-json shape `message`, +37 MB RSS — `docs/measurements/phase3_live.md` (also the screening
   replay: 21–36 calls/pair/day). Review: 6 lenses + skeptics (39 of 41 confirmed and fixed), the fixes re-reviewed
-  (16 of 17 confirmed and fixed), then a final independent check. H16 = `git merge --ff-only
+  (16 of 17 confirmed and fixed), then a final independent check (2 more small defects, fixed). H16 = `git merge --ff-only
   feat/phase3-sees-manages`, `tradingsystem config` (the "phase 3:" line), `scripts\restart_all.bat`; rollback
   switches in `docs/ops_windows.md` §1b (one block per YAML section — duplicates are refused now). Lessons for the
   next phases' live calls: redirect the engine's stdout/stderr to files (a piped, unread stdout blocked the engine
