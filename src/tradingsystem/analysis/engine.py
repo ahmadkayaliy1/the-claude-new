@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import json
 import logging
+import statistics
 import time
 from collections import deque
 
@@ -40,6 +41,7 @@ from ..core.sessions import calendar_for
 from ..core.settings import PROJECT_ROOT, Settings, load_settings
 from ..core.timeframes import Timeframe
 from ..core.timeutil import MS_PER_DAY, iso, now_ms
+from ..core.tunables import Tunables, tunables_of
 from ..ingest.common.appdb import AppDB
 from ..storage.tablespec import spec_for
 from .registry import matrix_markdown
@@ -73,6 +75,12 @@ class Engine:
                                      instance=s.paths.instance)
         self.orch = Orchestrator(s, self.reg, self.builder, self.store, self.usage, self.governor,
                                  charts=self._chart_renderer())
+        # Phase 4: the pair's adaptive overlay (bounded, expiring; tools/tune.py) over the configured values — the
+        # orchestrator reads the same one (playbook, take-profit hint, confidence floor in the rules, hashes)
+        self.tunables = Tunables(s, app_db=s.paths.state() / "app.db", emit=self._overlay_event)
+        self.orch.tunables = self.tunables
+        self._gauge = None                           # ai.usage_gauge.UsageGauge, created on first use
+        self._gauge_level: int | None = None
         self.processed: dict[str, int] = {}          # last decision-TF bar evaluated at its close
         self.processed_screen: dict[str, int] = {}   # last screen-TF (5m) bar evaluated at its close
         self._closes: dict[str, dict[str, float]] = {}   # last closed bar close per TF (candle review conditions)
@@ -225,7 +233,7 @@ class Engine:
         n = min(self.fails.get(pair, 0), MAX_FAILS)
         if not n:
             return 0
-        return min(self.s.ai.min_minutes_between_calls * 2 ** n, self.s.ai.max_backoff_minutes) * 60_000
+        return min(tunables_of(self, pair).min_minutes_between_calls * 2 ** n, self.s.ai.max_backoff_minutes) * 60_000
 
     def _review_mid(self, pair: str, last: dict, now: int) -> float | None:
         """Quote mid in the recommendation's price space (its ``price_reference``, else the analysis instrument —
@@ -267,11 +275,12 @@ class Engine:
         if ref and atr and mid:
             move_atr = abs(mid - float(ref)) / float(atr)
         sig = self.store.kv_get(f"{pair}:signature")
+        tn = tunables_of(self, pair, now)             # the configured values, or the pair's bounded overlay
         d = decide(policy or self._policy(), payload, last_call_ms=last_call, now=now,
-                   min_spacing_min=self.s.ai.min_minutes_between_calls, max_idle_min=self.s.ai.max_idle_minutes,
-                   review_reasons=cond_r, at_close=at_close, review_floor_min=self.s.ai.review_floor_minutes,
-                   backoff_ms=self._backoff_ms(pair), weak_min=self.s.ai.weak_min,
-                   liquidity_atr=self.s.ai.liquidity_atr, screen_tf=self.screen_tf(pair).value,
+                   min_spacing_min=tn.min_minutes_between_calls, max_idle_min=tn.max_idle_minutes,
+                   review_reasons=cond_r, at_close=at_close, review_floor_min=tn.review_floor_minutes,
+                   backoff_ms=self._backoff_ms(pair), weak_min=tn.weak_min,
+                   liquidity_atr=tn.liquidity_atr, screen_tf=self.screen_tf(pair).value,
                    last_signature=frozenset(sig) if sig is not None else None, time_reasons=time_r,
                    event_reasons=[self._event_text(e) for e in events or []], at_decision_close=at_decision_close,
                    decision_bar_since_last_call=last_call is None or last_dec_close > last_call,
@@ -342,7 +351,7 @@ class Engine:
             self._quietly("ai_not_ready", f"{self._ai_problem}|{pairs}", now, "ai_not_ready",
                           f"AI provider not ready ({self._ai_problem}) — not analysed: {pairs}")
             return
-        fired = self._ration(fired, now)
+        fired = self._ration(self._unpaused(fired, now), now)
         payloads: dict[str, dict] = {}
         queue: list[CycleRequest] = []
         for pair, reasons, strength, payload in fired:
@@ -415,8 +424,49 @@ class Engine:
         day0 = now // MS_PER_DAY * MS_PER_DAY
         return self.store.count_strength_since(pair, "event", day0, without_setup=True) < self.s.ai.event_calls_per_day
 
+    def _unpaused(self, fired: list, now: int) -> list:
+        """The adaptive overlay's ``pair.ai_paused_until`` (a review session paused a pair): no call until then;
+        its executor events keep waiting and wake the model when the pause ends."""
+        keep = []
+        for f in fired:
+            until = tunables_of(self, f[0], now).ai_paused_until_ms
+            if until and now < until:
+                self._quietly(f"paused:{f[0]}", str(until), now, "ai_paused",
+                              f"{f[0]}: AI calls paused by the adaptive overlay until {iso(until)} — not analysed")
+                continue
+            keep.append(f)
+        return keep
+
+    def _gauge_state(self):
+        """The usage gauge (Phase 4): rolling token sums of every Claude call vs ai.usage budgets — None when it
+        cannot be read (never a reason to stop analysing)."""
+        usage = getattr(self, "usage", None)
+        if usage is None:                            # engines built bare in tests
+            return None
+        try:
+            if getattr(self, "_gauge", None) is None:
+                from ..ai.usage_gauge import UsageGauge
+                self._gauge = UsageGauge(self.s, usage)
+            return self._gauge.state()
+        except Exception:  # noqa: BLE001
+            if not getattr(self, "_gauge_warned", False):
+                self._gauge_warned = True
+                log.exception("usage gauge unavailable")
+            return None
+
     def _ration(self, fired: list, now: int) -> list:
-        """Quota pressure (F8): the fewer requests left in the provider's quota day, the stronger a trigger must be."""
+        """Quota pressure (F8): the fewer requests left in the provider's quota day, the stronger a trigger must be.
+        With ``ai.usage.enforce`` the usage gauge comes first: level 1 → reviews and events only, level 2 → events
+        only (the CLI's own usage limit stays the hard stop)."""
+        gs = self._gauge_state()
+        if gs is not None and gs.enforce and gs.level > 0:
+            allowed = {"review", "event"} if gs.level == 1 else {"event"}
+            keep = [f for f in fired if f[2] in allowed]
+            if len(keep) < len(fired):
+                dropped = ", ".join(f[0] for f in fired if f not in keep)
+                self._quietly("gauge", f"{gs.level}|{dropped}", now, "ai_gauge",
+                              f"usage gauge level {gs.level} ({gs.reason}) — not analysed: {dropped}")
+            fired = keep
         left, cap = self.orch.quota()
         if left is None or not cap:
             return fired
@@ -487,8 +537,54 @@ class Engine:
             "processed": {p: iso(b) for p, b in self.processed.items()},
             "screened": {p: iso(b) for p, b in self.processed_screen.items()},
             "snapshot_build_ms": {"last": self._build_ms[-1] if self._build_ms else None,
-                                  "max": max(self._build_ms) if self._build_ms else None},
-            "events_waiting": {p: len(v) for p, v in self._events.items() if v}})
+                                  "max": max(self._build_ms) if self._build_ms else None,
+                                  "median": int(statistics.median(self._build_ms)) if self._build_ms else None,
+                                  "n": len(self._build_ms)},
+            "events_waiting": {p: len(v) for p, v in self._events.items() if v},
+            "usage_gauge": self._gauge_detail(),
+            "adaptive": self._overlay_detail()})
+
+    def _gauge_detail(self) -> dict | None:
+        gs = self._gauge_state()
+        if gs is None:
+            return None
+        prev = getattr(self, "_gauge_level", None)
+        if prev is not None and gs.level != prev:
+            self._notify("warn" if gs.level > prev else "info", "Usage gauge",
+                         f"level {prev} → {gs.level}: {gs.reason}"
+                         + ("" if gs.enforce else " (observe only: ai.usage.enforce is off)"), key=f"gauge:{gs.level}")
+        self._gauge_level = gs.level
+        return gs.as_detail()
+
+    def _overlay_detail(self) -> dict:
+        """What the adaptive overlay changes for each pair now (dashboard, health report, review pack)."""
+        out = {}
+        for pair in self.s.enabled_pairs():
+            try:
+                t = tunables_of(self, pair)
+            except Exception:  # noqa: BLE001
+                continue
+            if t.adaptive_hash or t.playbook_hash:
+                out[pair] = {"adaptive_hash": t.adaptive_hash, "playbook_hash": t.playbook_hash,
+                             "paused_until": iso(t.ai_paused_until_ms) if t.ai_paused_until_ms else None}
+        return out
+
+    def _overlay_event(self, kind: str, payload: dict) -> None:
+        """An adaptive-overlay event (invalid file kept on the last good values, an entry expired)."""
+        try:
+            self.appdb.add_event("engine", kind, json.dumps(payload, default=str)[:1500])
+        except Exception:  # noqa: BLE001
+            log.exception("could not record %s", kind)
+        self._notify("warn" if kind == "adaptive_invalid" else "info", "Adaptive overlay",
+                     str(payload.get("text") or f"{kind}: {payload}")[:400], key=f"{kind}:{payload.get('pair')}",
+                     pair=payload.get("pair"))
+
+    def _notify(self, level: str, title: str, text: str, *, key: str | None = None, pair: str | None = None) -> None:
+        try:
+            from ..core.notify import notify
+            notify(self.s, level, title, text, key=key, pair=pair)
+        except Exception:  # noqa: BLE001 — a notification never stops the engine
+            log.debug("notify failed", exc_info=True)
 
     async def _heartbeat(self) -> None:
         while not self.stop:

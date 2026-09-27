@@ -47,6 +47,7 @@ from .backends.paper import PaperBackend, Tick
 from .drawdown import AccountPeak
 from .exposure import live_sides
 from .management import ActionLog, MT5Legs, PaperLegs, PositionManager
+from .metrics import MetricsJob, mt5_outcome_detail, paper_outcome_detail
 from .price_mapping import check_basis, translate
 from .risk_gate import ExecContext, evaluate
 
@@ -143,6 +144,9 @@ class Executor:
             self.legs = PaperLegs(self.paper, self._leg_quote, self._leg_specs, reason="rule")
             self.model_legs = PaperLegs(self.paper, self._leg_quote, self._leg_specs, reason="model")
         self.manager = PositionManager(s, self.actions, self.legs, self, self._emit)
+        # Phase 4 (§3.8): what happened after each decision, measured on real bars (housekeeping, bounded per pass)
+        self.metrics = MetricsJob(s, self.store, self.reg, self.reader, actions=self.actions,
+                                  paper_legs=self.paper.decision_legs if self.paper else None)
         self._mkt: dict[tuple, object] = {}
         self._basis: dict[str, tuple[float, float | None]] = {}      # pair → (checked at, basis or None)
         self._action_errs: dict[str, tuple[str, int]] = {}           # decision → (error, last reported)
@@ -355,7 +359,9 @@ class Executor:
                   "equity_at_entry": acct["equity"], "lots": gate.size.lots if gate.size else None,
                   "risk_pct": round(gate.size.risk_pct, 3) if gate.size else None, "rr_exec": gate.rr_exec,
                   # the management plan in execution prices (P9.6 executes it on the live legs)
-                  "executed_management": rec_x.get("management") or []}
+                  "executed_management": rec_x.get("management") or [],
+                  # the execution quote's spread the gate judged (decision metrics; execution-instrument units)
+                  "spread_at_gate": round(eq.ask - eq.bid, 10)}
         if gate.single_leg_tp is not None:        # one position at the minimum lot: that is the target placed
             detail["executed_levels"]["take_profits"] = [rec_x["take_profits"][gate.single_leg_tp]["price"]]
             detail["single_leg"] = f"TP{gate.single_leg_tp + 1}"
@@ -517,8 +523,9 @@ class Executor:
         for did in self.paper.unsettled_decisions():
             legs = self.paper.decision_legs(did)
             filled = [l for l in legs if l["fill_price"] is not None]
+            split = paper_outcome_detail(legs)          # how each leg ended, when (decision metrics)
             if not filled:
-                self.store.set_outcome(did, "not_filled", 0.0, 0.0, 0.0)
+                self.store.set_outcome(did, "not_filled", 0.0, 0.0, 0.0, detail=split)
                 continue
             pnl = sum(l["pnl_usd"] or 0.0 for l in filled)
             pcfg = self.s.pairs.get(legs[0]["pair"])
@@ -528,7 +535,7 @@ class Executor:
                        / pcfg.pip_size * l["volume"] for l in closed) / vol if pcfg and vol else None
             outcome = "closed_profit" if pnl > 0 else "closed_loss" if pnl < 0 else "closed_breakeven"
             self.store.set_outcome(did, outcome, round(pnl, 2), round(pnl / self.paper.start_equity * 100, 3),
-                                   round(pips, 1) if pips is not None else None)
+                                   round(pips, 1) if pips is not None else None, detail=split)
 
     def _settle_mt5_outcomes(self) -> None:
         """P9.6: executed decisions whose legs are all closed / expired at the broker get their real outcome (profit
@@ -554,8 +561,10 @@ class Executor:
                 continue
             if r is None:
                 continue
+            # the broker's split (commission / swap / fee, close time, how each leg ended) exists only here
+            split = mt5_outcome_detail(r)
             if not r["filled"]:
-                self.store.set_outcome(did, "not_filled", 0.0, 0.0, 0.0)
+                self.store.set_outcome(did, "not_filled", 0.0, 0.0, 0.0, detail=split)
                 self.appdb.add_event("executor", "outcome", f"{pair} {did[:8]}: not filled (expired/cancelled)")
                 continue
             pnl = r["pnl_usd"]
@@ -564,7 +573,7 @@ class Executor:
             pips = r["move"] / pcfg.pip_size if r["move"] is not None and pcfg else None
             outcome = "closed_profit" if pnl > 0 else "closed_loss" if pnl < 0 else "closed_breakeven"
             self.store.set_outcome(did, outcome, pnl, round(pnl / base * 100, 3) if base and base > 0 else None,
-                                   round(pips, 1) if pips is not None else None)
+                                   round(pips, 1) if pips is not None else None, detail=split)
             self.appdb.add_event("executor", "outcome", f"{pair} {did[:8]}: {outcome} {pnl:+.2f} USD")
             log.info("%s %s settled at the broker: %s %+.2f USD", pair, did[:8], outcome, pnl)
 
@@ -617,6 +626,11 @@ class Executor:
                 self.virtual_outcomes()
             except Exception:  # noqa: BLE001
                 log.exception("virtual outcomes failed")
+            try:                    # after the outcomes it scores; bounded per pass, never blocks the candidates
+                if (job := getattr(self, "metrics", None)) is not None:
+                    job.run()
+            except Exception:  # noqa: BLE001
+                log.exception("decision metrics failed")
         return self.paper.account(self.marks()) if self.paper else self.mt5.account()
 
     def run(self) -> None:

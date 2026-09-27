@@ -18,7 +18,8 @@ let SKEW = 0;                                  // server clock − browser clock
 const serverNow = () => Date.now() + SKEW;
 const latestDecision = {};
 const setHTML = (el, html) => { if (el && el._html !== html) { el.innerHTML = html; el._html = html; } };   // no churn → no lost clicks
-const killSwitchOn = () => !!(STATUS.collectors || []).find((c) => c.collector === "executor")?.detail?.kill_switch;
+/* the switch files themselves (snapshot) or the executor's own report (its heartbeat) */
+const killSwitchOn = () => !!STATUS.kill_switch?.on || !!(STATUS.collectors || []).find((c) => c.collector === "executor")?.detail?.kill_switch;
 
 /* Execute Now is possible until the earlier of valid_until and timestamp + max_recommendation_age_s (the risk gate's
    rule: the recommendation's timestamp is the cycle's data as-of, earlier than the row's ts for a slow AI call). */
@@ -56,6 +57,10 @@ document.querySelectorAll("#tabs button").forEach((b) =>
     if (b.dataset.tab === "performance") loadPerformance();
     if (b.dataset.tab === "health") loadEvents();
     if (b.dataset.tab === "charts" && !chart) loadChart();
+    if (b.dataset.tab === "operator") loadOperator();
+    if (b.dataset.tab === "tuning") loadTuning();
+    if (b.dataset.tab === "proposals") loadProposals();
+    if (b.dataset.tab === "reviews") loadReviews();
   })
 );
 
@@ -104,8 +109,12 @@ function renderLive() {
   $("#mode-badge").textContent = `${mode.toUpperCase()} · ${ex?.detail?.trigger || ""}`;
   $("#mode-badge").className = `badge ${mode}`;
   $("#kill-badge").classList.toggle("hidden", !killSwitchOn());
+  const ks = STATUS.kill_switch?.files || [];
+  $("#kill-badge").title = `${ks.length ? ks.join(" · ") : "reported by the executor"} — the executor blocks all new orders`;
   const eng = (STATUS.collectors || []).find((c) => c.collector === "engine");
-  $("#ai-badge").textContent = eng?.detail ? `AI ${eng.detail.provider} · ${eng.detail.mode} · gov ${eng.detail.governor_level}` : "AI engine not running";
+  const g = eng?.detail?.usage_gauge;
+  const gauge = g && g.level != null ? ` · usage L${g.level}${g.week_pct != null ? ` (${g.week_pct}% wk)` : ""}` : "";
+  $("#ai-badge").textContent = eng?.detail ? `AI ${eng.detail.provider} · ${eng.detail.mode} · gov ${eng.detail.governor_level}${gauge}` : "AI engine not running";
 }
 
 function renderRecCard(p, rec, d) {
@@ -252,8 +261,8 @@ async function showDecision(id, scroll = true) {
     ${(r.data_quality_notes || []).length ? `<p class="small"><b>Data quality:</b> ${esc(r.data_quality_notes.join(" · "))}</p>` : ""}
     ${r.operator_notes ? `<p class="small"><b>Operator notes:</b> ${esc(r.operator_notes)}</p>` : ""}
     ${(r.management || []).length ? `<p class="small"><b>Management plan:</b> ${esc(r.management.map((m) => `${m.action} on ${m.trigger}${m.value != null ? " " + m.value : ""}${Object.keys(m.params || {}).length ? " " + JSON.stringify(m.params) : ""}`).join(" · "))}</p>` : ""}
-    ${(r.position_actions || []).length ? `<p class="small"><b>Actions on live trades:</b> ${esc(r.position_actions.map((a) => `${a.action} ${a.target.kind} ${a.target.decision}${a.value != null ? " → " + a.value : ""}${a.fraction != null ? " (" + Math.round(a.fraction * 100) + " %)" : ""} — ${a.reason}`).join(" · "))}</p>` : ""}
-    ${(d.position_actions || []).length ? `<h2>Actions applied</h2><table class="grid"><tr><th>time</th><th>source</th><th>action</th><th>leg</th><th>status</th><th>detail</th></tr>${d.position_actions.map((a) => `<tr><td>${fmtT(a.ts)}</td><td>${esc(a.source)}</td><td>${esc(a.action)}</td><td>${esc(a.leg)}</td><td class="${a.status === "applied" ? "pass" : a.status === "deferred" || a.status === "skipped" ? "" : "fail"}">${esc(a.status)}</td><td class="small">${esc(typeof a.detail === "string" ? a.detail : JSON.stringify(a.detail || {}).slice(0, 240))}</td></tr>`).join("")}</table>` : ""}
+    ${(r.position_actions || []).length ? `<p class="small"><b>Actions on live trades:</b> ${esc(r.position_actions.map((a) => `${a?.action} ${a?.target?.kind} ${a?.target?.decision}${a?.value != null ? " → " + a.value : ""}${a?.fraction != null ? " (" + Math.round(a.fraction * 100) + " %)" : ""} — ${a?.reason}`).join(" · "))}</p>` : ""}
+    ${(d.position_actions || []).length ? `<h2>Actions applied</h2>${actionsTable(d.position_actions)}` : ""}
     <div class="charts-strip" data-pair="${esc(d.pair)}"></div>
     <p class="small"><b>Capabilities used:</b> ${caps}</p>
     ${d.errors ? `<p class="small fail">${esc(JSON.stringify(d.errors))}</p>` : ""}
@@ -271,12 +280,13 @@ async function showDecision(id, scroll = true) {
 /* the latest chart images the model received (Phase 3) */
 async function loadCharts(box) {
   if (!box) return;
-  try {
-    const list = await api(`/api/charts/${encodeURIComponent(box.dataset.pair)}`);
-    if (!list.length) return;
-    box.innerHTML = `<h2>Charts rendered for the model (latest)</h2>` + list.map((c) =>
-      `<figure class="chart-thumb"><img loading="lazy" alt="${esc(c.tf)} chart" src="/api/charts/${encodeURIComponent(box.dataset.pair)}/${encodeURIComponent(c.tf)}?t=${c.updated_ms}"><figcaption class="small muted">${esc(c.tf)} · ${fmtT(c.updated_ms)}</figcaption></figure>`).join("");
-  } catch (e) { /* charts are optional */ }
+  try { renderCharts(box, await api(`/api/charts/${encodeURIComponent(box.dataset.pair)}`)); } catch (e) { /* charts are optional */ }
+}
+
+function renderCharts(box, list) {
+  if (!box || !list?.length) return;
+  box.innerHTML = `<h2>Charts rendered for the model (latest)</h2>` + list.map((c) =>
+    `<figure class="chart-thumb"><img loading="lazy" alt="${esc(c.tf)} chart" src="/api/charts/${encodeURIComponent(box.dataset.pair)}/${encodeURIComponent(c.tf)}?t=${encodeURIComponent(c.updated_ms)}"><figcaption class="small muted">${esc(c.tf)} · ${tSafe(c.updated_ms)}</figcaption></figure>`).join("");
 }
 
 /* ------------------------------------------------------------------ performance */
@@ -314,6 +324,148 @@ async function loadEvents() {
   $("#events tbody").innerHTML = ev.map((e) => `<tr><td>${fmtT(e.ts)}</td><td>${esc(e.collector)}</td><td>${esc(e.event)}</td><td class="small">${esc(e.detail || "")}</td><td>${e.duration_ms ? age(e.duration_ms / 1000) : ""}</td></tr>`).join("");
 }
 
+/* ------------------------------------------------------------------ Phase 4: operator · tuning · proposals · reviews */
+/* Everything written by the model, a review session or a tool goes through esc() and is shown as text (no markdown
+   rendering, never a link or a src): the page has no script-src CSP, esc() is the only XSS defence. Loaded on click
+   and by the Refresh buttons (D-007: the browser never polls). */
+const txt = (v, n = 240) => { if (v == null) return ""; const s = typeof v === "string" ? v : JSON.stringify(v); return s.length > n ? `${s.slice(0, n)}…` : s; };
+const tSafe = (ms) => { try { return typeof ms === "number" && ms > 0 ? fmtT(ms) : "—"; } catch (e) { return "—"; } };
+const stateSpan = (s) => `<span class="state-${esc(s)}">${esc(s)}</span>`;
+const grid = (head, rows, empty) => rows.length
+  ? `<table class="grid"><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`
+  : `<p class="muted small">${esc(empty)}</p>`;
+const showError = (box, e) => { box.innerHTML = `<p class="fail small">${esc(e?.message || e)}</p>`; };
+const ruleText = (m) => (m ? `${m.action} on ${m.trigger}${m.value != null ? " " + m.value : ""}${Object.keys(m.params || {}).length ? " " + JSON.stringify(m.params) : ""}` : "");
+
+/* position_actions rows (model- and rule-sourced); `full` adds the pair and which decision acted on which */
+function actionsTable(list, full = false) {
+  const cls = (s) => (s === "applied" ? "pass" : ["deferred", "skipped", "pending"].includes(s) ? "muted" : "fail");
+  const head = ["time", ...(full ? ["pair", "from → target"] : []), "source", "action", "leg", "status", "detail"];
+  return grid(head, (list || []).map((a) => `<tr><td>${tSafe(a.ts)}</td>${full ? `<td>${esc(a.pair)}</td><td class="small">${esc(a.source_decision)} → ${esc(a.target_decision)}</td>` : ""}
+    <td>${esc(a.source)}</td><td>${esc(a.action)}</td><td>${esc(a.leg)}</td><td class="${cls(a.status)}">${esc(a.status)}</td>
+    <td class="small">${esc(txt(a.detail, 240))}</td></tr>`), "No action yet.");
+}
+
+async function loadOperator() {
+  const pair = $("#op-pair").value, box = $("#op-body");
+  if (!pair) return;
+  let d;
+  try { d = await api(`/api/operator/${encodeURIComponent(pair)}?limit=100`); } catch (e) { return showError(box, e); }
+  const m = d.memory || {}, la = d.last_model_actions;
+  const asked = (la?.actions || []).map((a) => `<tr><td>${esc(a?.action)}</td><td>${esc(a?.target?.kind)} ${esc(a?.target?.decision)}</td>
+    <td>${a?.value != null ? esc(txt(a.value, 40)) : ""}${a?.fraction != null ? ` (${esc(Math.round(Number(a.fraction) * 100))} %)` : ""}</td><td class="small">${esc(txt(a?.reason, 400))}</td></tr>`);
+  const rules = (d.management_state || []).map((r) => `<tr><td>${tSafe(r.decision_ts)}</td><td class="small">${esc(r.decision_id)}</td><td>${esc(r.decision)}</td>
+    <td class="small">#${esc(r.rule_idx)} ${esc(ruleText(r.rule))}</td><td>${esc(r.leg)}</td><td>${stateSpan(r.status)}</td><td>${tSafe(r.applied_ms)}</td>
+    <td class="small">${esc(txt(r.detail, 240))}</td></tr>`);
+  box.innerHTML = `
+    <h2>Operator memory — the model's notes to itself</h2>
+    ${m.notes ? `<div class="card"><div class="small muted">${tSafe(m.ts)} · ${esc(m.decision)} · ${stateSpan(m.execution_state)} · decision ${esc(m.id)}</div><p class="prewrap">${esc(m.notes)}</p></div>` : `<p class="muted small">No notes yet.</p>`}
+    <h2>Last position actions the model asked for</h2>
+    ${la ? `<p class="small muted">${tSafe(la.ts)} · decision ${esc(la.id)} · ${esc(la.decision)} · ${stateSpan(la.execution_state)}</p>${grid(["action", "target", "value", "reason"], asked, "none")}` : `<p class="muted small">None among the latest valid decisions.</p>`}
+    <h2>Actions on live trades (${(d.position_actions || []).length})</h2>
+    ${actionsTable(d.position_actions, true)}
+    <h2>Management rules</h2>
+    ${grid(["decision time", "decision", "side", "rule", "leg", "state", "applied", "detail"], rules, "No management rule tracked yet.")}
+    <div class="charts-strip" data-pair="${esc(pair)}"></div>`;
+  renderCharts(box.querySelector(".charts-strip"), d.charts || []);
+}
+
+function tuningPair(pair, x, changes) {
+  const valid = x.valid === true ? `<span class="pass">accepted by the services</span>`
+    : x.valid === false ? `<span class="fail">INVALID — the services keep their last good values</span>`
+      : `<span class="muted">${esc(x.problem || "not validated")}</span>`;
+  const val = (e) => (e.key === "pair.ai_paused_until" ? tSafe(e.value) : txt(e.value, 120));
+  const entries = (x.entries || []).map((e) => `<tr><td>${esc(e.key)}</td><td>${esc(val(e))}</td><td>${tSafe(e.set_ms)}</td>
+    <td class="${e.expired ? "muted" : ""}">${tSafe(e.expires_ms)}${e.expired ? " · expired (default applies)" : ""}</td>
+    <td class="small ${e.problem ? "fail" : ""}">${esc(txt(e.problem || e.reason, 400))}</td><td class="small">${esc(e.review_id)}</td></tr>`);
+  const eff = Object.entries(x.effective || {}).map(([k, v]) => `<div>${esc(k)}</div><div>${esc(txt(v, 300))}</div>`).join("");
+  const pbState = x.playbook == null ? "" : x.playbook_in_force ? `<span class="pass small">in force</span>`
+    : `<span class="muted small">not in force (not referenced by adaptive.yaml, expired, invalid or adaptive off)</span>`;
+  const ch = (changes || []).map((c) => `<tr><td>${tSafe(c.ts)}</td><td>${stateSpan(c.action)}</td><td>${esc(c.key)}</td>
+    <td class="small">${esc(txt(c.old, 80))} → ${esc(txt(c.new ?? c.value, 80))}</td><td>${tSafe(c.expires_ms)}</td>
+    <td class="small">${esc(txt(c.reason, 300))}</td><td class="small">${esc(c.actor)}</td><td class="small">${esc(c.review_id)}</td></tr>`);
+  return `<div class="card pair-block"><h3>${esc(pair)} <span class="small">${valid}</span></h3>
+    ${x.valid === false && x.problem ? `<p class="fail small">${esc(x.problem)}</p>` : ""}
+    ${x.yaml_error ? `<p class="fail small">adaptive.yaml: ${esc(x.yaml_error)}</p>` : ""}
+    <div class="two-col">
+      <div><h2>Overlay (adaptive.yaml)</h2>${x.file ? grid(["key", "value", "set", "expires", "reason", "review"], entries, "adaptive.yaml has no entries.") : `<p class="muted small">No adaptive.yaml — the config values apply.</p>`}</div>
+      <div><h2>Effective values</h2>${eff ? `<div class="kv small">${eff}</div>` : `<p class="muted small">—</p>`}</div>
+    </div>
+    <h2>Playbook ${pbState}</h2>
+    ${x.playbook != null ? `<pre class="review">${esc(x.playbook)}</pre>${x.playbook_truncated ? `<p class="small fail">truncated</p>` : ""}` : `<p class="muted small">No playbook.</p>`}
+    <details><summary>changes.jsonl (${(changes || []).length})</summary>${grid(["time", "action", "key", "old → new", "expires", "reason", "actor", "review"], ch, "No change yet.")}</details>
+  </div>`;
+}
+
+async function loadTuning() {
+  const box = $("#tu-body");
+  let a, t;
+  try { [a, t] = await Promise.all([api("/api/adaptive"), api("/api/tuning_changes?limit=200")]); } catch (e) { return showError(box, e); }
+  $("#tu-flags").innerHTML = [
+    a.enabled ? `<span class="pass">adaptive overlay enabled</span>` : `<span class="fail">adaptive.enabled: false — config defaults everywhere, tune.py refuses</span>`,
+    a.tuning_freeze ? `<span class="fail">TUNING_FREEZE on${a.freeze_note ? ": " + esc(a.freeze_note) : ""}</span>` : `<span class="muted">no TUNING_FREEZE</span>`,
+  ].join(" · ");
+  const rows = (t.table || []).map((r) => `<tr><td>${tSafe(r.ts)}</td><td>${esc(r.pair)}</td><td>${esc(r.key)}</td>
+    <td class="small">${esc(txt(r.old_value, 80))} → ${esc(txt(r.new_value, 80))}</td><td>${tSafe(r.expires_ms)}</td>
+    <td>${r.reverted_ms ? tSafe(r.reverted_ms) : ""}</td><td class="small">${esc(r.actor)}</td><td class="small">${esc(r.review_id)}</td>
+    <td class="small">${esc(txt(r.reason, 300))}</td></tr>`);
+  box.innerHTML = Object.entries(a.pairs || {}).map(([pair, x]) => tuningPair(pair, x, (t.changes || {})[pair])).join("")
+    + `<h2>tuning_changes (this system's app.db)</h2>`
+    + grid(["time", "pair", "key", "old → new", "expires", "reverted", "actor", "review", "reason"], rows, "No tuning change recorded.");
+}
+
+async function loadProposals() {
+  const tb = $("#proposals tbody");
+  let p;
+  try { p = await api("/api/proposals?limit=200"); } catch (e) { tb.innerHTML = `<tr><td class="fail">${esc(e.message)}</td></tr>`; return; }
+  tb.innerHTML = p.length ? `<tr><th>Time (UTC)</th><th>Pair</th><th>Title</th><th>Status</th><th>Branch / worktree</th><th>Document</th><th>Review / commit</th></tr>`
+    + p.map((x) => `<tr><td>${tSafe(x.ts)}</td><td>${esc(x.pair || "—")}</td><td><b>${esc(x.title)}</b><div class="small muted">${esc(x.slug)}</div></td>
+      <td>${stateSpan(x.status)}</td><td class="small">${esc(x.branch)}<div class="muted">${esc(x.worktree)}</div></td><td class="small">${esc(x.doc)}</td>
+      <td class="small">${esc(x.review_id)}${x.commit ? `<div class="muted">${esc(String(x.commit).slice(0, 10))}</div>` : ""}</td></tr>`).join("")
+    : `<tr><td class="muted">No proposal yet.</td></tr>`;
+}
+
+const stampT = (s) => (/^\d{8}T\d{6}/.test(s || "") ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)} ${s.slice(9, 11)}:${s.slice(11, 13)}:${s.slice(13, 15)}` : "—");
+const kb = (n) => (typeof n !== "number" ? "—" : n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
+
+async function loadReviews() {
+  const tb = $("#reviews tbody");
+  let list;
+  try { list = await api("/api/reviews?limit=300"); } catch (e) { tb.innerHTML = `<tr><td colspan="4" class="fail">${esc(e.message)}</td></tr>`; return; }
+  tb.innerHTML = list.map((r) => `<tr data-name="${esc(r.name)}"><td>${esc(stampT(r.stamp))}</td><td>${esc(r.kind)}${r.session ? " · session" : ""}</td>
+    <td class="small">${esc(r.name)}</td><td>${esc(kb(r.size))}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">No review yet.</td></tr>`;
+}
+
+async function showReview(name) {
+  const box = $("#rv-detail");
+  box.classList.remove("hidden");
+  let r;
+  try { r = await api(`/api/reviews/${encodeURIComponent(name)}`); } catch (e) { return showError(box, e); }
+  const s = r.session;
+  const facts = s ? ["status", "kind", "model", "effort", "started", "ended", "elapsed_s", "summary_level", "error", "diff_guard"]
+    .filter((k) => s[k] != null).map((k) => `<div>${esc(k)}</div><div>${esc(txt(s[k], 400))}</div>`).join("") : "";
+  box.innerHTML = `<h3>${esc(r.name)}</h3>
+    ${facts ? `<div class="kv small">${facts}</div>` : ""}
+    ${s?.summary ? `<h2>Summary</h2><p class="prewrap">${esc(s.summary)}</p>` : ""}
+    ${r.truncated ? `<p class="small fail">Only the first ${esc(Math.round((r.max_bytes || 0) / 1024))} KB are shown.</p>` : ""}
+    <pre class="review">${esc(r.text)}</pre>`;
+}
+
+/* ON only — OFF stays scripts\kill_switch_off.bat (deliberate friction). What is shown is the POST's own answer: the
+   badge follows the file within ~1 s, but it is not the confirmation. */
+async function killSwitchNow() {
+  let info = null;
+  try { info = await api("/api/kill_switch"); } catch (e) { /* the POST reports its own error */ }
+  const scope = !info ? "this system" : info.global ? "EVERY system (all-pairs mode: the GLOBAL switch data/KILL_SWITCH)" : `the ${info.scope} system only`;
+  if (!confirm(`Turn the kill switch ON for ${scope}?\n\nNo new orders from now on; open trades keep their SL/TP and protective actions.\nThere is no OFF button: OFF is scripts\\kill_switch_off.bat.`)) return;
+  const reason = prompt("Reason (optional, stored in the switch file):", "");
+  if (reason === null) return;
+  try {
+    const r = await api("/api/kill_switch", { method: "POST", headers: { "X-Dashboard-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify({ reason }) });
+    alert(`${r.created ? "KILL SWITCH ON" : "The kill switch was already ON"} (${r.global ? "GLOBAL" : r.scope})\n${r.file}\n\n${r.note}`);
+  } catch (e) { alert(`Kill switch NOT confirmed: ${e.message}`); }
+}
+
 /* ------------------------------------------------------------------ boot */
 (async function boot() {
   // one delegated listener each: survives re-renders (no per-render re-binding)
@@ -322,8 +474,19 @@ async function loadEvents() {
     if (b && !b.disabled) executeNow(b.dataset.exec);
   }));
   setInterval(updateCountdowns, 1000);
+  $("#kill-on").addEventListener("click", killSwitchNow);
+  $("#reviews tbody").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-name]");
+    if (tr) showReview(tr.dataset.name);
+  });
+  $("#op-refresh").addEventListener("click", loadOperator);
+  $("#tu-refresh").addEventListener("click", loadTuning);
+  $("#pr-refresh").addEventListener("click", loadProposals);
+  $("#rv-refresh").addEventListener("click", loadReviews);
   PAIRS = await api("/api/pairs");
   $("#dec-pair").innerHTML += PAIRS.map((p) => `<option>${esc(p.pair)}</option>`).join("");
+  $("#op-pair").innerHTML = PAIRS.map((p) => `<option>${esc(p.pair)}</option>`).join("");
+  $("#op-pair").addEventListener("change", loadOperator);
   $("#dec-pair").addEventListener("change", loadDecisions);
   $("#dec-refresh").addEventListener("click", loadDecisions);
   initChartControls();

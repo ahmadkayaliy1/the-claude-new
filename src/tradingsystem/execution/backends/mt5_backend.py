@@ -575,7 +575,14 @@ class MT5Backend:
         yet, a position's closing deals do not yet cover its opening volume (history still syncing after a
         relaunch), or the terminal is not connected. Else ``filled`` (any leg entered), ``pnl_usd`` (profit +
         commission + swap + fee of every deal of its positions), ``move`` (volume-weighted price move in the trade's
-        favour) and ``volume``. Raises when the terminal cannot be asked."""
+        favour) and ``volume``. Raises when the terminal cannot be asked.
+
+        Phase 4 (decision metrics — only the settlement sees these): ``commission``, ``swap``, ``fee`` (the split of
+        ``pnl_usd``'s costs), ``open_ms`` / ``close_ms`` (first opening / last closing deal, UTC ms, None when the
+        terminal gives no time), ``reasons`` (leg → ``tp`` | ``sl`` | ``other`` from its last closing deal;
+        ``expired`` | ``cancelled`` | ``other`` for an order that never filled) and ``exits`` (per leg: ``leg``
+        (position id / order ticket — the key ``position_actions`` uses), ``comment``, ``tp_index``, ``filled``,
+        ``reason``, ``open_ms``, ``close_ms``)."""
         m, prefix = self.mt5, f"ts:{decision_id[:20]}:"
         if not self.t.healthy():
             return None
@@ -591,6 +598,9 @@ class MT5Backend:
         if not placed or (legs and not legs <= {o.comment for o in placed}):
             return None
         pnl, move_vol, vol_out = 0.0, 0.0, 0.0
+        commission = swap = fee = 0.0
+        exits: list[dict] = []
+        deal_reason = {getattr(m, "DEAL_REASON_SL", 4): "sl", getattr(m, "DEAL_REASON_TP", 5): "tp"}
         for pid in pids:
             deals = self._ask(f"deals of position {pid}", m.history_deals_get(position=pid))
             ins = [d for d in deals if d.entry == m.DEAL_ENTRY_IN]
@@ -599,11 +609,35 @@ class MT5Backend:
             if not ins or v_out + 1e-9 < v_in:
                 return None                      # opening deal missing or not fully closed in the history yet
             pnl += sum(d.profit + d.commission + d.swap + getattr(d, "fee", 0.0) for d in deals)
+            commission += sum(d.commission for d in deals)
+            swap += sum(d.swap for d in deals)
+            fee += sum(getattr(d, "fee", 0.0) or 0.0 for d in deals)
             buy = ins[0].type == m.DEAL_TYPE_BUY
             p_in = sum(d.price * d.volume for d in ins) / sum(d.volume for d in ins)
             v = sum(d.volume for d in outs)
             p_out = sum(d.price * d.volume for d in outs) / v
             move_vol += ((p_out - p_in) if buy else (p_in - p_out)) * v
             vol_out += v
+            last = max(outs, key=lambda d: (getattr(d, "time_msc", 0), getattr(d, "ticket", 0)))
+            opener = next((o for o in placed if getattr(o, "ticket", None) == pid), None) or \
+                next((o for o in placed if getattr(o, "position_id", 0) == pid), None)
+            exits.append({"leg": str(pid), "comment": getattr(opener, "comment", None),
+                          "tp_index": _tp_index(getattr(opener, "comment", "")), "filled": True,
+                          "reason": deal_reason.get(getattr(last, "reason", None), "other"),
+                          "open_ms": self._utc(min(getattr(d, "time_msc", 0) or 0 for d in ins)),
+                          "close_ms": self._utc(getattr(last, "time_msc", 0))})
+        state_reason = {getattr(m, "ORDER_STATE_EXPIRED", 6): "expired",
+                        getattr(m, "ORDER_STATE_CANCELED", 2): "cancelled"}
+        for o in placed:                         # orders that never filled: how they ended
+            if not getattr(o, "position_id", 0):
+                exits.append({"leg": str(getattr(o, "ticket", None) or o.comment), "comment": o.comment,
+                              "tp_index": _tp_index(o.comment), "filled": False,
+                              "reason": state_reason.get(getattr(o, "state", None), "other"), "open_ms": None,
+                              "close_ms": self._utc(getattr(o, "time_done_msc", 0))})
+        opens = [e["open_ms"] for e in exits if e["filled"] and e["open_ms"] is not None]
+        closes = [e["close_ms"] for e in exits if e["close_ms"] is not None]
         return {"filled": bool(pids), "pnl_usd": round(pnl, 2), "legs": len(placed),
-                "move": move_vol / vol_out if vol_out else None, "volume": vol_out}
+                "move": move_vol / vol_out if vol_out else None, "volume": vol_out,
+                "commission": round(commission, 4), "swap": round(swap, 4), "fee": round(fee, 4),
+                "open_ms": min(opens) if opens else None, "close_ms": max(closes) if closes else None,
+                "reasons": {e["leg"]: e["reason"] for e in exits}, "exits": exits}

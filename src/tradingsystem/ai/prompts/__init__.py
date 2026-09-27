@@ -8,12 +8,14 @@ used for each decision (stored with the decision, P8.7).
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 
 DIR = Path(__file__).parent
+log = logging.getLogger(__name__)
 _HEADER = re.compile(r"^<!-- prompt: .*? -->\s*", re.M)
 
 ROLE_FILES = {
@@ -31,7 +33,16 @@ class PromptError(ValueError):
 
 
 def _read(rel: str) -> str:
-    return _HEADER.sub("", (DIR / rel).read_text(encoding="utf-8")).strip()
+    return _read_versioned(rel)[0]
+
+
+def _read_versioned(rel: str) -> tuple[str, str, int | None]:
+    """(text without its header, library name ``shared/core_rules``, version from the header or None) — one read,
+    so the version recorded is the version of the text actually used."""
+    raw = (DIR / rel).read_text(encoding="utf-8")
+    m = _VERSION.search(raw)
+    name = m.group(1) if m else rel.removesuffix(".md")
+    return _HEADER.sub("", raw).strip(), name, int(m.group(2)) if m else None
 
 
 def _fill(text: str, values: dict[str, object], where: str) -> str:
@@ -51,6 +62,8 @@ class RenderedPrompt:
     role: str
     system: str
     user: str
+    # Phase 4: ``{"shared/core_rules": 6, "agent_per_pair/instructions": 5, …}`` of the files this render used
+    versions: dict[str, int] = field(default_factory=dict, compare=False)
 
     @property
     def prompt_hash(self) -> str:
@@ -64,13 +77,33 @@ def render(role: str, system_vars: dict[str, object], user_vars: dict[str, objec
     if role not in ROLE_FILES:
         raise PromptError(f"unknown prompt role {role!r}")
     sys_file, user_file = ROLE_FILES[role]
-    base = dict(system_vars)
-    base.setdefault("persona", _fill(_read("shared/trader_persona.md"), system_vars, "persona"))
-    base.setdefault("core_rules", _fill(_read("shared/core_rules.md"), system_vars, "core_rules"))
-    base.setdefault("payload_legend", _fill(_read("shared/payload_legend.md"), system_vars, "payload_legend"))
-    system = _fill(_read(sys_file), base, sys_file)
-    user = _fill(_read(user_file), {**system_vars, **user_vars}, user_file)
-    return RenderedPrompt(role, system, user)
+    base, used = dict(system_vars), {}
+
+    def text(rel: str, record: bool = True) -> str:
+        body, name, version = _read_versioned(rel)
+        if record and version is not None:
+            used[name] = version
+        return body
+
+    for var, rel in (("persona", "shared/trader_persona.md"), ("core_rules", "shared/core_rules.md"),
+                     ("payload_legend", "shared/payload_legend.md")):
+        own = var in base                          # a caller-supplied block replaces the shared file (still checked)
+        base.setdefault(var, _fill(text(rel, record=not own), system_vars, var))
+    system = _fill(text(sys_file), base, sys_file)
+    user = _fill(text(user_file), {**system_vars, **user_vars}, user_file)
+    return RenderedPrompt(role, system, user, used)
+
+
+def register_versions(store, rendered: RenderedPrompt, role: str, *, lib_hash: str | None = None) -> None:
+    """Record ``rendered``'s prompt hash with the versions of the files it used in ``prompt_versions`` (first
+    sighting, :meth:`..store.DecisionStore.register_prompt`). One database write per new system prompt per process;
+    never raises — a registry problem must not fail a cycle. ``lib_hash`` defaults to the library as it is now."""
+    try:
+        if store is None or store.prompt_known(rendered.prompt_hash):
+            return
+        store.register_prompt(rendered.prompt_hash, role, lib_hash or library_hash(), dict(rendered.versions))
+    except Exception:  # noqa: BLE001
+        log.warning("prompt versions of %s (%s) not registered", role, rendered.prompt_hash, exc_info=True)
 
 
 _VERSION = re.compile(r"^<!-- prompt: (\S+) · version (\d+) -->", re.M)

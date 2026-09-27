@@ -56,3 +56,22 @@ details summary { cursor: pointer; color: var(--blue); margin: 8px 0; }
 .charts-strip h2 { flex-basis: 100%; }
 .chart-thumb { margin: 0; max-width: 360px; }
 .chart-thumb img { width: 100%; height: auto; border: 1px solid var(--line, #333); border-radius: 4px; }
+
+/* Phase 4: operator / tuning / proposals / reviews tabs and the kill-switch ON button */
+button.danger { background: var(--red); color: white; border: 0; border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; white-space: nowrap; }
+button.danger:hover { filter: brightness(1.12); }
+.meta .badge.kill { white-space: nowrap; }
+.state-applied, .state-done, .state-ok { color: var(--green); }
+.state-armed, .state-pending, .state-deferred, .state-awaiting_user, .state-running, .state-set { color: var(--amber); }
+.state-failed { color: var(--red); }
+.state-skipped, .state-dry_run, .state-revert { color: var(--muted); }
+.prewrap { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; }
+pre.review { max-height: 70vh; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; line-height: 1.5; }
+.pair-block { margin-bottom: 16px; }
+.pair-block h3 { justify-content: flex-start; gap: 12px; }
+.pair-block .two-col { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+.pair-block td, .pair-block .kv div, #rv-detail .kv div, #tab-operator td, #proposals td { overflow-wrap: anywhere; min-width: 0; }
+.review-layout { display: grid; grid-template-columns: minmax(300px, 420px) 1fr; gap: 14px; align-items: start; }
+.review-layout .detail { margin-top: 0; }
+#tu-flags { align-self: center; }
+@media (max-width: 900px) { .review-layout, .pair-block .two-col { grid-template-columns: minmax(0, 1fr); } }

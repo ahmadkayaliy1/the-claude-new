@@ -44,7 +44,7 @@ def test_system_prompt_does_not_change_with_the_equity():
 def test_prompt_versions_are_registered():
     v = versions()
     assert v["shared/core_rules"] == 6 and v["shared/trader_persona"] == 2 and v["shared/payload_legend"] == 4
-    assert v["agent_per_pair/instructions"] == 4 and v["escalation/system"] == 1
+    assert v["agent_per_pair/instructions"] == 5 and v["escalation/system"] == 1          # v5: take-profit hint (Phase 4)
     assert len(library_hash()) == 16
 
 

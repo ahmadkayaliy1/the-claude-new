@@ -1,0 +1,354 @@
+"""Dashboard Phase 4 tabs (§3.8 component 7): Operator / Tuning / Proposals / Reviews routes on a seeded throw-away data
+root (and on a database the Phase 3/4 migrations have not reached), review names never become paths, and the kill
+switch POST — ON only, token + Origin like Execute Now, this system's switch only, idempotent."""
+import json
+import sqlite3
+import time
+from pathlib import Path
+from types import SimpleNamespace as NS
+
+import pytest
+from fastapi.testclient import TestClient
+
+import tradingsystem.api.app as app_mod
+from tradingsystem.ai.store import DecisionRecord, DecisionStore
+from tradingsystem.core import adaptive as ad
+from tradingsystem.core.settings import PathsCfg, load_settings
+from tradingsystem.core.timeutil import now_ms
+from tradingsystem.execution import management as mg
+
+TOKEN = "unit-test-token"
+HOUR, DAY = 3_600_000, 86_400_000
+
+
+def _settings(tmp_path: Path, instance: str | None = None):
+    extra = {"EXECUTION_MODE": "paper", **({"TS_INSTANCE": instance} if instance else {})}
+    s = load_settings(env_path=Path("nope.env"), extra_env=extra)
+    return s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"),
+                                                  instance=instance)})
+
+
+def _client(s, monkeypatch) -> TestClient:
+    monkeypatch.setenv(s.api.token_env, TOKEN)                  # read once, at create_app
+    monkeypatch.setattr(app_mod, "_process_list", lambda: [])
+    app_mod._SNAP_CACHE["ts"] = 0
+    return TestClient(app_mod.create_app(s), base_url=f"http://127.0.0.1:{s.api.port}")
+
+
+def _env(tmp_path, monkeypatch, instance=None):
+    s = _settings(tmp_path, instance)
+    s.paths.state().mkdir(parents=True, exist_ok=True)
+    return NS(s=s, db=s.paths.state() / "app.db", client=_client(s, monkeypatch),
+              origin=f"http://127.0.0.1:{s.api.port}", data=s.paths.data())
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    return _env(tmp_path, monkeypatch)
+
+
+def _decision(store, did, ts, *, notes=None, actions=None, management=None, status="valid", pair="XAUUSD"):
+    rec = {"decision": "BUY", "order_type": "MARKET", "stop_loss": 1.0, "take_profits": [{"price": 2.0}]}
+    if notes is not None:
+        rec["operator_notes"] = notes
+    if actions is not None:
+        rec["position_actions"] = actions
+    if management is not None:
+        rec["management"] = management
+    store.save(DecisionRecord(pair=pair, mode="test", trigger="test", status=status, id=did, ts=ts, recommendation=rec))
+
+
+def seed(env) -> dict:
+    """A realistic app.db (the store's schema + the management tables) and the Phase 4 files of the data root."""
+    now = now_ms()
+    store = DecisionStore(env.db)
+    plan = [{"action": "move_sl_to_be", "trigger": "tp1_hit", "params": {}}]
+    act = [{"target": {"decision": "d1", "kind": "position"}, "action": "set_sl", "value": 1.5, "reason": "lock in"}]
+    _decision(store, "d1", now - 5 * HOUR, notes="Watch the Asia high <b>", management=plan)
+    _decision(store, "d2", now - 3 * HOUR, actions=act)
+    _decision(store, "d3", now - 1 * HOUR, notes="")                  # later, no notes and no actions
+    _decision(store, "e1", now - 30 * 60_000, status="error")         # never the memory nor the actions
+    _decision(store, "b1", now - 2 * HOUR, notes="BTC note", pair="BTCUSDT")
+    with sqlite3.connect(env.db) as con:
+        for stmt in mg._DDL:
+            con.execute(stmt)
+        ins = ("INSERT INTO position_actions (ts, pair, source, source_decision, seq, target_decision, leg, action, "
+               "requested, status, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+        con.execute(ins, (now - 2 * HOUR, "XAUUSD", "rule", "d1", 0, "d1", "111", "set_sl", '{"sl": 1.2}', "applied",
+                          '{"note": "moved"}'))
+        con.execute(ins, (now - HOUR, "XAUUSD", "model", "d2", 0, "d1", "111", "set_sl", '{"sl": 1.5}', "rejected",
+                          "not json"))
+        con.execute(ins, (now - HOUR, "BTCUSDT", "rule", "b1", 0, "b1", "222", "close", None, "applied", None))
+        con.execute("INSERT INTO management_state VALUES (?,?,?,?,?,?,?)",
+                    ("d1", 0, "111", "armed", now - HOUR, now - HOUR, '{"steps": 0}'))
+        con.execute("INSERT INTO tuning_changes (ts, pair, key, old_value, new_value, reason, evidence, window_hours, "
+                    "expires_ms, review_id, actor) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (now - HOUR, "XAUUSD", "min_confidence_floor", None, "70", "weak ideas lost", '{"n": 24}', 168,
+                     now + DAY, "20260927T043000Z_daily", "operator"))
+    store._con.close()
+    a = env.data / "adaptive" / "XAUUSD"
+    a.mkdir(parents=True)
+    playbook = "- Prefer the London open.\n- Skip the first 5 minutes after high-impact news."
+    (a / "playbook.md").write_text(playbook, encoding="utf-8")
+    (a / "adaptive.yaml").write_text(
+        "version: 1\n"
+        f"min_confidence_floor: {{value: 70, set_ms: {now - HOUR}, expires_ms: {now + DAY}, reason: weak ideas lost, "
+        "evidence: {n: 24}, window_hours: 168, review_id: 20260927T043000Z_daily}\n"
+        f"max_idle_minutes: {{value: 120, set_ms: {now - 3 * DAY}, expires_ms: {now - HOUR}, reason: quiet market, "
+        "window_hours: 168}\n"
+        f"trigger:\n  weak_min: {{value: 3, set_ms: {now - HOUR}, expires_ms: {now + 2 * DAY}, reason: noise, "
+        "window_hours: 72}\n"
+        f"playbook: {{value: {ad.text_hash(playbook)}, set_ms: {now - HOUR}, expires_ms: {now + DAY}, "
+        "reason: first playbook, window_hours: 168}\n", encoding="utf-8")
+    (a / "changes.jsonl").write_text(
+        json.dumps({"ts": now - 2 * HOUR, "action": "set", "key": "max_idle_minutes", "new": 120}) + "\n"
+        + "this is not json\n"
+        + json.dumps({"ts": now - HOUR, "action": "set", "key": "min_confidence_floor", "new": 70}) + "\n"
+        + '{"ts": 1, "action": "se', encoding="utf-8")                   # a writer mid-append
+    env.data.joinpath("shared").mkdir(parents=True, exist_ok=True)
+    (env.data / "shared" / "proposals.jsonl").write_text(
+        json.dumps({"ts": now - DAY, "slug": "older", "title": "Older idea", "status": "awaiting_user"}) + "\n"
+        + json.dumps({"ts": now - HOUR, "slug": "wider-sl", "title": "Wider SL on news <script>", "pair": "XAUUSD",
+                      "status": "awaiting_user"}) + "\n"
+        + '{"ts": 2, "slug": "torn', encoding="utf-8")
+    r = env.data / "reviews"
+    r.mkdir()
+    (r / "20260926T043000Z_daily.md").write_text("# Daily review 26\n<script>alert(1)</script>", encoding="utf-8")
+    (r / "20260927T043000Z_daily.md").write_text("# Daily review 27", encoding="utf-8")
+    (r / "20260927T043000Z_daily.json").write_text('{"pack_id": "20260927T043000Z_daily"}', encoding="utf-8")
+    (r / "20260927T043000Z_daily.session.json").write_text(json.dumps(
+        {"review_id": "20260927T043000Z_daily", "kind": "daily", "status": "ok", "summary": "All quiet.",
+         "args": ["claude", "-p"], "env": {"X": "1"}}), encoding="utf-8")
+    (r / "20260927T043000Z_daily.prompt.md").write_text("prompt", encoding="utf-8")      # not served
+    (r / ".20260927T043000Z_daily.md.99.tmp").write_text("half", encoding="utf-8")       # a write in progress
+    (r / "notes.txt").write_text("x", encoding="utf-8")
+    (r / "20260927T050000Z_weekly.md").mkdir()                                           # a directory, not a file
+    return {"now": now, "playbook": playbook}
+
+
+# ---------------------------------------------------------------------- Operator
+def test_operator_tab_shows_memory_model_actions_system_actions_rules_and_charts(env):
+    seed(env)
+    ch = env.s.paths.state() / "charts" / "XAUUSD"
+    ch.mkdir(parents=True)
+    (ch / "15m.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    d = env.client.get("/api/operator/XAUUSD").json()
+    assert d["memory"]["id"] == "d1" and d["memory"]["notes"] == "Watch the Asia high <b>"   # raw: the page escapes
+    assert d["last_model_actions"]["id"] == "d2" and d["last_model_actions"]["actions"][0]["action"] == "set_sl"
+    pa = d["position_actions"]
+    assert [a["source"] for a in pa] == ["model", "rule"] and {a["pair"] for a in pa} == {"XAUUSD"}   # newest first
+    assert pa[1]["requested"] == {"sl": 1.2} and pa[1]["detail"] == {"note": "moved"} and pa[0]["detail"] == "not json"
+    ms = d["management_state"]
+    assert len(ms) == 1 and ms[0]["status"] == "armed" and ms[0]["detail"] == {"steps": 0}
+    assert ms[0]["rule"]["action"] == "move_sl_to_be" and ms[0]["decision"] == "BUY"
+    assert [c["tf"] for c in d["charts"]] == ["15m"]
+    btc = env.client.get("/api/operator/BTCUSDT").json()
+    assert btc["memory"]["notes"] == "BTC note" and btc["last_model_actions"] is None and btc["management_state"] == []
+    assert env.client.get("/api/operator/NOPE").status_code == 404
+    assert env.client.get("/api/operator/..%5C..%5Capp.db").status_code == 404
+
+
+def test_position_actions_route_is_newest_first_filterable_and_limited(env):
+    seed(env)
+    rows = env.client.get("/api/position_actions").json()
+    assert len(rows) == 3 and rows[0]["id"] > rows[1]["id"] > rows[2]["id"]
+    assert [r["pair"] for r in env.client.get("/api/position_actions?pair=BTCUSDT").json()] == ["BTCUSDT"]
+    assert len(env.client.get("/api/position_actions?limit=1").json()) == 1
+
+
+# ---------------------------------------------------------------------- Tuning
+def test_adaptive_tab_shows_entries_with_expiry_effective_values_playbook_and_flags(env):
+    info = seed(env)
+    a = env.client.get("/api/adaptive").json()
+    assert a["enabled"] is True and a["tuning_freeze"] is False and set(a["pairs"]) == set(env.s.enabled_pairs())
+    x = a["pairs"]["XAUUSD"]
+    e = {r["key"]: r for r in x["entries"]}
+    assert set(e) == {"min_confidence_floor", "max_idle_minutes", "trigger.weak_min", "playbook"}
+    assert e["min_confidence_floor"]["value"] == 70 and not e["min_confidence_floor"]["expired"]
+    assert e["max_idle_minutes"]["expired"] and e["max_idle_minutes"]["expires_ms"] < info["now"]
+    assert e["trigger.weak_min"]["review_id"] is None and e["min_confidence_floor"]["evidence"] == {"n": 24}
+    assert x["valid"] is True and x["problem"] is None and x["playbook"] == info["playbook"] and x["playbook_in_force"]
+    eff = x["effective"]
+    assert eff["min_confidence"] == max(env.s.risk.min_confidence, 70) and eff["weak_min"] == max(env.s.ai.weak_min, 3)
+    assert eff["max_idle_minutes"] == env.s.ai.max_idle_minutes                            # the expired entry is absent
+    assert a["pairs"]["BTCUSDT"]["file"] is False and a["pairs"]["BTCUSDT"]["valid"] is True
+    # read-only: no "expired" line, no tuning_changes.reverted_ms (the services own that bookkeeping)
+    assert "expired" not in (env.data / "adaptive" / "XAUUSD" / "changes.jsonl").read_text(encoding="utf-8")
+    with sqlite3.connect(env.db) as con:
+        assert con.execute("SELECT reverted_ms FROM tuning_changes").fetchone()[0] is None
+    (env.data / "TUNING_FREEZE").write_text("holiday week", encoding="utf-8")
+    off = env.s.model_copy(update={"adaptive": env.s.adaptive.model_copy(update={"enabled": False})})
+    a2 = TestClient(app_mod.create_app(off), base_url=env.origin).get("/api/adaptive").json()
+    assert a2["tuning_freeze"] is True and a2["freeze_note"] == "holiday week" and a2["enabled"] is False
+    assert a2["pairs"]["XAUUSD"]["effective"]["min_confidence"] == env.s.risk.min_confidence   # disabled → defaults
+
+
+def test_adaptive_tab_reports_an_invalid_or_broken_overlay_without_failing(env):
+    now = now_ms()
+    a = env.data / "adaptive" / "XAUUSD"
+    a.mkdir(parents=True)
+    (a / "adaptive.yaml").write_text(      # out of bounds + a risk key: the services refuse it (keep last good)
+        f"min_confidence_floor: {{value: 99, set_ms: {now}, expires_ms: {now + DAY}, reason: r, window_hours: 24}}\n"
+        "risk: {risk_per_trade_pct: 5}\nweird: .nan\n", encoding="utf-8")
+    x = env.client.get("/api/adaptive").json()["pairs"]["XAUUSD"]
+    assert x["valid"] is False and x["problem"] and x["effective"] is None
+    assert {r["key"] for r in x["entries"]} >= {"min_confidence_floor", "risk.risk_per_trade_pct", "weird"}
+    (a / "adaptive.yaml").write_text("min_confidence_floor: [unclosed\n", encoding="utf-8")
+    x = env.client.get("/api/adaptive").json()["pairs"]["XAUUSD"]
+    assert x["yaml_error"] and x["entries"] == [] and x["valid"] is False
+    (a / "adaptive.yaml").write_text("a: &a [*a, *a]\nb: &b [*a, *a, *a]\nc: [*b, *b, *b, *b]\n", encoding="utf-8")
+    assert env.client.get("/api/adaptive").status_code == 200                    # self-referencing aliases
+    bomb = "a: &a [x,x,x,x,x,x,x,x,x,x]\n" + "".join(          # "billion laughs": 10^9 leaves once expanded
+        f"{chr(98 + i)}: &{chr(98 + i)} [{','.join([f'*{chr(97 + i)}'] * 10)}]\n" for i in range(8))
+    (a / "adaptive.yaml").write_text(bomb, encoding="utf-8")
+    t0 = time.monotonic()
+    x = env.client.get("/api/adaptive").json()["pairs"]["XAUUSD"]
+    assert time.monotonic() - t0 < 10 and x["valid"] is False and "aliases" in x["problem"]
+
+
+def test_tuning_changes_route_reads_the_table_and_changes_jsonl_skipping_bad_lines(env):
+    seed(env)
+    t = env.client.get("/api/tuning_changes").json()
+    row = t["table"]
+    assert len(row) == 1 and row[0]["key"] == "min_confidence_floor" and row[0]["evidence"] == {"n": 24}
+    assert [c["key"] for c in t["changes"]["XAUUSD"]] == ["min_confidence_floor", "max_idle_minutes"]   # newest first
+    assert t["changes"]["BTCUSDT"] == []
+    one = env.client.get("/api/tuning_changes?pair=XAUUSD&limit=1").json()
+    assert list(one["changes"]) == ["XAUUSD"] and len(one["changes"]["XAUUSD"]) == 1
+    assert env.client.get("/api/tuning_changes?pair=..%5CNOPE").status_code == 404
+
+
+# ---------------------------------------------------------------------- Proposals
+def test_proposals_newest_first_and_a_torn_last_line_is_skipped(env):
+    seed(env)
+    p = env.client.get("/api/proposals").json()
+    assert [x["slug"] for x in p] == ["wider-sl", "older"] and p[0]["title"].endswith("<script>")
+
+
+# ---------------------------------------------------------------------- Reviews
+def test_reviews_list_only_review_files_and_serve_only_listed_names(env):
+    seed(env)
+    names = [r["name"] for r in env.client.get("/api/reviews").json()]
+    assert names == ["20260927T043000Z_daily.session.json", "20260927T043000Z_daily.md",
+                     "20260927T043000Z_daily.json", "20260926T043000Z_daily.md"]
+    r = env.client.get("/api/reviews/20260926T043000Z_daily.md").json()
+    assert r["text"].startswith("# Daily review 26") and r["kind"] == "daily" and not r["truncated"]
+    sess = env.client.get("/api/reviews/20260927T043000Z_daily.session.json").json()
+    assert sess["session"]["summary"] == "All quiet." and "args" not in sess["session"]
+    for bad in ("..%5C..%5Capp.db", "..%2F..%2Fapp.db", "20260927T043000Z_daily.prompt.md", "notes.txt",
+                ".20260927T043000Z_daily.md.99.tmp", "20260101T000000Z_daily.md", "20260927T050000Z_weekly.md",
+                "20260927T043000Z_daily.md%00.txt"):
+        assert env.client.get(f"/api/reviews/{bad}").status_code == 404, bad
+    big = env.data / "reviews" / "20260927T060000Z_weekly.md"
+    big.write_text("x" * (app_mod.MAX_REVIEW_BYTES + 10), encoding="utf-8")
+    r = env.client.get(f"/api/reviews/{big.name}").json()
+    assert r["truncated"] and len(r["text"]) == app_mod.MAX_REVIEW_BYTES
+
+
+# ---------------------------------------------------------------------- old / missing databases
+PHASE4_ROUTES = ("/api/operator/XAUUSD", "/api/position_actions", "/api/adaptive", "/api/tuning_changes",
+                 "/api/proposals", "/api/reviews", "/api/kill_switch", "/api/status")
+OLD_DECISION_COLUMNS = (   # ai_decisions before the Phase 3 / Phase 4 ALTERs
+    "id TEXT PRIMARY KEY", "ts INTEGER", "pair TEXT", "mode TEXT", "trigger TEXT", "provider TEXT", "model TEXT",
+    "prompt_hash TEXT", "payload_hash TEXT", "config_hash TEXT", "git_sha TEXT", "status TEXT", "decision TEXT",
+    "order_type TEXT", "confidence INTEGER", "rr_computed REAL", "valid_until INTEGER", "recommendation TEXT",
+    "raw_text TEXT", "errors TEXT", "cost_usd REAL", "latency_ms INTEGER", "input_tokens INTEGER",
+    "output_tokens INTEGER", "execution_state TEXT", "execution_detail TEXT", "outcome TEXT", "outcome_pnl_usd REAL",
+    "outcome_pnl_pct REAL", "outcome_pips REAL", "outcome_ts INTEGER", "virtual_outcome TEXT", "virtual_r REAL")
+
+
+def test_every_tab_route_answers_on_a_database_without_the_phase3_and_phase4_tables(env):
+    with sqlite3.connect(env.db) as con:     # Phase 1/2 shape: no position_actions, management_state, tuning_changes
+        con.execute(f"CREATE TABLE ai_decisions ({', '.join(OLD_DECISION_COLUMNS)})")
+        ins = ("INSERT INTO ai_decisions (id, ts, pair, status, decision, execution_state, recommendation) "
+               "VALUES (?,?,?,?,?,?,?)")
+        con.execute(ins, ("o1", now_ms(), "XAUUSD", "valid", "BUY", "executed",
+                          json.dumps({"operator_notes": "old notes", "position_actions": []})))
+        con.execute(ins, ("o2", now_ms() + 1, "XAUUSD", "valid", "SELL", "executed", "{broken"))
+        con.execute("CREATE TABLE management_state (decision_id TEXT)")          # a table missing its columns
+    for route in PHASE4_ROUTES:
+        assert env.client.get(route).status_code == 200, route
+    d = env.client.get("/api/operator/XAUUSD").json()
+    assert d["position_actions"] == [] and d["management_state"] == [] and d["last_model_actions"] is None
+    assert env.client.get("/api/tuning_changes").json()["table"] == []
+
+
+def test_every_tab_route_answers_without_any_database_or_files(tmp_path, monkeypatch):
+    e = _env(tmp_path, monkeypatch)
+    for route in PHASE4_ROUTES:
+        assert e.client.get(route).status_code == 200, route
+    assert e.client.get("/api/operator/XAUUSD").json()["memory"] == {}
+    assert e.client.get("/api/reviews").json() == [] and e.client.get("/api/proposals").json() == []
+
+
+# ---------------------------------------------------------------------- kill switch
+def test_kill_switch_post_needs_the_token_and_a_correct_origin(env):
+    target = env.data / "KILL_SWITCH"
+    assert env.client.post("/api/kill_switch").status_code == 401                                   # no token
+    assert env.client.post("/api/kill_switch", headers={"X-Dashboard-Token": "nope"}).status_code == 401
+    latin = {"X-Dashboard-Token": "tökén".encode("latin-1")}                # compare_digest refuses non-ASCII str
+    assert env.client.post("/api/kill_switch", headers=latin).status_code == 401
+    r = env.client.post("/api/kill_switch", headers={"X-Dashboard-Token": TOKEN, "Origin": "http://evil.example"})
+    assert r.status_code == 403
+    r = env.client.post("/api/kill_switch", headers={"Origin": env.origin})
+    assert r.status_code == 401 and not target.exists()
+    assert env.client.delete("/api/kill_switch", headers={"X-Dashboard-Token": TOKEN}).status_code == 405   # no OFF
+    assert not target.exists()
+
+
+def test_kill_switch_all_pairs_mode_writes_the_global_switch_once(env, monkeypatch):
+    import tradingsystem.core.notify as nt
+    sent = []
+    monkeypatch.setattr(nt, "notify", lambda s, level, title, text, **k: sent.append((level, title, k.get("key"))))
+    h = {"X-Dashboard-Token": TOKEN, "Origin": env.origin}
+    assert env.client.get("/api/kill_switch").json() == {"on": False, "target": str(env.data / "KILL_SWITCH"),
+                                                         "scope": "all", "global": True, "files": []}
+    r = env.client.post("/api/kill_switch", headers=h, json={"reason": "news  spike\n"})
+    body = r.json()
+    assert r.status_code == 200 and body["created"] and body["global"] and body["scope"] == "all"
+    assert "GLOBAL" in body["note"] and body["set_by"]["actor"] == "dashboard"
+    assert body["set_by"]["reason"] == "news spike"
+    f = env.data / "KILL_SWITCH"
+    first = f.read_text(encoding="utf-8")
+    again = env.client.post("/api/kill_switch", headers=h).json()                   # idempotent, first reason kept
+    assert again["created"] is False and "already on" in again["note"] and f.read_text(encoding="utf-8") == first
+    assert sent == [("critical", "kill switch ON: ALL", "kill_switch_all")]
+    app_mod._SNAP_CACHE["ts"] = 0
+    assert env.client.get("/api/status").json()["kill_switch"] == {"on": True, "files": [str(f)]}
+    assert env.client.get("/api/kill_switch").json()["on"] is True
+
+
+def test_kill_switch_of_a_pair_instance_writes_only_that_pairs_switch(tmp_path, monkeypatch):
+    e = _env(tmp_path, monkeypatch, instance="XAUUSD")
+    assert e.s.api.port == 8768 and e.origin.endswith(":8768")
+    r = e.client.post("/api/kill_switch", headers={"X-Dashboard-Token": TOKEN, "Origin": e.origin})
+    body = r.json()
+    assert r.status_code == 200 and body["scope"] == "XAUUSD" and body["global"] is False
+    assert (e.data / "instances" / "XAUUSD" / "KILL_SWITCH").exists()
+    assert not (e.data / "KILL_SWITCH").exists() and not (e.data / "instances" / "BTCUSDT").exists()
+    assert body["file"] == str(e.data / "instances" / "XAUUSD" / "KILL_SWITCH")
+    # a POST without an Origin (a local script) needs only the token; the Origin of another instance's port is refused
+    assert e.client.post("/api/kill_switch", headers={"X-Dashboard-Token": TOKEN}).status_code == 200
+    r = e.client.post("/api/kill_switch", headers={"X-Dashboard-Token": TOKEN, "Origin": "http://127.0.0.1:8766"})
+    assert r.status_code == 403
+
+
+def test_execute_now_keeps_its_protection_after_the_guard_refactor(env):
+    assert env.client.post("/api/decisions/x/execute").status_code == 401
+    evil = {"X-Dashboard-Token": TOKEN, "Origin": "http://evil.example"}
+    r = env.client.post("/api/decisions/x/execute", headers=evil)
+    assert r.status_code == 403
+    assert env.client.post("/api/decisions/x/execute", headers={"X-Dashboard-Token": TOKEN}).status_code == 404
+    assert not env.db.exists()                          # no empty app.db created by the API
+
+
+# ---------------------------------------------------------------------- page
+def test_page_has_the_new_tabs_and_a_cache_buster(env):
+    html = env.client.get("/").text
+    assert "__ASSET_VERSION__" not in html
+    v = html.split("/static/app.js?v=", 1)[1].split('"', 1)[0]
+    assert v and f"/static/style.css?v={v}" in html
+    for tab in ("operator", "tuning", "proposals", "reviews"):
+        assert f'data-tab="{tab}"' in html and f'id="tab-{tab}"' in html
+    assert 'id="kill-on"' in html
+    assert env.client.get(f"/static/app.js?v={v}").status_code == 200

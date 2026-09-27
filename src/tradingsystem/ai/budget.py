@@ -107,6 +107,18 @@ class UsageStore:
         with self._lock:
             return float(self._con.execute(sql, args).fetchone()[0])
 
+    def tokens_since(self, since_ms: int, pair: str | None = None) -> dict[str, int]:
+        """Token sums of every ledger row since ``since_ms`` (failed calls too: they spent the subscription) — the
+        usage gauge (Phase 4). ``input`` already contains cache reads and writes, ``cached`` is the cache-read part."""
+        sql = ("SELECT COALESCE(sum(COALESCE(input_tokens,0)),0), COALESCE(sum(COALESCE(cached_tokens,0)),0), "
+               "COALESCE(sum(COALESCE(output_tokens,0)),0), count(*) FROM ai_usage WHERE ts>=?")
+        args: list = [since_ms]
+        if pair:
+            sql, args = sql + " AND pair=?", args + [pair]
+        with self._lock:
+            inp, cached, out, calls = self._con.execute(sql, args).fetchone()
+        return {"input": int(inp), "cached": int(cached), "output": int(out), "calls": int(calls)}
+
     def close(self) -> None:
         with self._lock:
             self._con.close()

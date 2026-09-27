@@ -29,6 +29,67 @@ from tradingsystem.supervisor import procs  # noqa: E402
 STALE_S = {"binance_backfill": 900, "mt5_backfill": 900}
 
 
+def _snapshot_build(d: dict) -> tuple[str, float | None, str]:
+    """The engine's payload build time (follow-up b): (engine-line text, reference ms, which statistic). The median
+    of the recent builds when the engine publishes it — one cold build after a restart must not look like a
+    lasting problem — else the last build."""
+    sb = d.get("snapshot_build_ms") if isinstance(d.get("snapshot_build_ms"), dict) else {}
+    use = "median" if isinstance(sb.get("median"), (int, float)) else "last"
+    ref = sb.get(use) if isinstance(sb.get(use), (int, float)) else None
+    if ref is None:
+        return "", None, use
+    n = f" of {sb['n']}" if use == "median" and sb.get("n") else ""
+    return f" snapshot_build {use}{n} {ref:.0f} ms (last {sb.get('last')}, max {sb.get('max')})", float(ref), use
+
+
+def _kill_switch_lines(s: Settings) -> list[str]:
+    """Every kill switch this system obeys that is ON, with who set it and why (core/killswitch.py)."""
+    try:
+        from tradingsystem.core.killswitch import kill_switch_path, read_reason
+    except ImportError:                                  # before Phase 4
+        return []
+    paths = {"every system": kill_switch_path(s, None)}
+    for pair in s.enabled_pairs():
+        paths[pair] = kill_switch_path(s, pair)
+    paths["this system"] = s.paths.state() / "KILL_SWITCH"     # = one of the above for today's layouts
+    out, done = [], set()
+    for scope, path in paths.items():
+        if path in done or not path.exists():
+            continue
+        done.add(path)
+        why = read_reason(path)
+        told = " ".join(str(why[k]) for k in ("ts", "actor", "reason") if why.get(k)) or "no reason recorded"
+        out.append(f"!! kill switch ON ({scope}): {path} — {told}")
+    return out
+
+
+def usage_gauge_line(s: Settings) -> str | None:
+    """The usage gauge over the shared AI ledger (Phase 4, ai/usage_gauge.py); None before it exists or when there
+    is no ledger yet (a report never creates one)."""
+    ledger = s.paths.shared() / "ai_usage.db" if s.paths.instance else s.paths.state() / "app.db"
+    if not ledger.exists():
+        return None
+    try:
+        from tradingsystem.ai.budget import UsageStore
+        from tradingsystem.ai.usage_gauge import UsageGauge
+    except ImportError:
+        return None
+    store = None
+    try:
+        store = UsageStore(ledger)
+        g = UsageGauge(s, store).state()
+    except Exception as exc:  # noqa: BLE001 — the report goes on without the gauge
+        return f"!! usage gauge unreadable: {type(exc).__name__}: {exc}"
+    finally:
+        if store is not None:
+            store.close()
+    bad = g.level >= 2 or (g.level >= 1 and g.enforce)
+    return (f"{'!! ' if bad else '   '}usage gauge: level {g.level} — 7 d {g.week_tokens / 1e6:.2f} M tokens "
+            f"({g.week_pct:.0f} % of the weekly budget), 5 h {g.five_h_tokens / 1e6:.2f} M ({g.five_h_pct:.0f} %)"
+            + (" — enforced" if g.enforce else " — observe only (ai.usage.enforce off)")
+            + (f" — {g.reason}" if g.reason else ""))
+
+
 def systems(a: argparse.Namespace) -> tuple[list[Settings], list[str]]:
     """(systems to report, problem lines). Default: the all-pairs system when it runs; otherwise every running pair
     plus every pair that should run (own app.db, not stopped by the user) — a pair whose supervisor died is
@@ -88,6 +149,9 @@ def machine_report(s: Settings, now: float) -> list[str]:
               + (", ".join(f"{pv}/{pr or '-'} {n} ({ok} ok)" for pv, pr, n, ok in rows) or "none"))
         except sqlite3.Error as exc:
             p(f"!! AI usage ledger unreadable: {exc}")
+    gauge = usage_gauge_line(s)
+    if gauge:
+        p(gauge)
     return out
 
 
@@ -118,13 +182,24 @@ def system_report(s: Settings, hours: float, now: float) -> list[str]:
                      + (f" drawdown {dd.get('drawdown_pct')}%" if dd else "")
                      + (" DRAWDOWN STOP TRIPPED" if dd.get("tripped") else ""))
             bad = bad or bool(dd.get("tripped"))
+        sb_text, sb_ms, sb_use = _snapshot_build(d) if c == "engine" else ("", None, "")
         if c == "engine":
             extra = f" ai_ready {d.get('ai_ready')} provider {d.get('provider')} quota_left {d.get('quota_left_today')}" \
-                    + (f" problem: {d.get('ai_problem')}" if d.get("ai_problem") else "")
+                    + (f" problem: {d.get('ai_problem')}" if d.get("ai_problem") else "") + sb_text
         p(f"{'!! ' if bad else '   '}{c:17s} {st:12s} beat {age:6.0f}s{extra}" + (f" | last_error: {err[:120]}" if err and bad else ""))
         for x in (d.get("exposure") or []) if c == "executor" else []:
             p(f"     {x.get('pair')} {x.get('kind')} {x.get('side')} {x.get('volume')} @ {x.get('price')} sl {x.get('sl')} "
               f"tps {x.get('tps')} profit {x.get('profit_usd')} ({x.get('decision')})")
+        if c == "engine":                                  # Phase 4: follow-up (b) + the adaptive overlay in use
+            if sb_ms is not None and sb_ms > s.monitor.snapshot_build_warn_ms:
+                p(f"!! snapshot build {sb_ms:.0f} ms ({sb_use}) above monitor.snapshot_build_warn_ms "
+                  f"{s.monitor.snapshot_build_warn_ms} — the 5-min screening lags (RAM/CPU)")
+            for pair, o in sorted((d["adaptive"] if isinstance(d.get("adaptive"), dict) else {}).items()):
+                if isinstance(o, dict):
+                    p(f"   adaptive overlay {pair}: adaptive {o.get('adaptive_hash') or '-'} playbook "
+                      f"{o.get('playbook_hash') or '-'}"
+                      + (f" — AI paused until {o['paused_until']}" if o.get("paused_until") else ""))
+    out += _kill_switch_lines(s)
 
     # ---- events
     ev = collections.Counter(r[0] for r in con.execute("SELECT event FROM ingestion_events WHERE ts>=?", (since,)))

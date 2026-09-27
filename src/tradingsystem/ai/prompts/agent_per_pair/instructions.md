@@ -1,4 +1,4 @@
-<!-- prompt: agent_per_pair/instructions · version 4 -->
+<!-- prompt: agent_per_pair/instructions · version 5 -->
 Analysis cycle for **$pair** at **$now_utc** (UTC). Trigger: $trigger_reason. Account equity ≈ $account_equity $account_currency.
 
 The payload below is the desk's prepared screen set (see "Reading the payload"). Its sections:
@@ -18,6 +18,8 @@ $charts_note
 
 ## Playbook ($pair)
 $playbook
+
+Take-profit note from your record on $pair: $tp_hint
 
 Work in the order of your routine: first your live trades (`position_actions`, or none), then the market top-down, then the decision. Decide for $pair. Follow the non-negotiable rules. Use `price_reference` = `$price_reference`, timestamp = `$now_utc`, set `valid_until` no later than $max_valid_until, declare the `management` plan with any BUY/SELL, and write `operator_notes` for your next cycle.
 

@@ -87,3 +87,4 @@ def test_executor_uses_broker_specs_and_mt5_account(tmp_path, monkeypatch):
     assert st == "rejected" and not gate["market_open"]["ok"] and not sent
     assert "0.37" in gate["pending_price_valid"]["detail"]               # live stops level (37 × 0.01), not the table
     assert gate["correlated_exposure"]["ok"] and gate["daily_loss_limit"]["ok"]
+    assert det["spread_at_gate"] == pytest.approx(0.3)                   # Phase 4: the gate-time spread as a number

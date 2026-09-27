@@ -62,6 +62,9 @@ EXTRA_COLUMNS = (("actions_state", "TEXT"), ("library_hash", "TEXT"), ("trigger_
                  ("data_warnings", "TEXT"), ("playbook_hash", "TEXT"), ("adaptive_hash", "TEXT"),
                  ("outcome_detail", "TEXT"))
 ACTION_STATES = ("pending", "done")
+METRIC_COLUMNS = ("decision_id", "computed_ms", "mfe_r", "mae_r", "tp1_hit", "tp2_hit", "tp3_hit", "minutes_to_resolve",
+                  "exit_reason", "slippage", "spread_at_gate", "commission", "swap", "rejected_but_virtual_win",
+                  "no_trade_counterfactual_atr", "detail")
 
 EXECUTION_STATES = ("not_executed", "queued", "executing", "executed", "rejected", "expired", "cancelled")
 STATUSES = ("valid", "invalid", "refused", "budget_blocked", "error", "skipped")
@@ -117,6 +120,7 @@ class DecisionStore:
         self._lock = threading.Lock()
         self.config_hash = config_hash
         self.git_sha = git_sha()
+        self._prompts_seen: set[str] = set()      # prompt hashes registered by this process (prompt_versions)
         with self._lock:
             for s in _DDL:
                 self._con.execute(s)
@@ -236,10 +240,92 @@ class DecisionStore:
             self._con.execute("UPDATE ai_decisions SET actions_state=? WHERE id=?", (state, decision_id))
 
     def set_outcome(self, decision_id: str, outcome: str, pnl_usd: float | None, pnl_pct: float | None,
-                    pips: float | None) -> None:
+                    pips: float | None, detail: dict | None = None) -> None:
+        """The executed decision's real result. ``outcome_ts`` is the settlement time (not the close time);
+        ``detail`` (Phase 4, ``outcome_detail``) is the venue's split of it — commission / swap / fee, open and close
+        times, how each leg ended — which only the settlement sees (see :mod:`..execution.metrics`)."""
         with self._lock:
             self._con.execute("UPDATE ai_decisions SET outcome=?, outcome_pnl_usd=?, outcome_pnl_pct=?, outcome_pips=?, "
-                              "outcome_ts=? WHERE id=?", (outcome, pnl_usd, pnl_pct, pips, now_ms(), decision_id))
+                              "outcome_ts=?, outcome_detail=? WHERE id=?",
+                              (outcome, pnl_usd, pnl_pct, pips, now_ms(),
+                               json.dumps(detail, default=str) if detail else None, decision_id))
+
+    # ------------------------------------------------------------------ Phase 4: decision metrics, prompt registry
+    def pending_metrics(self, limit: int = 20, *, no_trade_before_ms: int,
+                        pairs: list[str] | tuple[str, ...] | None = None,
+                        exclude: list[str] | tuple[str, ...] = ()) -> list[dict[str, Any]]:
+        """Valid decisions whose ``decision_metrics`` row is due, oldest first:
+
+        * executed trades once the venue settled them (``outcome``) — again when a later settlement (``outcome_ts``)
+          is newer than the row (an idea first scored virtually, executed afterwards from the manual queue);
+        * trade ideas not executed once their virtual outcome is known;
+        * NO_TRADE answers recorded before ``no_trade_before_ms`` (their counterfactual needs the next bars).
+
+        ``computed_ms`` is the existing row's time (None when there is none); ``exclude``: ids the caller will not
+        score now (waiting for bars)."""
+        where = ["d.status='valid'", """(
+            (d.decision IN ('BUY','SELL') AND d.execution_state='executed' AND d.outcome IS NOT NULL
+             AND (m.decision_id IS NULL OR COALESCE(d.outcome_ts, 0) > m.computed_ms))
+            OR (d.decision IN ('BUY','SELL') AND d.execution_state!='executed' AND d.virtual_outcome IS NOT NULL
+                AND m.decision_id IS NULL)
+            OR (d.decision='NO_TRADE' AND d.ts<=? AND m.decision_id IS NULL))"""]
+        args: list[Any] = [int(no_trade_before_ms)]
+        if pairs is not None:
+            if not pairs:
+                return []
+            where.append(f"d.pair IN ({','.join('?' * len(pairs))})")
+            args += list(pairs)
+        if exclude:
+            where.append(f"d.id NOT IN ({','.join('?' * len(exclude))})")
+            args += list(exclude)
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT d.id, d.ts, d.pair, d.decision, d.recommendation, d.execution_state, d.execution_detail, "
+                "d.outcome, d.outcome_ts, d.outcome_detail, d.virtual_outcome, d.virtual_r, d.payload_hash, "
+                "m.computed_ms FROM ai_decisions d LEFT JOIN decision_metrics m ON m.decision_id = d.id "
+                f"WHERE {' AND '.join(where)} ORDER BY d.ts, d.id LIMIT ?", (*args, int(limit))).fetchall()
+        out = []
+        for r in rows:
+            out.append({"id": r[0], "ts": r[1], "pair": r[2], "decision": r[3], "recommendation": _loads(r[4]) or {},
+                        "execution_state": r[5], "execution_detail": _loads(r[6]), "outcome": r[7],
+                        "outcome_ts": r[8], "outcome_detail": _loads(r[9]), "virtual_outcome": r[10],
+                        "virtual_r": r[11], "payload_hash": r[12], "computed_ms": r[13]})
+        return out
+
+    def save_metrics(self, row: dict[str, Any]) -> None:
+        """Insert or replace one ``decision_metrics`` row (``decision_id`` required; ``computed_ms`` defaults to
+        now; ``detail`` is stored as JSON)."""
+        vals = {**row, "computed_ms": int(row.get("computed_ms") or now_ms())}
+        det = vals.get("detail")
+        vals["detail"] = json.dumps(det, default=str) if det is not None and not isinstance(det, str) else det
+        cols = METRIC_COLUMNS
+        with self._lock:
+            self._con.execute(f"INSERT OR REPLACE INTO decision_metrics ({', '.join(cols)}) "
+                              f"VALUES ({','.join('?' * len(cols))})", [vals.get(c) for c in cols])
+
+    def metrics_of(self, decision_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            r = self._con.execute(f"SELECT {', '.join(METRIC_COLUMNS)} FROM decision_metrics WHERE decision_id=?",
+                                  (decision_id,)).fetchone()
+        if not r:
+            return None
+        out = dict(zip(METRIC_COLUMNS, r))
+        out["detail"] = _loads(out["detail"])
+        return out
+
+    def prompt_known(self, prompt_hash: str) -> bool:
+        """Whether this process already registered ``prompt_hash`` (no database read)."""
+        return prompt_hash in self._prompts_seen
+
+    def register_prompt(self, prompt_hash: str, role: str, library_hash: str, versions: dict[str, int]) -> None:
+        """``prompt_versions``: the first time a system prompt is seen, with the versions of the files it was built
+        from (INSERT OR IGNORE keeps the first sighting; the engine and the executor may race)."""
+        with self._lock:
+            self._con.execute("INSERT OR IGNORE INTO prompt_versions (prompt_hash, role, library_hash, versions, "
+                              "git_sha, first_seen_ms) VALUES (?,?,?,?,?,?)",
+                              (prompt_hash, role, library_hash, json.dumps(versions, sort_keys=True), self.git_sha,
+                               now_ms()))
+            self._prompts_seen.add(prompt_hash)
 
     def recent(self, pair: str, limit: int = 5) -> list[dict[str, Any]]:
         """Compact history for the snapshot (spec rule 10: consistency with recent decisions)."""
@@ -347,6 +433,16 @@ def _rejection(detail_json: str | None) -> tuple[str, str]:
     if d.get("gate"):
         return "gate", str(d.get("reason") or "")
     return "system", str(d.get("reason") or "")
+
+
+def _loads(text: str | None) -> Any:
+    """JSON column → value; None for NULL or unreadable text (a bad row never breaks a reader)."""
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
 
 
 def _iso(ms: int) -> str:

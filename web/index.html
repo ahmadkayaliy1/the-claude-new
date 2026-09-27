@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="dashboard-token" content="__DASHBOARD_TOKEN__">
   <title>Trading Desk</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=__ASSET_VERSION__">
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -17,9 +17,14 @@
       <button data-tab="decisions">Decisions</button>
       <button data-tab="performance">Performance</button>
       <button data-tab="health">Health</button>
+      <button data-tab="operator">Operator</button>
+      <button data-tab="tuning">Tuning</button>
+      <button data-tab="proposals">Proposals</button>
+      <button data-tab="reviews">Reviews</button>
     </nav>
     <div class="meta">
-      <span id="kill-badge" class="badge kill hidden" title="data/KILL_SWITCH present — the executor blocks all new orders">KILL SWITCH ON</span>
+      <span id="kill-badge" class="badge kill hidden" title="a KILL_SWITCH file stops this system — the executor blocks all new orders">KILL SWITCH ON</span>
+      <button id="kill-on" class="danger" title="Turn this system's kill switch ON: no new orders (open trades keep SL/TP). OFF stays scripts\kill_switch_off.bat">Kill switch ON</button>
       <span id="mode-badge" class="badge">—</span>
       <span id="ai-badge" class="badge muted">AI —</span>
       <span id="ws-dot" class="dot off" title="live connection"></span>
@@ -79,7 +84,41 @@
       <h2>Ingestion events</h2>
       <table class="grid" id="events"><thead><tr><th>Time (UTC)</th><th>Collector</th><th>Event</th><th>Detail</th><th>Outage</th></tr></thead><tbody></tbody></table>
     </section>
+
+    <section id="tab-operator" class="tab">
+      <div class="toolbar">
+        <label>Pair <select id="op-pair"></select></label>
+        <button id="op-refresh" class="primary">Refresh</button>
+      </div>
+      <div id="op-body"><p class="muted small">Loading…</p></div>
+    </section>
+
+    <section id="tab-tuning" class="tab">
+      <div class="toolbar">
+        <button id="tu-refresh" class="primary">Refresh</button>
+        <span id="tu-flags" class="small"></span>
+      </div>
+      <div id="tu-body"><p class="muted small">Loading…</p></div>
+    </section>
+
+    <section id="tab-proposals" class="tab">
+      <div class="toolbar">
+        <button id="pr-refresh" class="primary">Refresh</button>
+        <span class="small muted">Proposals wait on their own branch and worktree; the owner merges or deletes them.</span>
+      </div>
+      <table class="grid" id="proposals"><tbody></tbody></table>
+    </section>
+
+    <section id="tab-reviews" class="tab">
+      <div class="review-layout">
+        <div>
+          <div class="toolbar"><button id="rv-refresh" class="primary">Refresh</button></div>
+          <table class="grid clickable" id="reviews"><thead><tr><th>Time (UTC)</th><th>Kind</th><th>File</th><th>Size</th></tr></thead><tbody></tbody></table>
+        </div>
+        <div id="rv-detail" class="detail hidden"></div>
+      </div>
+    </section>
   </main>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=__ASSET_VERSION__"></script>
 </body>
 </html>

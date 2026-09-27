@@ -31,6 +31,8 @@ from ..core.instruments import InstrumentRegistry
 from ..core.sessions import calendar_for
 from ..core.settings import Settings
 from ..core.timeutil import MS_PER_DAY, iso, now_ms, parse_date_spec
+from ..core.timeframes import Timeframe
+from ..core.tunables import tunables_of
 from .budget import CostGovernor, RateLimiter, UsageStore
 from .contract import (AssessmentSet, Decision, EscalationReview, Recommendation, RecommendationSet, RiskReview,
                        TimeframeAssessment)
@@ -45,6 +47,7 @@ log = logging.getLogger(__name__)
 ANALYST_TFS = ["1w", "1d", "4h", "1h", "15m", "5m"]
 NO_CHARTS = "No charts this cycle."
 NO_PLAYBOOK = "(no playbook yet)"
+NO_TP_HINT = "(none)"
 # a confirmed escalation must keep every one of these exactly as the trader proposed them (the trader's
 # position_actions always stand: the escalation judges the new trade, not the protective actions on live ones)
 ESCALATION_FIXED = ("decision", "order_type", "entry", "stop_loss", "take_profits", "management")
@@ -174,7 +177,10 @@ class Orchestrator:
             "decision_tf": (self.s.pairs[pair].decision_timeframe.value if pair else "15m"),
             "sl_min_atr": r.sl_atr_min_mult, "sl_max_atr": r.sl_atr_max_mult, "min_rr": r.min_rr,
             "max_risk_pct": r.max_risk_per_trade_pct, "max_spread_pct": round(r.max_spread_to_sl_ratio * 100),
-            "min_confidence": r.min_confidence, "max_rec_age_min": round(r.max_recommendation_age_s / 60),
+            # the confidence floor in force (a raised adaptive floor is the one the gate applies — rare changes, so
+            # the system prompt stays cacheable)
+            "min_confidence": tunables_of(self, pair).min_confidence,
+            "max_rec_age_min": round(r.max_recommendation_age_s / 60),
             "price_reference": self.reg.primary(pair).key if pair else "each pair's meta.price_reference",
             "output_language": "English" if self.s.ai.output_language == "en" else self.s.ai.output_language,
             "sl_change_minutes": self.s.execution.position_actions.min_minutes_between_sl_changes,
@@ -185,11 +191,23 @@ class Orchestrator:
                    account: dict | None = None, **extra) -> dict:
         account = account or self.default_account()
         eq = account.get("equity", self.s.execution.paper_equity)
+        tn = tunables_of(self, pair)                  # the pair's playbook and take-profit hint (adaptive overlay)
         return {"now_utc": iso(as_of), "trigger_reason": reason, "payload": payload_json,
                 "max_valid_until": iso(as_of + self.horizon_ms(pair)),
                 "account_equity": f"{float(eq):.2f}" if eq is not None else "unknown",
                 "account_currency": account.get("currency", "USD"),
-                "charts_note": NO_CHARTS, "playbook": NO_PLAYBOOK, **extra}
+                "charts_note": NO_CHARTS, "playbook": tn.playbook or NO_PLAYBOOK, "tp_hint": tn.tp_hint or NO_TP_HINT,
+                **extra}
+
+    def _render(self, role: str, system_vars: dict, user_vars: dict):
+        """Render a role and register the prompt versions it used (``prompt_versions``; never fails the cycle)."""
+        pr = render(role, system_vars, user_vars)
+        try:
+            from .prompts import register_versions
+            register_versions(self.store, pr, role)
+        except Exception:  # noqa: BLE001
+            log.debug("prompt versions of %s not registered", role, exc_info=True)
+        return pr
 
     async def _gen(self, provider: LLMProvider, model_cls, system: str, user: str, purpose: str,
                    pair: str | None, *, images: list[ImageInput] | None = None,
@@ -344,6 +362,10 @@ class Orchestrator:
         t = (trig or {}).get(rec.pair) or (None, None, False)
         rec.trigger_strength = rec.trigger_strength or t[0]
         rec.setup_strength = rec.setup_strength or (t[1] if t[2] else None)
+        try:
+            self._attribute(rec, payload)
+        except Exception:  # noqa: BLE001 — attribution is for the learning loop, never a reason to lose a record
+            log.exception("%s: attribution failed", rec.pair)
         if rec.status == "valid" and rec.recommendation:
             try:
                 self._finalize(rec, as_of, payload)
@@ -355,6 +377,40 @@ class Orchestrator:
                  (rec.recommendation or {}).get("decision"), (rec.recommendation or {}).get("order_type"),
                  (rec.recommendation or {}).get("confidence"), rec.cost_usd)
         return rec
+
+    def _attribute(self, rec: DecisionRecord, payload: dict | None) -> None:
+        """Phase 4 attribution at record time (what the market looked like, what was in force): setup kinds on
+        screen, session (killzone, else the active sessions), the decision-TF regime, the higher-timeframe bias,
+        the data warnings, and the pair's playbook / adaptive hashes."""
+        tn = tunables_of(self, rec.pair)
+        rec.playbook_hash = rec.playbook_hash or tn.playbook_hash
+        rec.adaptive_hash = rec.adaptive_hash or tn.adaptive_hash
+        if not payload:
+            return
+        from .triggers import scan_setups
+        meta = payload.get("meta") or {}
+        dec = meta.get("decision_timeframe") or self.s.pairs[rec.pair].decision_timeframe.value
+        kinds = sorted({r.kind for r in scan_setups(payload, liquidity_atr=tn.liquidity_atr,
+                                                    screen_tf=self._screen_tf(rec.pair))})
+        rec.setup_kinds = rec.setup_kinds if rec.setup_kinds is not None else kinds
+        sess = ((payload.get("market") or {}).get("session")) or {}
+        rec.session = rec.session or sess.get("killzone") or ("+".join(sess.get("active") or []) or None)
+        reg = (((payload.get("timeframes") or {}).get(dec) or {}).get("regime")) or {}
+        if reg:
+            rec.regime = rec.regime or f"{reg.get('trend_strength') or '?'}/{reg.get('volatility') or '?'}"
+        rec.htf_bias = rec.htf_bias or (payload.get("confluence") or {}).get("bias")
+        if rec.data_warnings is None:
+            rec.data_warnings = list(meta.get("data_warnings") or [])
+
+    def _screen_tf(self, pair: str) -> str | None:
+        """The engine's screening timeframe for ``pair`` (5m when collected and shorter than the decision TF)."""
+        pcfg = self.s.pairs[pair]
+        try:
+            stf = Timeframe.parse(self.s.ai.screen_timeframe)
+        except ValueError:
+            return None
+        tfs = {Timeframe.parse(t).value for t in (pcfg.timeframes or self.s.timeframes)}
+        return stf.value if stf.ms < pcfg.decision_timeframe.ms and stf.value in tfs else None
 
     # ------------------------------------------------------------------ system-owned fields (F6, AI-01)
     def _finalize(self, rec: DecisionRecord, as_of: int, payload: dict | None) -> None:
@@ -399,7 +455,7 @@ class Orchestrator:
                 r, trade = _as_no_trade(r, why), False
                 rec.errors.append(f"{why} — the trade is withheld; its position_actions stand")
             r["valid_until"] = iso(as_of + self.s.pairs[rec.pair].decision_timeframe.ms)
-        r["next_review"] = self._review_plan(r.get("next_review") or {}, payload, notes)
+        r["next_review"] = self._review_plan(r.get("next_review") or {}, payload, notes, rec.pair)
         r["position_actions"] = self._action_targets(r.get("position_actions") or [], payload, notes)
         try:
             v = Recommendation.model_validate(r)
@@ -428,10 +484,12 @@ class Orchestrator:
                              "(not a live trade of this pair)")
         return keep
 
-    def _review_plan(self, nr: dict, payload: dict | None, notes: list[str]) -> dict:
+    def _review_plan(self, nr: dict, payload: dict | None, notes: list[str], pair: str | None = None) -> dict:
         """Time-based reviews never come sooner than the normal spacing; price/candle conditions (something
-        happened) may, down to ``ai.review_floor_minutes`` (enforced by the trigger policy)."""
-        floor = max(self.s.ai.review_floor_minutes, self.s.ai.min_minutes_between_calls)
+        happened) may, down to ``ai.review_floor_minutes`` (enforced by the trigger policy). Both are the pair's
+        effective values (adaptive overlay)."""
+        tn = tunables_of(self, pair)
+        floor = max(tn.review_floor_minutes, tn.min_minutes_between_calls)
         nr = dict(nr)
         if int(nr.get("in_minutes") or floor) < floor:
             nr["in_minutes"] = floor
@@ -488,7 +546,7 @@ class Orchestrator:
         images, note = await self.charts_for(pair, as_of, payload) if charts else ([], NO_CHARTS)
         uv = self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account,
                              charts_note=note)
-        pr = render("agent_per_pair", self._system_vars(pair, account), uv)
+        pr = self._render("agent_per_pair", self._system_vars(pair, account), uv)
         gen = await self._gen(prov, Recommendation, pr.system, pr.user, "agent_per_pair", pair, images=images)
         rec = self._record(pair, "agent_per_pair", reason, payload, gen, prov, pr.prompt_hash)
         rec.trigger_strength, setup = (trigger or (None, None, False))[:2]
@@ -496,7 +554,7 @@ class Orchestrator:
             await self._escalate(rec, pair, payload, reason, as_of, account, uv, images, setup=setup)
         if not review or rec.status != "valid" or rec.recommendation["decision"] == Decision.NO_TRADE.value:
             return rec
-        rv = render("risk_reviewer", self._system_vars(pair, account),
+        rv = self._render("risk_reviewer", self._system_vars(pair, account),
                     self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account,
                                     proposal=json.dumps(rec.recommendation)))
         g2 = await self._gen(prov, RiskReview, rv.system, rv.user, "risk_reviewer", pair)
@@ -565,7 +623,7 @@ class Orchestrator:
             prov = await self._escalation_provider(min(ESCALATION_SIGN_IN_WAIT_S, esc.timeout_s / 2))
             if not getattr(prov, "supports_images", False):
                 images, uv = [], {**uv, "charts_note": NO_CHARTS}
-            pr = render("escalation", self._system_vars(pair, account), {**uv, "proposal": json.dumps(first)})
+            pr = self._render("escalation", self._system_vars(pair, account), {**uv, "proposal": json.dumps(first)})
             g = await asyncio.wait_for(self._gen(prov, EscalationReview, pr.system, pr.user, "escalation", pair,
                                                  images=images, role="escalation"), esc.timeout_s)
         except Exception as exc:  # noqa: BLE001 — timeout, provider or prompt error: the failure policy decides
@@ -585,26 +643,41 @@ class Orchestrator:
                 _withhold(rec, msg)
             else:
                 rec.errors.append(f"{msg} — trader's decision kept")
+            self._notify("warn", f"{pair} escalation failed", f"{first.get('decision')} {msg[:200]} — "
+                         + ("withheld" if esc.on_failure == "withhold" else "trader's decision kept"), pair=pair)
             return
         final = json.loads(g.value.final_recommendation.model_dump_json())
         if g.value.verdict == "confirm":
             changed = [k for k in ESCALATION_FIXED if final.get(k) != first.get(k)]
             if changed:
                 _withhold(rec, f"escalation altered levels ({', '.join(changed)})")
+                self._notify("warn", f"{pair} escalation", f"{first.get('decision')} withheld: the reviewer changed "
+                             f"{', '.join(changed)}", pair=pair)
                 return
             conf = min(int(first.get("confidence") or 0), int(g.value.confidence), int(final.get("confidence") or 0))
             rec.recommendation = {**first, "confidence": conf}
             rec.errors.append(f"escalation: confirmed ({why}); confidence {first.get('confidence')} → {conf}")
+            self._notify("info", f"{pair} escalation", f"{first.get('decision')} confirmed by "
+                         f"{getattr(prov, 'model', '?')}, confidence {conf}", pair=pair)
             return
         final["confidence"] = min(int(final.get("confidence") or 0), int(first.get("confidence") or 0))
         final["position_actions"] = first.get("position_actions") or []    # protective actions stand
         rec.recommendation = final
         rec.rr_computed = None
         rec.errors.append("escalation: downgraded to NO_TRADE — " + "; ".join(g.value.issues[:4]))
+        self._notify("info", f"{pair} escalation", f"{first.get('decision')} downgraded to NO_TRADE: "
+                     + "; ".join(g.value.issues[:2])[:300], pair=pair)
+
+    def _notify(self, level: str, title: str, text: str, *, pair: str | None = None) -> None:
+        try:
+            from ..core.notify import notify
+            notify(self.s, level, title, text, pair=pair)
+        except Exception:  # noqa: BLE001 — a notification never fails a cycle
+            log.debug("notify failed", exc_info=True)
 
     async def _global(self, payloads: dict, reasons: dict, as_of: int, account: dict) -> list[DecisionRecord]:
         prov = self.provider()
-        pr = render("single_agent_global", self._system_vars(None, account),
+        pr = self._render("single_agent_global", self._system_vars(None, account),
                     self._user_vars(None, as_of, "; ".join(f"{p}: {r}" for p, r in reasons.items()),
                                     _dump(list(payloads.values())), account=account))
         gen = await self._gen(prov, RecommendationSet, pr.system, pr.user, "single_agent_global", None)
@@ -636,8 +709,8 @@ class Orchestrator:
 
         async def analyst(tf: str):
             sys_vars = {**self._system_vars(None, account), "timeframe": tf, "scope_text": f" across {', '.join(pairs)}"}
-            pr = render("timeframe_analyst", sys_vars,
-                        {"now_utc": iso(as_of), "payload": _dump([self._slice(payloads[p], tf) for p in pairs])})
+            pr = self._render("timeframe_analyst", sys_vars,
+                              {"now_utc": iso(as_of), "payload": _dump([self._slice(payloads[p], tf) for p in pairs])})
             g = await self._gen(prov, AssessmentSet, pr.system, pr.user, f"analyst_{tf}", None)
             return tf, pr, g
         results = await asyncio.gather(*(analyst(tf) for tf in ANALYST_TFS))
@@ -663,7 +736,8 @@ class Orchestrator:
 
         async def analyst(tf: str):
             sys_vars = {**self._system_vars(pair, account), "timeframe": tf, "scope_text": f" for {pair}"}
-            pr = render("timeframe_analyst", sys_vars, {"now_utc": iso(as_of), "payload": _dump(self._slice(payload, tf))})
+            pr = self._render("timeframe_analyst", sys_vars,
+                              {"now_utc": iso(as_of), "payload": _dump(self._slice(payload, tf))})
             g = await self._gen(prov, TimeframeAssessment, pr.system, pr.user, f"analyst_{tf}", pair)
             return tf, pr, g
         results = await asyncio.gather(*(analyst(tf) for tf in ANALYST_TFS))
@@ -680,7 +754,7 @@ class Orchestrator:
                           assessments: list[dict], subs: list[dict], prov: LLMProvider, mode: str) -> DecisionRecord:
         compact = {k: payload[k] for k in ("meta", "account", "market", "capabilities", "levels", "confluence", "history",
                                            "memory", "performance") if k in payload}
-        pr = render("coordinator", self._system_vars(pair, account),
+        pr = self._render("coordinator", self._system_vars(pair, account),
                     self._user_vars(pair, as_of, reason, _dump(compact), account=payload.get("account") or account,
                                     assessments=json.dumps(assessments)))
         if not assessments:
