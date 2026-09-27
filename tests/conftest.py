@@ -7,6 +7,8 @@ import pytest
 # Phase 4: the notifier must never pop a toast on the user's desktop or send a Telegram message from the unit suite
 # (engine / executor / management tests build real services). tests/unit/test_notify.py removes it where needed.
 os.environ["TS_NOTIFY_DISABLE"] = "1"
+# … and never start a billed Claude diagnosis session (tools/monitor.py); test_monitor.py removes it in its fixture
+os.environ["TS_MONITOR_NO_DIAGNOSE"] = "1"
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "real"

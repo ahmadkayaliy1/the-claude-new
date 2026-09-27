@@ -549,7 +549,10 @@ def cmd_playbook(a: argparse.Namespace, t: Target, now: int, out: TextIO | None,
     if (a.source is None) == (a.text is None):
         raise Invalid("playbook: give a FILE, - (stdin) or --text")
     if a.text is not None:
-        raw = a.text
+        # a session passes the playbook on ONE command line (the Bash allow-list matches the command text): the two
+        # characters "\\n" (backslash, n) stand for a line break
+        # when the text has none of its own (as tools/propose.py does)
+        raw = a.text if "\n" in a.text else a.text.replace("\\n", "\n")
     elif a.source == "-":
         raw = (stdin or sys.stdin).read(MAX_SOURCE_BYTES + 1)
     else:

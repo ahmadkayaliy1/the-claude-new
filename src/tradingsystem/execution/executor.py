@@ -48,6 +48,7 @@ from .drawdown import AccountPeak
 from .exposure import live_sides
 from .management import ActionLog, MT5Legs, PaperLegs, PositionManager
 from .metrics import MetricsJob, mt5_outcome_detail, paper_outcome_detail
+from ..core.tunables import Tunables
 from .price_mapping import check_basis, translate
 from .risk_gate import ExecContext, evaluate
 
@@ -68,6 +69,11 @@ BASIS_CACHE_S = 15.0                 # … checked against its 60-min history at
 ACTION_SETTLE_MS = 30_000            # a model action sent with an unknown outcome is re-read (not re-sent) this long
 ACTION_ERROR_REPEAT_MS = 10 * MS_PER_MINUTE   # a failing decision's action_error event at most this often
 PRICED = ("modify_sl", "modify_tp")  # actions with a price (translated by the live basis)
+# executor events the owner is notified of (Phase 4, D-043): kind → (level, title)
+NOTIFY_EVENTS = {"mgmt_filled": ("info", "filled"), "mgmt_position_closed": ("info", "position closed"),
+                 "mgmt_applied": ("info", "management rule applied"), "action_applied": ("info", "Claude's action applied"),
+                 "action_rejected": ("warn", "Claude's action refused"), "mgmt_error": ("warn", "management error"),
+                 "action_error": ("warn", "Claude's action could not run")}
 
 
 class PlacementBusy(RuntimeError):
@@ -145,6 +151,11 @@ class Executor:
             self.model_legs = PaperLegs(self.paper, self._leg_quote, self._leg_specs, reason="model")
         self.manager = PositionManager(s, self.actions, self.legs, self, self._emit)
         # Phase 4 (§3.8): what happened after each decision, measured on real bars (housekeeping, bounded per pass)
+        # Phase 4: the pair's adaptive confidence floor (tools/tune.py; never below risk.min_confidence) and the
+        # notifier's view of this system (kill switch / drawdown transitions are announced once)
+        self.tunables = Tunables(s)
+        self._last_switch: bool | None = None
+        self._last_tripped: bool | None = None
         self.metrics = MetricsJob(s, self.store, self.reg, self.reader, actions=self.actions,
                                   paper_legs=self.paper.decision_legs if self.paper else None)
         self._mkt: dict[tuple, object] = {}
@@ -351,7 +362,7 @@ class Executor:
             live_sides=live_sides(acct.get("exposure") or [], pair),
             account_drawdown_pct=dd.drawdown_pct if dd else None, account_drawdown_tripped=bool(dd and dd.tripped))
         gate = evaluate(rec_x, pair, ctx, self.s.risk, self.s.risk.correlated_groups,
-                        min_confidence=self.s.risk.min_confidence)
+                        min_confidence=self.tunables.get(pair).min_confidence)
         detail = {"gate": [{"check": n, "ok": ok, "detail": d} for n, ok, d in gate.checks],
                   "executed_levels": {"entry": gate.entry, "stop_loss": rec_x["stop_loss"],
                                       "take_profits": [t["price"] for t in rec_x["take_profits"]]},
@@ -396,6 +407,14 @@ class Executor:
         self.store.set_execution_state(did, "executed" if res.get("ok") or partial else "rejected", detail)
         self.appdb.add_event("executor", "order" if res.get("ok") else "order_failed",
                              f"{self.mode} {pair} {did[:8]}: {res.get('reason') or res.get('legs') or res.get('placed')}"[:300])
+        if res.get("ok") or partial:
+            self._notify("info", f"{pair} {rec['decision']} placed",
+                         f"{self.mode} {rec['order_type']} {gate.size.lots if gate.size else '?'} lots, entry "
+                         f"{gate.entry}, SL {rec_x['stop_loss']}, TP {detail['executed_levels']['take_profits']}"
+                         + (f" — {detail['partial']}" if partial else ""), key=f"order:{did}", pair=pair)
+        else:
+            self._notify("warn", f"{pair} {rec['decision']} not placed", str(res.get("reason"))[:300],
+                         key=f"order_failed:{did}", pair=pair)
         log.info("%s %s → %s: %s", pair, did[:8], self.mode, "placed" if res.get("ok") else res.get("reason"))
         return bool(res.get("ok") or partial)
 
@@ -526,6 +545,7 @@ class Executor:
             split = paper_outcome_detail(legs)          # how each leg ended, when (decision metrics)
             if not filled:
                 self.store.set_outcome(did, "not_filled", 0.0, 0.0, 0.0, detail=split)
+                self.appdb.add_event("executor", "outcome", f"{legs[0]['pair']} {did[:8]}: not filled (expired/cancelled)")
                 continue
             pnl = sum(l["pnl_usd"] or 0.0 for l in filled)
             pcfg = self.s.pairs.get(legs[0]["pair"])
@@ -536,6 +556,10 @@ class Executor:
             outcome = "closed_profit" if pnl > 0 else "closed_loss" if pnl < 0 else "closed_breakeven"
             self.store.set_outcome(did, outcome, round(pnl, 2), round(pnl / self.paper.start_equity * 100, 3),
                                    round(pips, 1) if pips is not None else None, detail=split)
+            # like the MT5 settlement: the outcome wakes the model and reaches the owner
+            self.appdb.add_event("executor", "outcome", f"{legs[0]['pair']} {did[:8]}: {outcome} {pnl:+.2f} USD")
+            self._notify("info", f"{legs[0]['pair']} trade closed", f"paper {did[:8]}: {outcome} {pnl:+.2f} USD",
+                         key=f"outcome:{did}", pair=legs[0]["pair"])
 
     def _settle_mt5_outcomes(self) -> None:
         """P9.6: executed decisions whose legs are all closed / expired at the broker get their real outcome (profit
@@ -576,6 +600,8 @@ class Executor:
                                    round(pips, 1) if pips is not None else None, detail=split)
             self.appdb.add_event("executor", "outcome", f"{pair} {did[:8]}: {outcome} {pnl:+.2f} USD")
             log.info("%s %s settled at the broker: %s %+.2f USD", pair, did[:8], outcome, pnl)
+            self._notify("info", f"{pair} trade closed", f"{self.mode} {did[:8]}: {outcome} {pnl:+.2f} USD",
+                         key=f"outcome:{did}", pair=pair)
 
     def virtual_outcomes(self) -> None:
         """P9.8: would the idea have reached TP1 before its SL? Evaluated on real 1m bars of the analysis instrument."""
@@ -662,17 +688,49 @@ class Executor:
         except Exception:  # noqa: BLE001 — the status row must not fail on the shared peak file
             log.exception("account peak update failed")
             dd = None
+        switch = self.kill_switch()
+        self._announce_transitions(switch, dd)
         return {"mode": self.mode, "trigger": self.s.execution.trigger, "equity": eq, "balance": acct.get("balance"),
                 "currency": acct.get("currency", "USD"), "open_positions": acct.get("open_positions"),
                 "open_orders": acct.get("open_orders"),
                 "today_pnl_pct": round(today / eq * 100, 2) if eq else None,
                 "exposure": acct.get("exposure") or [], "account_drawdown": dd.as_detail() if dd else None,
-                "errors_last_5min": len(self.loop_errors), "kill_switch": self.kill_switch()}
+                "errors_last_5min": len(self.loop_errors), "kill_switch": switch}
+
+    def _announce_transitions(self, switch: bool, dd) -> None:
+        """Kill switch on/off and the account drawdown stop, announced once per change (not at start-up)."""
+        scope = self.s.paths.instance or "all"
+        if self._last_switch is not None and switch != self._last_switch:
+            self._notify("critical" if switch else "warn", f"Kill switch {'ON' if switch else 'OFF'} ({scope})",
+                         "new orders are blocked; open trades keep their stops and management" if switch
+                         else "new orders are allowed again", key=f"kill_switch_{scope}_{'on' if switch else 'off'}")
+        self._last_switch = switch
+        tripped = bool(dd and dd.tripped)
+        if self._last_tripped is not None and tripped and not self._last_tripped:
+            det = dd.as_detail() if hasattr(dd, "as_detail") else {}
+            self._notify("critical", "Account drawdown stop", f"every system stops opening trades: {det}"[:400],
+                         key=f"drawdown:{det.get('account') or scope}")
+        self._last_tripped = tripped
+
+    def _notify(self, level: str, title: str, text: str, *, key: str | None = None, pair: str | None = None) -> None:
+        """Log + toast + Telegram (core.notify: non-blocking, never raises)."""
+        try:
+            from ..core.notify import notify
+            notify(self.s, level, title, text, key=key, pair=pair)
+        except Exception:  # noqa: BLE001 — a notification never touches the trading loop
+            log.debug("notify failed", exc_info=True)
 
     # ------------------------------------------------------------------ Phase 3: management and model actions
     def _emit(self, kind: str, payload: dict) -> None:
-        """Executor event (fills, closes, actions) — the engine wakes the model on some of them."""
+        """Executor event (fills, closes, actions) — the engine wakes the model on some of them; the owner is told
+        about fills, closes, rule executions and the model's actions (NOTIFY_EVENTS)."""
         self.appdb.add_event("executor", kind, json.dumps(payload, default=str)[:1500])
+        if kind in NOTIFY_EVENTS:
+            level, title = NOTIFY_EVENTS[kind]
+            pair = payload.get("pair")
+            ident = payload.get("leg") or payload.get("decision") or ""
+            self._notify(level, f"{pair or ''} {title}".strip(), str(payload.get("text") or payload)[:400],
+                         key=f"{kind}:{payload.get('decision')}:{ident}:{payload.get('text', '')[:60]}", pair=pair)
 
     def _leg_quote(self, key: str) -> Tick | None:
         return self.latest_quote(key)

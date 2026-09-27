@@ -52,7 +52,10 @@ DIAGNOSE_TOOLS = ("kill_switch",)
 READ_TOOLS = ("Read", "Grep", "Glob")
 TOOLS = "Read,Grep,Glob,Bash"
 DISALLOWED = ("Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Read(**/.env)", "Read(.env)",
-              "Read(**/.env.*)")
+              "Read(**/.env.*)",
+              # the CLI's own sign-in and settings, SSH/cloud credentials: never part of a review
+              "Read(~/.claude/**)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.config/**)",
+              "Read(**/.credentials.json)")
 PROMPTS = Path(__file__).resolve().parent / "prompts"
 SYSTEM_PROMPT = PROMPTS / "_system.md"
 LEDGER_ROLE = {"daily": "review", "weekly": "review", "diagnose": "diagnose"}     # ai_usage.role of the session row

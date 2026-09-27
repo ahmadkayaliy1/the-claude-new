@@ -433,7 +433,16 @@ def test_low_resources_and_an_overdue_daily_review(mon, world, monkeypatch):
     pack = reviews / "20260924T1800Z_daily.md"
     pack.write_text("# pack\n", encoding="utf-8")
     os.utime(pack, ((later - MS_PER_HOUR) / 1000, (later - MS_PER_HOUR) / 1000))
+    # a pack alone (a --dry-run, a start that failed) is not a review: still overdue
     res = run(mon, world, ["BTCUSDT"], at=later + MIN)
+    assert [f for f in res.problems if f.key.startswith("review")]
+    sess = reviews / "20260924T1800Z_daily.session.json"
+    sess.write_text('{"status": "running"}', encoding="utf-8")
+    os.utime(sess, ((later - MS_PER_HOUR) / 1000, (later - MS_PER_HOUR) / 1000))
+    assert [f for f in run(mon, world, ["BTCUSDT"], at=later + 2 * MIN).problems if f.key.startswith("review")]
+    sess.write_text('{"status": "max_turns"}', encoding="utf-8")        # a finished session (ok or max_turns)
+    os.utime(sess, ((later - MS_PER_HOUR) / 1000, (later - MS_PER_HOUR) / 1000))
+    res = run(mon, world, ["BTCUSDT"], at=later + 3 * MIN)
     assert not [f for f in res.problems if f.key.startswith("review")]
 
 

@@ -86,7 +86,10 @@ class UsageStore:
                  x.get("cache_creation_input_tokens"), role, int(images), int(image_tokens_est)))
 
     def count_since(self, provider: str, since_ms: int, pair: str | None = None) -> int:
-        sql, args = "SELECT count(*) FROM ai_usage WHERE provider=? AND ts>=?", [provider, since_ms]
+        """Requests of ``provider`` since ``since_ms`` (the quota ladder). Operator sessions (roles review /
+        diagnose, Phase 4) are recorded for the usage gauge but do not use the pairs' request quota."""
+        sql, args = ("SELECT count(*) FROM ai_usage WHERE provider=? AND ts>=? "
+                     "AND COALESCE(role, '') NOT IN ('review', 'diagnose')", [provider, since_ms])
         if pair:
             sql, args = sql + " AND pair=?", args + [pair]
         with self._lock:

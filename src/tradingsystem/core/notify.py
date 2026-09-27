@@ -344,7 +344,7 @@ class Notifier:
                          else "skipped (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set)")
         if not (toast_ok or (token and chat)):
             return r
-        if not self._rate_room(cfg.rate_per_hour):
+        if item.level != "critical" and not self._rate_room(cfg.rate_per_hour):    # a critical one always goes out
             r["rate_limited"] = True
             self._skip(r, f"rate limit {cfg.rate_per_hour}/hour: log only")
             self._note("rate", f"notification rate limit ({cfg.rate_per_hour}/hour in this process) reached - "

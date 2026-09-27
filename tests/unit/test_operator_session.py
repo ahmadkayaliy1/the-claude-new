@@ -99,7 +99,9 @@ def test_daily_args_are_the_read_only_allow_list(sa, tmp_path):
     assert "--setting-sources=" in args and "--setting-sources" not in args     # one token: PS 5.1 drops ""
     assert "--no-session-persistence" in args and "--strict-mcp-config" in args and "--add-dir" not in args
     dis = args[args.index("--disallowedTools") + 1:args.index("--allowedTools")]
-    assert dis == ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Read(**/.env)", "Read(.env)", "Read(**/.env.*)"]
+    assert dis == ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Read(**/.env)", "Read(.env)",
+                   "Read(**/.env.*)", "Read(~/.claude/**)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.config/**)",
+                   "Read(**/.credentials.json)"]
     allowed = args[args.index("--allowedTools") + 1:]
     assert allowed == ["Read", "Grep", "Glob"] + [f"Bash(.venv/Scripts/python.exe tools/{t}.py*)" for t in
                                                   ("health_report", "review_pack", "tune", "propose", "notify")]

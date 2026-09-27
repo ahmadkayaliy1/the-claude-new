@@ -685,12 +685,20 @@ class Monitor:
         if not b.operator.enabled:
             return
         d = b.paths.data() / "reviews"
-        newest = max((f.stat().st_mtime for f in d.glob("*_daily.md")), default=None) if d.is_dir() else None
+        newest = None
+        # a daily review HAPPENED when its session finished (ok / max_turns) — a pack alone (a --dry-run, a failed
+        # start, review_pack.py by hand) is not a review
+        for f in (d.glob("*_daily.session.json") if d.is_dir() else ()):
+            try:
+                if json.loads(f.read_text(encoding="utf-8")).get("status") in ("ok", "max_turns"):
+                    newest = max(newest or 0.0, f.stat().st_mtime)
+            except (OSError, ValueError):
+                continue
         ref = int(newest * 1000) if newest else int(self.state["first_run_ms"])
         if self.now - ref > b.monitor.review_overdue_hours * MS_PER_HOUR:
             self.add(Finding("warn", "review_overdue" if newest else "review_overdue:never", "Daily review overdue",
-                             (f"the last daily review pack is from {iso(ref)}" if newest else
-                              f"no daily review pack in {d} since the monitor started ({iso(ref)})")
+                             (f"the last finished daily review is from {iso(ref)}" if newest else
+                              f"no finished daily review in {d} since the monitor started ({iso(ref)})")
                              + f" — more than {b.monitor.review_overdue_hours} h; check the "
                                "TradingSystemOps-ReviewDaily task (docs/operator_sessions.md)"))
 

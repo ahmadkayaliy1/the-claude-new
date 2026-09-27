@@ -204,7 +204,7 @@ class Orchestrator:
         pr = render(role, system_vars, user_vars)
         try:
             from .prompts import register_versions
-            register_versions(self.store, pr, role)
+            register_versions(self.store, pr, role, lib_hash=self.library_hash)
         except Exception:  # noqa: BLE001
             log.debug("prompt versions of %s not registered", role, exc_info=True)
         return pr

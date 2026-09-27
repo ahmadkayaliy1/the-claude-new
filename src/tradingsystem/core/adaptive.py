@@ -276,10 +276,27 @@ def parse_cfg(doc: Any, *, max_expiry_days: int) -> AdaptiveCfg:
     return AdaptiveCfg.model_validate(doc, context={"max_expiry_days": max_expiry_days})
 
 
+MAX_YAML_CHARS = 256 * 1024              # tune.py writes a few kB; anything larger is not ours
+
+
+def has_alias(text: str) -> bool:
+    """Whether a YAML text uses an alias (``*name``), found on the event stream — nothing is constructed, so an
+    alias bomb ("billion laughs") costs nothing to detect."""
+    try:
+        return any(isinstance(ev, yaml.AliasEvent) for ev in yaml.parse(text, Loader=yaml.SafeLoader))
+    except yaml.YAMLError:
+        return False                           # not YAML at all: the loader refuses it quickly
+
+
 def load_cfg_text(text: str | None, *, max_expiry_days: int) -> AdaptiveCfg:
-    """Parse ``adaptive.yaml`` text (duplicate keys refused). Raises ValueError or yaml.YAMLError."""
+    """Parse ``adaptive.yaml`` text (duplicate keys, aliases and oversized files refused — the engine reads it on
+    its loop: a hand-made alias bomb must never stall a tick). Raises ValueError or yaml.YAMLError."""
     if text is None or not text.strip():
         return AdaptiveCfg()
+    if len(text) > MAX_YAML_CHARS:
+        raise ValueError(f"adaptive.yaml is larger than {MAX_YAML_CHARS} characters")
+    if has_alias(text):
+        raise ValueError("adaptive.yaml must not use YAML aliases (*name)")
     return parse_cfg(yaml.load(text, Loader=_UniqueKeyLoader), max_expiry_days=max_expiry_days)
 
 
@@ -556,23 +573,8 @@ class AdaptiveStore:
         self._seen, self._invalid_sig = True, None
 
     def _read(self) -> tuple[AdaptiveCfg, str]:
-        try:
-            text = (self.dir / YAML_FILE).read_text(encoding="utf-8")
-        except FileNotFoundError:
-            text = None
-        cfg = load_cfg_text(text, max_expiry_days=self.s.adaptive.max_expiry_days)
-        if cfg.playbook is None:
-            return cfg, ""
-        try:
-            pb = normalize_text((self.dir / PLAYBOOK_FILE).read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            raise ValueError("playbook.md is missing but adaptive.yaml references it") from None
-        if text_hash(pb) != cfg.playbook.value:
-            raise ValueError("playbook.md does not match the hash in adaptive.yaml (edited by hand?)")
-        problems = lint(pb)
-        if problems:
-            raise ValueError("playbook.md: " + "; ".join(problems))
-        return cfg, pb
+        return read_files(self.s, self.pair, self.dir)
+
 
     def _expire(self, key: str, e: Entry, now: int) -> bool:
         """Once per entry across processes: tuning_changes.reverted_ms (with app_db), one ``expired`` line, one
@@ -615,6 +617,29 @@ class AdaptiveStore:
         except sqlite3.Error as exc:
             log.warning("%s: tuning_changes not updated for the expired %s (retried): %s", self.pair, key, exc)
             return False
+
+
+def read_files(s: Settings, pair: str, d: Path | None = None) -> tuple[AdaptiveCfg, str]:
+    """(overlay, playbook text) of ``pair`` as on disk, side-effect free (the dashboard, the review pack). Raises
+    ValueError / yaml.YAMLError for an invalid overlay or a playbook that does not match its hash."""
+    d = d or adaptive_dir(s, pair)
+    try:
+        text = (d / YAML_FILE).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = None
+    cfg = load_cfg_text(text, max_expiry_days=s.adaptive.max_expiry_days)
+    if cfg.playbook is None:
+        return cfg, ""
+    try:
+        pb = normalize_text((d / PLAYBOOK_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ValueError("playbook.md is missing but adaptive.yaml references it") from None
+    if text_hash(pb) != cfg.playbook.value:
+        raise ValueError("playbook.md does not match the hash in adaptive.yaml (edited by hand?)")
+    problems = lint(pb)
+    if problems:
+        raise ValueError("playbook.md: " + "; ".join(problems))
+    return cfg, pb
 
 
 def _short(exc: BaseException) -> str:

@@ -90,6 +90,11 @@ foreach ($line in (schtasks /Query /FO CSV /NH 2>$null)) {
     $n = ($line -split '","')[0].Trim('"').TrimStart('\')
     if ($n -eq "TradingSystem" -or ($n -like "TradingSystem-*" -and $n -ne "TradingSystem-MT5")) { $tsNames += $n }
 }
+$opsNames = @()      # Phase 4 operator tasks (scripts\install_operator_tasks.bat, docs\operator_sessions.md)
+foreach ($line in (schtasks /Query /FO CSV /NH 2>$null)) {
+    $n = ($line -split '","')[0].Trim('"').TrimStart('\')
+    if ($n -like "TradingSystemOps-*") { $opsNames += $n }
+}
 if (-not $tsNames) { $tsNames = @("TradingSystem") }      # neither the all-pairs task nor a per-pair one (D-042)
 foreach ($name in @("TradingSystem-MT5") + @($tsNames | Sort-Object -Unique)) {
     $q = schtasks /Query /TN $name /FO LIST /V 2>$null
@@ -98,6 +103,17 @@ foreach ($name in @("TradingSystem-MT5") + @($tsNames | Sort-Object -Unique)) {
         Write-Host ("info {0,-22} {1,-8} last run {2}  result {3}  next {4}" -f $name, (& $field "Status"),
                     (& $field "Last Run Time"), (& $field "Last Result"), (& $field "Next Run Time"))
     } else { Write-Host ("info {0,-22} not registered (scripts\install_autostart.bat)" -f $name) }
+}
+if (-not $opsNames) {
+    Write-Host "info TradingSystemOps-*      not registered (scripts\install_operator_tasks.bat - monitor + reviews)"
+}
+foreach ($name in @($opsNames | Sort-Object -Unique)) {
+    $q = schtasks /Query /TN $name /FO LIST /V 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $field = { param($k) (($q | Select-String "^\s*$k\s*:" | Select-Object -First 1).Line -replace "^\s*$k\s*:\s*", "").Trim() }
+        Write-Host ("info {0,-28} {1,-8} last run {2}  result {3}  next {4}" -f $name, (& $field "Status"),
+                    (& $field "Last Run Time"), (& $field "Last Result"), (& $field "Next Run Time"))
+    }
 }
 
 Write-Host ""
