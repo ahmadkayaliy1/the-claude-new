@@ -261,3 +261,22 @@ def test_the_executor_gate_uses_the_overlay_confidence_floor(live, monkeypatch):
     with pytest.raises(RuntimeError, match="stop after the gate"):
         ex._handle({"pair": "XAUUSD", "rec": rec, "id": "g" * 32})
     assert seen["floor"] == 72
+
+
+def test_the_config_command_prints_the_phase4_switches_and_never_the_telegram_values(s, monkeypatch, tmp_path):
+    from tradingsystem import cli
+    from tradingsystem.ai.providers import base
+    monkeypatch.setattr(base, "ENV_FILE", tmp_path / "none.env")
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    line = cli._phase4_line(s)
+    assert line.startswith("phase 4: adaptive=on ") and "telegram=not configured" in line
+    assert "gauge=observe only" in line and "sessions=on" in line
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456789:" + "A" * 35)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "987654321")
+    s.paths.data().mkdir(parents=True, exist_ok=True)
+    (s.paths.data() / "TUNING_FREEZE").write_text("x", encoding="utf-8")
+    off = s.model_copy(update={"adaptive": s.adaptive.model_copy(update={"enabled": False})})
+    line = cli._phase4_line(off)
+    assert "adaptive=OFF (TUNING_FREEZE)" in line and "telegram=configured" in line
+    assert "123456789" not in line and "987654321" not in line

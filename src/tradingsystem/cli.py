@@ -71,12 +71,30 @@ def _cmd_config(args: argparse.Namespace) -> int:
           f"{'on' if x.management.enabled else 'OFF'}{' (DRY RUN)' if x.management.dry_run else ''} "
           f"position_actions={'on' if x.position_actions.enabled else 'OFF'} "
           f"calls/pair/day={a.daily_calls_per_pair}")
+    print(_phase4_line(settings))
     reg = InstrumentRegistry.from_settings(settings)
     for pair in reg.pairs():
         print(f"  {pair}:")
         for inst in reg.for_pair(pair):
             print(f"    {inst.key:<24} roles={','.join(inst.roles):<32} data={','.join(inst.datatypes)}")
     return 0
+
+
+def _phase4_line(settings) -> str:
+    """Phase 4 switches in force (docs/ops_windows.md §8). Telegram shows only whether both values are set — never
+    the values."""
+    from .ai.providers.base import secret
+    from .core.settings import TELEGRAM_SECRET_ENV
+
+    n, m, o = settings.notify, settings.monitor, settings.operator
+    freeze = (settings.paths.data() / "TUNING_FREEZE").exists()
+    telegram = "configured" if all(secret(k) for k in TELEGRAM_SECRET_ENV) else "not configured"
+    return (f"phase 4: adaptive={'on' if settings.adaptive.enabled else 'OFF'}{' (TUNING_FREEZE)' if freeze else ''} "
+            f"notify={'on' if n.enabled else 'OFF'} toast={'on' if n.toast else 'off'} "
+            f"telegram={'off' if not n.telegram else telegram} min_level={n.min_level} "
+            f"monitor={'on' if m.enabled else 'OFF'} diagnose={'on' if m.diagnose_enabled else 'off'} "
+            f"sessions={'on' if o.enabled else 'OFF'} "
+            f"gauge={'ENFORCED' if settings.ai.usage.enforce else 'observe only'}")
 
 
 def _cmd_status(_: argparse.Namespace) -> int:

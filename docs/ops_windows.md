@@ -483,7 +483,8 @@ the tools (monitor, sessions, `tune.py`) read the config at every run, so for th
 | The monitor itself | `monitor: {enabled: false}`, or `scripts\install_operator_tasks.bat -Uninstall` |
 | The review sessions | `operator: {enabled: false}` (the tasks start and exit at once), or remove the tasks |
 
-Check what is in force with `.venv\Scripts\python.exe -m tradingsystem config` before `restart_all.bat`. A
+Check what is in force with `.venv\Scripts\python.exe -m tradingsystem config` before `restart_all.bat` (the
+"phase 4:" line: adaptive, `TUNING_FREEZE`, notify/toast/Telegram configured, monitor, diagnose, sessions, gauge). A
 `config.local.yaml` the tools cannot read stops the monitor and the sessions with exit code 3 (task "Last Result"),
 a line in `logs\monitor-config-error.log` / `logs\operator-session-config-error.log` and a toast; `check_ops.bat`
 points there.
