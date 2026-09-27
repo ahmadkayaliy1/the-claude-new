@@ -41,6 +41,34 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-09-27 — Phase 4 (P12.4, D-045) is DONE on branch `feat/phase4-watches-learns` (worktree
+  `C:\the_claude_new_wt\phase4`); production still runs Phase 3 on `main` until the user's H20.** 1208 unit tests.
+  Built in the order of §3.8 4.1: decision metrics + attribution + prompt registry; the per-pair adaptive overlay +
+  playbook (`tools/tune.py` the only writer, `core/tunables.py` the consumers' view); review packs, Claude operator
+  sessions (Python runner, `TradingSystemOps-*` tasks) and proposals; the pure-Python monitor; the notifier (log +
+  toast; Telegram after H18); the usage gauge (observe only until H21); dashboard tabs + an ON-only kill-switch
+  button. Folded in: the gate's rr detail (3 decimals, 1e-6 tolerance), `snapshot_build_ms` in the monitor and the
+  health report (warn > 3 s), a notifier that works with toast + log alone. The ONE live call (daily review, Opus,
+  scratch root): ok, 10 turns, 119 s, 27.3 k unique context + 7.4 k output (the 30 k target missed by 16 %, accepted
+  in D-045), 0 denials, clean diff guard, no tuning (too few resolved outcomes) — docs/measurements/phase4_live.md.
+  Review: 7 lenses + skeptics (39 of 41 confirmed, fixed), re-review of the fixes (20 of 22 confirmed, fixed —
+  among them a HIGH one: the allow-list's glued `tools/tune.py*` matched `tools/tune.py/../<any file>`; every rule
+  is now `Bash(<command> *)`, checked against the CLI's matcher), then a final independent check (4 checks +
+  skeptics: the round-2 fixes, the session security boundary end to end, merge/restart readiness on copies of the
+  production databases, completeness against the spec; 14 findings, all real, all fixed, plus one the fixers found).
+  Among them: the sessions Read/Grep/Glob allow rules (reads now stay in the checkout and the data root, the user
+  profile is denied), one pair per diagnosis and never the last pair still trading, the session recorded as the
+  actor, a late-logon false alarm, and the merge order (stop_all, merge, start_all: the v5 template adds $tp_hint,
+  which a running Phase 3 engine cannot fill). On copies of the production app.dbs the additive migrations take 0.14
+  s, are idempotent and main code still reads them; the metrics backfill needs 3 passes per pair (about 3 min);
+  every production config combination validates.
+  User steps: H20 `scripts\stop_all.bat` + `git merge --ff-only feat/phase4-watches-learns` + `tradingsystem
+  config` ("phase 4:" line) + `scripts\start_all.bat` (not merge-then-restart: a running Phase 3 engine re-reads
+  the v5 template and cannot fill `$tp_hint`); then H19 `scripts\install_operator_tasks.bat -DryRun` / without
+  `-DryRun` from `C:\the_claude_new`; H18 (Telegram) optional; H21 after a week. Rollback switches:
+  docs/ops_windows.md §8. As-built deviations from §3.8: its '4.8 As built'. Next: P12.5 (§3.9) on
+  `C:\the_claude_new_wt\phase5`.
+
 * **2026-09-27 09:18 UTC — Phase 3 is LIVE: the user merged `feat/phase3-sees-manages` (ff → `dfa19da`) and ran
   `restart_all.bat`; production = three per-pair systems on Phase 3 code.** `tradingsystem config`: charts=on,
   escalation=off, management=on, position_actions=on, 40 calls/pair/day. First cycles: ETH 25.2 k in / 3.8 k out,
@@ -733,11 +761,15 @@ conservative thresholds, dedupe, `kill_switch_off.bat`.
   value — the runner's own deadline governs.
 - **Session command line:** every Bash rule is `Bash(.venv/Scripts/python.exe tools/<tool>.py *)` with a space before
   the `*` (the CLI compiles it to `<command>( .*)?`; a glued `tools/tune.py*` matched `tools/tune.py/../<any file>`);
-  no `git` rules (`git diff/log --output=<file>` writes files); Read denials for `.env`,
-  `~/.claude`, `~/.ssh`, `~/.aws`, `~/.config`, `*.credentials.json`; the diagnosis may run only
-  `tools/kill_switch.py --pair <PAIR>` (the global switch is the monitor's). Every session exports
-  `TS_OPERATOR_SESSION=1`: with it `tune.py` takes the playbook only as `--text`, `propose.py` refuses `--body-file` and
-  any base but `main`, `kill_switch.py` refuses `--all`; `review_pack.py --out` accepts only `data/reviews`.
+  no `git` rules (`git diff/log --output=<file>` writes files); Read, Grep and Glob are tools but no allow rules (the CLI
+  allows reads inside the working directories — the checkout and `--add-dir` — by itself; a tool-wide rule allowed
+  every other file), with denials for `.env`, `~/.claude`, `~/.claude.json`, `~/.ssh`, `~/.aws`, `~/.config`,
+  `*.credentials.json` and, when neither the checkout nor the data root lives in the profile, `~/**`; the diagnosis may
+  run only `tools/kill_switch.py --pair <PAIR>` — one pair per review, never the last pair still trading (the global
+  switch is the monitor's). Every session exports `TS_OPERATOR_SESSION=1` and `TS_OPERATOR_REVIEW_ID`: with them
+  `tune.py` takes the playbook only as `--text`, `propose.py` refuses `--body-file` and any base but `main`,
+  `kill_switch.py` refuses `--all`, `review_pack.py --out` accepts only `data/reviews`, `demo_order_test.py` refuses to
+  run, and every change is recorded as `operator-session:<review id>`.
 - **Ledger and gauge:** sessions are ledger rows (role `review`/`diagnose`, pair NULL) outside the pairs' request quota;
   `UsageStore.tokens_since(since, pair=None, providers=None)` — the gauge counts only `claude_code` providers, a
   cache-read token as `ai.usage.cache_read_weight` (0.1) of a token (the budgets are in these weighted tokens, not the
