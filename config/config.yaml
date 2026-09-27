@@ -209,6 +209,7 @@ ai:
   screen_timeframe: 5m                 # Python screens every 5m close; Claude only on change (new setup / condition / event)
   screen_move_atr: 0.5                 # a time-based review needs a new setup or a move > 0.5 x ATR since the last call
   weak_min: 2                          # weak setup reasons needed for a call
+  weak_needs_location: true            # ... and only while price is at a 15m/1h zone or liquidity (5m = confirmation only)
   liquidity_atr: 0.3                   # "price near liquidity" = within 0.3 x ATR
   charts:                              # D-038: candle charts sent as images with the payload
     enabled: true                      # false = text-only calls (rollback switch)

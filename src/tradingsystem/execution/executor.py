@@ -31,6 +31,7 @@ import numpy as np
 from ..ai.store import DecisionStore
 from ..analysis import indicators as ind
 from ..analysis.frames import load_frame
+from ..analysis.structure import analyze_structure
 from ..core.filelock import FileLock, locks_dir
 from ..core.instruments import InstrumentRegistry, _resolve_symbol
 from ..core.logsetup import setup_from_settings
@@ -40,9 +41,12 @@ from ..core.timeutil import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, iso, now_ms,
 from ..ingest.common.appdb import AppDB
 from ..storage.reader import InstrumentReader
 from ..storage.tablespec import spec_for
+from .action_gate import ActionContext
+from .action_gate import evaluate as gate_action
 from .backends.paper import PaperBackend, Tick
 from .drawdown import AccountPeak
 from .exposure import live_sides
+from .management import ActionLog, MT5Legs, PaperLegs, PositionManager
 from .price_mapping import check_basis, translate
 from .risk_gate import ExecContext, evaluate
 
@@ -56,6 +60,9 @@ MAX_HANDLE_ATTEMPTS = 5              # transient failures of one decision before
 ERROR_HEARTBEAT_MS = 5 * MS_PER_MINUTE   # a loop failing longer stops refreshing its heartbeat → watchdog restart
 PEAK_EVERY_S = 5.0                   # the account peak file is read/updated at most this often by the loop
 PLACEMENT_LOCK_WAIT_S = 20.0         # MT5: gate + placement of one system at a time on the account (D-042)
+ACTION_WINDOW_MS = 3_600_000         # the model's position actions: decisions of the last hour are handled
+DEFERRED_MAX_S = 3_600               # a valid tighter stop that is still too close is retried this long
+SWING_BARS = 150                     # decision-TF bars for the trailing-structure swing
 
 
 class PlacementBusy(RuntimeError):
@@ -124,6 +131,15 @@ class Executor:
         self.started = now_ms()
         self.mt5_quiet_until = 0
         self.stop = False
+        # Phase 3 (P9.6 / D-043): the system manages its trades; the model may act on them within the action gate
+        self.actions = ActionLog(self.app_db)
+        if self.mt5:
+            self.legs = self.model_legs = MT5Legs(self.mt5)
+        else:
+            self.legs = PaperLegs(self.paper, self._leg_quote, self._leg_specs, reason="rule")
+            self.model_legs = PaperLegs(self.paper, self._leg_quote, self._leg_specs, reason="model")
+        self.manager = PositionManager(s, self.actions, self.legs, self, self._emit)
+        self._mkt: dict[tuple, object] = {}
         self.peak: AccountPeak | None = None                # the account's high-water mark (shared by every system)
         self._peak_at = 0.0
 
@@ -331,7 +347,12 @@ class Executor:
                                       "take_profits": [t["price"] for t in rec_x["take_profits"]]},
                   "translation": rec_x.get("price_reference_translated"), "mode": self.mode,
                   "equity_at_entry": acct["equity"], "lots": gate.size.lots if gate.size else None,
-                  "risk_pct": round(gate.size.risk_pct, 3) if gate.size else None, "rr_exec": gate.rr_exec}
+                  "risk_pct": round(gate.size.risk_pct, 3) if gate.size else None, "rr_exec": gate.rr_exec,
+                  # the management plan in execution prices (P9.6 executes it on the live legs)
+                  "executed_management": rec_x.get("management") or []}
+        if gate.single_leg_tp is not None:        # one position at the minimum lot: that is the target placed
+            detail["executed_levels"]["take_profits"] = [rec_x["take_profits"][gate.single_leg_tp]["price"]]
+            detail["single_leg"] = f"TP{gate.single_leg_tp + 1}"
         if not gate.approved:
             detail["reason"] = "; ".join(gate.failures())
             self.store.set_execution_state(did, "rejected", detail)
@@ -569,6 +590,13 @@ class Executor:
         if self.paper:
             self.advance_paper()
         self.process_candidates()
+        # protective work runs even when a kill switch is on (it only ever reduces risk)
+        for step in (self.process_actions, self.manage_positions):
+            try:
+                step()
+            except Exception as exc:  # noqa: BLE001 — never blocks the candidates or the heartbeat
+                log.exception("%s failed", step.__name__)
+                self._emit("mgmt_error", {"text": f"{step.__name__} failed: {exc!r}"[:200]})
         if housekeeping:
             if self.mt5:
                 try:
@@ -616,6 +644,205 @@ class Executor:
                 "today_pnl_pct": round(today / eq * 100, 2) if eq else None,
                 "exposure": acct.get("exposure") or [], "account_drawdown": dd.as_detail() if dd else None,
                 "errors_last_5min": len(self.loop_errors), "kill_switch": self.kill_switch()}
+
+    # ------------------------------------------------------------------ Phase 3: management and model actions
+    def _emit(self, kind: str, payload: dict) -> None:
+        """Executor event (fills, closes, actions) — the engine wakes the model on some of them."""
+        self.appdb.add_event("executor", kind, json.dumps(payload, default=str)[:1500])
+
+    def _leg_quote(self, key: str) -> Tick | None:
+        return self.latest_quote(key)
+
+    def _leg_specs(self, key: str) -> dict:
+        inst = self.reg.get(key)
+        c = inst.contract or {}
+        return {"stops_level": STOPS_LEVEL_PRICE.get(inst.symbol, 0.0), "tick_size": c.get("tick_size", 0.01),
+                "volume_min": c.get("volume_min", 0.01), "volume_step": c.get("volume_step", 0.01)}
+
+    def _live_basis(self, pair: str) -> float | None:
+        """Execution mid − analysis mid now (0 when both are the same instrument; None without fresh quotes)."""
+        prim, exe = self.reg.primary(pair), self.reg.with_role(pair, "execution")[0]
+        if prim.key == exe.key:
+            return 0.0
+        pq, eq = self.latest_quote(prim.key), self.latest_quote(exe.key)
+        if pq is None or eq is None:
+            return None
+        return (eq.bid + eq.ask) / 2 - (pq.bid + pq.ask) / 2
+
+    def decision_bar_open_ms(self, pair: str) -> int | None:
+        """MarketView: open time of the latest closed decision-TF bar."""
+        tf = self.s.pairs[pair].decision_timeframe
+        return tf.floor(now_ms()) - tf.ms
+
+    def _decision_frame(self, pair: str):
+        """The decision-TF frame of the analysis instrument, cached per closed bar (swing / close lookups)."""
+        bar = self.decision_bar_open_ms(pair)
+        key = ("frame", pair, bar)
+        if key not in self._mkt:
+            self._mkt = {k: v for k, v in self._mkt.items() if k[2] == bar}      # drop older bars' entries
+            prim = self.reg.primary(pair)
+            tf = self.s.pairs[pair].decision_timeframe
+            self._mkt[key] = load_frame(self.reader(prim.key), prim, tf, SWING_BARS, now_ms())
+        return self._mkt[key]
+
+    def swing(self, pair: str, side: str) -> float | None:
+        """MarketView: the last confirmed swing low/high of the decision timeframe, in execution prices."""
+        basis = self._live_basis(pair)
+        if basis is None:
+            return None
+        bar = self.decision_bar_open_ms(pair)
+        key = ("swing", pair, bar)
+        if key not in self._mkt:
+            fr = self._decision_frame(pair)
+            if len(fr) < 20:
+                return None
+            st = analyze_structure(fr.high, fr.low, fr.close, ind.atr(fr.high, fr.low, fr.close))
+            self._mkt[key] = (st.last_low.price if st.last_low else None, st.last_high.price if st.last_high else None)
+        lo, hi = self._mkt[key]
+        v = lo if side == "low" else hi
+        return None if v is None else float(v) + basis
+
+    def decision_bar_close(self, pair: str) -> float | None:
+        """MarketView (optional): the latest closed decision bar's close, in execution prices."""
+        basis = self._live_basis(pair)
+        fr = self._decision_frame(pair)
+        if basis is None or not len(fr):
+            return None
+        return float(fr.close[-1]) + basis
+
+    def _open_decisions(self) -> list[dict]:
+        """Executed decisions of this mode that are not settled yet (their legs may still be live)."""
+        con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True, timeout=10)
+        try:
+            rows = con.execute("SELECT id, pair, recommendation, execution_detail FROM ai_decisions WHERE "
+                               "execution_state='executed' AND outcome IS NULL AND ts>=? AND "
+                               "json_extract(execution_detail,'$.mode')=?",
+                               (now_ms() - SETTLE_LOOKBACK_DAYS * MS_PER_DAY, self.mode)).fetchall()
+        finally:
+            con.close()
+        enabled = set(self.s.enabled_pairs())
+        return [{"id": r[0], "pair": r[1], "recommendation": json.loads(r[2]) if r[2] else {},
+                 "execution_detail": json.loads(r[3]) if r[3] else {}} for r in rows if r[1] in enabled]
+
+    def manage_positions(self) -> None:
+        """P9.6: apply every open trade's declared management rules (breakeven, trailing, partials, time stop)."""
+        decisions = self._open_decisions()
+        if decisions:
+            self.manager.manage(decisions, now_ms())
+
+    def _action_status(self, source_decision: str, seq: int, target: str, leg: str) -> str | None:
+        con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True, timeout=10)
+        try:
+            r = con.execute("SELECT status FROM position_actions WHERE source='model' AND source_decision=? AND seq=? "
+                            "AND target_decision=? AND leg=?", (source_decision, seq, target, leg)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        finally:
+            con.close()
+        return r[0] if r else None
+
+    def _resolve_target(self, pair: str, short_id: str) -> str | None:
+        """The executed decision of ``pair`` whose id starts with ``short_id`` — exactly one, else None."""
+        con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True, timeout=10)
+        try:
+            rows = con.execute("SELECT id FROM ai_decisions WHERE substr(id, 1, ?)=? AND pair=? AND "
+                               "execution_state='executed'", (len(short_id), short_id, pair)).fetchall()
+        finally:
+            con.close()
+        return rows[0][0] if len(rows) == 1 else None
+
+    def process_actions(self) -> None:
+        """D-043: the model's ``position_actions`` on its live trades — each checked by the action gate, applied through
+        the leg backend, recorded in ``position_actions`` and announced as an event (which wakes the model)."""
+        if not self.s.execution.position_actions.enabled:
+            return
+        now = now_ms()
+        for pair in self.s.enabled_pairs():
+            for d in self.store.pending_actions(pair, max(self.started, now) - ACTION_WINDOW_MS):
+                try:
+                    if self._actions_of(d, pair, now):
+                        self.store.set_actions_state(d["id"], "done")
+                except Exception as exc:  # noqa: BLE001 — one decision's actions never block another's
+                    log.exception("%s %s: position actions failed", pair, d["id"][:8])
+                    self._emit("action_rejected", {"pair": pair, "decision": d["id"][:8],
+                                                   "text": f"{pair} actions of {d['id'][:8]} failed: {exc!r}"[:200]})
+
+    def _actions_of(self, d: dict, pair: str, now: int) -> bool:
+        """Handle one decision's actions; True when every action has a final result."""
+        rec = d["rec"]
+        acts = rec.get("position_actions") or []
+        if not acts:
+            return True
+        exe = self.reg.with_role(pair, "execution")[0]
+        rec_x = rec
+        if self.reg.primary(pair).key != exe.key:
+            basis = self._live_basis(pair)
+            if basis is None:
+                return False                                  # no fresh quotes: retried next loop
+            rec_x = translate(rec, basis, (exe.contract or {}).get("tick_size", 0.01))
+        cfg = self.s.execution.position_actions
+        rec_ts = parse_date_spec(rec["timestamp"])
+        market_open = calendar_for(exe.venue, exe.symbol, self.s.pairs[pair].asset_class).is_open(now)
+        done = True
+        for seq, a in enumerate(rec_x.get("position_actions") or []):
+            if seq >= cfg.max_per_decision:
+                break
+            short = a["target"]["decision"]
+            target = self._resolve_target(pair, short)
+            if target is None:
+                if self._action_status(d["id"], seq, short, "-") is None:
+                    self.actions.record("model", d["id"], seq, short, "-", a["action"], a, "rejected",
+                                        {"reason": f"no single executed decision {short} of {pair}"}, pair=pair)
+                    self._emit("action_rejected", {"pair": pair, "decision": d["id"][:8],
+                                                   "text": f"{a['action']} on {short}: unknown or ambiguous target"})
+                continue
+            legs = self.model_legs.legs_of(target)
+            prior = [self._action_status(d["id"], seq, target, lg.key) for lg in legs]
+            ctx = ActionContext(now_ms=now, pair=pair, rec_ts_ms=rec_ts,
+                                max_age_s=DEFERRED_MAX_S if "deferred" in prior else self.s.risk.max_recommendation_age_s,
+                                market_open=market_open, cfg=cfg,
+                                applied_today=self.actions.applied_today(pair, "model"),
+                                last_sl_change_ms=self.actions.last_sl_change_ms)
+            for plan in gate_action(a, legs, self.model_legs.venue, ctx):
+                leg_key = plan.leg.key if plan.leg else "-"
+                if self._action_status(d["id"], seq, target, leg_key) in ("applied", "rejected", "skipped"):
+                    continue
+                checks = [{"check": n, "ok": ok, "detail": x} for n, ok, x in plan.checks]
+                if plan.status == "deferred":
+                    self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a, "deferred",
+                                        {"checks": checks, "reason": plan.reason}, pair=pair)
+                    done = False
+                    continue
+                if plan.status != "apply":
+                    self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a, "rejected",
+                                        {"checks": checks, "reason": plan.reason}, pair=pair)
+                    self._emit("action_rejected", {"pair": pair, "decision": d["id"][:8], "target": target[:8],
+                                                   "text": f"{a['action']} on {target[:8]} refused: {plan.reason}"[:200]})
+                    continue
+                self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a, "pending",
+                                    {"checks": checks}, pair=pair)           # write-ahead: never applied twice
+                res = self._apply_plan(plan)
+                status = res.status if res.status in ("applied", "deferred", "rejected") else "failed"
+                self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a,
+                                    "rejected" if status == "failed" else status,
+                                    {"checks": checks, "result": res.detail, "retcode": res.retcode}, pair=pair)
+                if status == "deferred":
+                    done = False
+                    continue
+                kind = "action_applied" if status == "applied" else "action_rejected"
+                self._emit(kind, {"pair": pair, "decision": d["id"][:8], "target": target[:8], "leg": leg_key,
+                                  "text": f"{a['action']} on {target[:8]} leg {leg_key}: {status} — {res.detail}"[:200]})
+        return done
+
+    def _apply_plan(self, plan):
+        lg = plan.leg
+        if plan.op == "set_sl":
+            return self.model_legs.set_sl(lg, plan.value)
+        if plan.op == "set_tp":
+            return self.model_legs.set_tp(lg, plan.value)
+        if plan.op == "close":
+            return self.model_legs.close(lg, plan.volume, reason="model")
+        return self.model_legs.cancel(lg, reason="model")
 
     def _loop_failed(self, exc: Exception) -> None:
         """Report a failing loop — but only for ERROR_HEARTBEAT_MS: a loop that keeps failing stops refreshing its

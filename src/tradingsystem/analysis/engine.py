@@ -247,7 +247,8 @@ class Engine:
                    last_signature=frozenset(sig) if sig is not None else None, time_reasons=time_r,
                    event_reasons=[self._event_text(e) for e in events or []], at_decision_close=at_decision_close,
                    decision_bar_since_last_call=last_call is None or last_dec_close > last_call,
-                   move_atr=move_atr, screen_move_atr=self.s.ai.screen_move_atr)
+                   move_atr=move_atr, screen_move_atr=self.s.ai.screen_move_atr,
+                   weak_needs_location=self.s.ai.weak_needs_location)
         self._sig = getattr(self, "_sig", {})
         if d.signature or payload:
             self._sig[pair] = sorted(d.signature)

@@ -368,6 +368,7 @@ class AICfg(_Model):
     screen_timeframe: str = "5m"            # Python screens every close of this TF; Claude is called only on change
     screen_move_atr: float = Field(0.5, ge=0.2, le=1.0)  # a time-based review needs a move > this × ATR (or a new setup)
     weak_min: int = Field(2, ge=1, le=4)    # weak setup reasons needed to call (Phase 4 overlay may raise it)
+    weak_needs_location: bool = True        # weak calls only while price is at a 15m/1h zone or liquidity (5m = confirmation)
     liquidity_atr: float = Field(0.3, ge=0.1, le=0.6)    # "price near liquidity" distance in ATR
     review_floor_minutes: int = 5           # next_review price/candle triggers: not sooner after the last call
     max_backoff_minutes: int = 120          # per-pair back-off cap after failed cycles (spacing doubles per failure)

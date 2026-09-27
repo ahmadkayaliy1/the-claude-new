@@ -23,6 +23,7 @@ from pathlib import Path
 
 from ...core.timeutil import now_ms, parse_date_spec
 from ...storage.sqlite_store import connect
+from ..sizing import split_volume  # noqa: F401 — one split rule for the gate and both backends
 from ..exposure import aggregate, leg
 
 _DDL = [
@@ -56,17 +57,6 @@ class Tick:
     @property
     def order_key(self) -> int:
         return self.key if self.key is not None else self.time_msc * 1000 + 999
-
-
-def split_volume(total: float, fractions: list[float], step: float, vmin: float) -> list[float] | None:
-    """Split ``total`` lots by fractions on the volume step; None if any leg would fall below the minimum."""
-    steps = round(total / step)
-    raw = [steps * f / sum(fractions) for f in fractions]
-    legs = [math.floor(x) for x in raw]
-    for i in sorted(range(len(raw)), key=lambda i: raw[i] - legs[i], reverse=True)[: steps - sum(legs)]:
-        legs[i] += 1
-    vols = [round(n * step, 8) for n in legs]
-    return vols if all(v >= vmin - 1e-12 for v in vols) else None
 
 
 class PaperBackend:

@@ -40,13 +40,17 @@ class Reason:
     key: str
     text: str
     strength: Literal["strong", "weak"]
+    kind: str = "other"          # structure | location (decision-TF/1h zone or liquidity) | pattern | flow | other
 
 
 # ------------------------------------------------------------------ setup scan
 def _scan_tf(tf: str, t: dict, bias: str | None, liquidity_atr: float,
-             structure: Literal["strong", "weak"]) -> list[Reason]:
+             structure: Literal["strong", "weak"], *, location: bool = True,
+             at_location: bool = False) -> list[Reason]:
     """Reasons on one timeframe's latest *closed* bar. ``structure`` is the strength of its BOS/CHoCH/sweep events
-    (strong on the decision TF and 1h; weak on the screen TF — a 5m break alone is noise)."""
+    (strong on the decision TF and 1h; weak on the screen TF — a 5m break alone is noise). ``location=False`` (the 5m
+    screen TF): its zones and liquidity are not locations — only its structure breaks, and a reversal candle when
+    price is at a decision-TF / 1h location (``at_location``), count as confirmations."""
     out: list[Reason] = []
     recent = t.get("recent") or []
     if not recent:
@@ -62,9 +66,17 @@ def _scan_tf(tf: str, t: dict, bias: str | None, liquidity_atr: float,
             text = f"{tf} liquidity sweep ({e['dir']}) at {e['level']}"
         else:
             continue
-        out.append(Reason(f"{tf}:{e['kind']}:{e['dir']}:{e['time']}", text, structure))
+        # a sweep is keyed by its pool, so consecutive bars sweeping the same level are one setup, not one per bar
+        anchor = e["level"] if e["kind"] == "sweep" else e["time"]
+        out.append(Reason(f"{tf}:{e['kind']}:{e['dir']}:{anchor}", text, structure, "structure"))
     ind = t.get("indicators") or {}
     close, atr = ind.get("close"), ind.get("atr14")
+    if not location:
+        pats = (t.get("patterns") or {}).get("last_bar") or []
+        if at_location and any(x in pats for x in REVERSAL_PATTERNS):
+            out.append(Reason(f"{tf}:pattern:{last_bar}", f"{tf} reversal candle ({', '.join(pats)}) at the "
+                                                          "location", "weak", "pattern"))
+        return out
     if close is None or not atr:
         return out
     in_zone = False
@@ -76,17 +88,18 @@ def _scan_tf(tf: str, t: dict, bias: str | None, liquidity_atr: float,
             if inside and aligned:
                 in_zone = True
                 out.append(Reason(f"{tf}:{name}:{z['dir']}:{z['top']}-{z['bottom']}",
-                                  f"price inside {tf} {z['dir']} {name} {z['bottom']}-{z['top']}", "weak"))
+                                  f"price inside {tf} {z['dir']} {name} {z['bottom']}-{z['top']}", "weak", "location"))
     liq = t.get("liquidity") or {}
     for side, key, short in (("buy-side", "buy_side_above", "buy"), ("sell-side", "sell_side_below", "sell")):
         for p in (liq.get(key) or [])[:1]:
             if abs(p["level"] - close) <= liquidity_atr * atr:
                 out.append(Reason(f"{tf}:liq:{short}:{p['level']}",
-                                  f"price within {liquidity_atr:g} ATR of {tf} {side} liquidity {p['level']}", "weak"))
+                                  f"price within {liquidity_atr:g} ATR of {tf} {side} liquidity {p['level']}", "weak",
+                                  "location"))
     pats = (t.get("patterns") or {}).get("last_bar") or []
     if in_zone and any(x in pats for x in REVERSAL_PATTERNS):
         out.append(Reason(f"{tf}:pattern:{last_bar}", f"{tf} reversal candle ({', '.join(pats)}) inside a zone",
-                          "weak"))
+                          "weak", "pattern"))
     return out
 
 
@@ -115,11 +128,13 @@ def scan_setups(payload: dict, *, liquidity_atr: float = 0.3, screen_tf: str | N
     for tf in (dec, "1h"):
         if tf not in (s[0] for s in scans):         # a 1h decision TF is scanned once, not twice
             scans.append((tf, "strong"))
-    if screen_tf and screen_tf in tfs and screen_tf not in (s[0] for s in scans):
-        scans.append((screen_tf, "weak"))
     out: list[Reason] = []
     for tf, structure in scans:
         out += _scan_tf(tf, tfs.get(tf) or {}, bias, liquidity_atr, structure)
+    if screen_tf and screen_tf in tfs and screen_tf not in (s[0] for s in scans):
+        at_loc = any(r.kind == "location" for r in out)
+        out += _scan_tf(screen_tf, tfs.get(screen_tf) or {}, bias, liquidity_atr, "weak", location=False,
+                        at_location=at_loc)
     dec_recent = (tfs.get(dec) or {}).get("recent") or []
     dec_bar = dec_recent[-1][0] if dec_recent else None
     of = payload.get("orderflow") or {}
@@ -128,14 +143,15 @@ def scan_setups(payload: dict, *, liquidity_atr: float = 0.3, screen_tf: str | N
         lb = bars[-1]
         bt = lb.get("time") or dec_bar
         if lb.get("stacked_buy") or lb.get("stacked_sell"):
-            out.append(Reason(f"fp:{bt}:stacked", "stacked footprint imbalances on the last decision bar", "weak"))
+            out.append(Reason(f"fp:{bt}:stacked", "stacked footprint imbalances on the last decision bar", "weak",
+                              "flow"))
         if lb.get("absorption"):
             out.append(Reason(f"fp:{bt}:absorption", f"absorption on the last decision bar ({lb['absorption']})",
-                              "weak"))
+                              "weak", "flow"))
     div = (of.get("bar_delta") or {}).get("divergence")
     if div:
         out.append(Reason(f"div:{div['type']}:{_div_anchor(div, dec_bar)}", f"{div['type']} price/CVD divergence",
-                          "weak"))
+                          "weak", "flow"))
     return out
 
 
@@ -244,13 +260,20 @@ _KINDS = {"event": ("event", True), "condition": ("review", True), "time": ("rev
           "strong": ("strong", False), "weak": ("weak", False), "close": ("close", False), "idle": ("idle", False)}
 
 
+def _weak_at_location(found: list[Reason], new: list[Reason], screen_tf: str | None) -> bool:
+    """Price is at a location and something new there is price action (not only a 5m candle or order flow)."""
+    carries = any(r.kind in ("location", "structure")
+                  or (r.kind == "pattern" and not (screen_tf and r.key.startswith(f"{screen_tf}:"))) for r in new)
+    return carries and any(r.kind == "location" for r in found)
+
+
 def decide(policy: str, payload: dict | None, *, last_call_ms: int | None, now: int, min_spacing_min: int,
            max_idle_min: int, review_reasons: list[str], at_close: bool, review_floor_min: int = 5,
            backoff_ms: int = 0, weak_min: int = 2, liquidity_atr: float = 0.3, screen_tf: str | None = None,
            last_signature: frozenset[str] | None = None, time_reasons: list[str] | None = None,
            event_reasons: list[str] | None = None, at_decision_close: bool | None = None,
            decision_bar_since_last_call: bool = True, move_atr: float | None = None,
-           screen_move_atr: float = 0.5) -> TriggerDecision:
+           screen_move_atr: float = 0.5, weak_needs_location: bool = False) -> TriggerDecision:
     """Whether to call the model now.
 
     Phase 3 path (the engine passes ``time_reasons``/``event_reasons``): ``review_reasons`` are the price/candle
@@ -260,6 +283,10 @@ def decide(policy: str, payload: dict | None, *, last_call_ms: int | None, now: 
     setup keys (not in ``last_signature``; None = first screen, all new) → hybrid idle at a decision close.
     Spacing is checked for the strongest candidate: the review floor for events and condition reviews, the minimum
     spacing otherwise, and the failure back-off above both. ``signature`` always holds every current setup key.
+    ``weak_needs_location``: weak setups call only while price is at a decision-TF / 1h location (inside a zone or
+    near liquidity — seen before or new) and one of the new reasons is price action (a new location, a structure
+    break, or a decision-TF reversal candle); new confirmations without a location are not a setup, and 5m candles
+    or order flow alone at a location the model already saw wait for its own ``next_review`` conditions.
     Without those arguments the pre-Phase-3 behaviour is kept exactly."""
     if time_reasons is None and event_reasons is None:
         return _decide_legacy(policy, payload, last_call_ms=last_call_ms, now=now, min_spacing_min=min_spacing_min,
@@ -292,7 +319,8 @@ def decide(policy: str, payload: dict | None, *, last_call_ms: int | None, now: 
         else:
             if new_strong:
                 cands.append(("strong", new_strong + new_weak))
-            elif n_new_weak >= weak_min:
+            elif n_new_weak >= weak_min and (not weak_needs_location or _weak_at_location(found, new_weak_r,
+                                                                                            screen_tf)):
                 cands.append(("weak", new_weak))
             if policy == "hybrid" and at_dec and (last_call_ms is None or now - last_call_ms >= max_idle_min * 60_000):
                 cands.append(("idle", [f"idle: no AI review for ≥{max_idle_min} min"]

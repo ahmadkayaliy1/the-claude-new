@@ -16,7 +16,7 @@ from tradingsystem.ai.triggers import (Reason, TriggerDecision, decide, review_d
 FIXTURE = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "real" / "payload_xauusd.json").read_text())
 MIN = 60_000
 NOW = 1790334600000                      # 2026-09-25T11:10:00Z
-SWEEP_1H = "1h:sweep:bearish:2026-09-25T09:00:00.000Z"      # the fixture's one setup: a 1h sweep on its last bar
+SWEEP_1H = "1h:sweep:bearish:4295.76"      # the fixture's one setup: a 1h sweep on its last bar (keyed by its pool)
 
 
 def payload() -> dict:
@@ -204,8 +204,8 @@ def test_liquidity_atr_changes_what_is_near():
     assert "1h:liq:buy:4303.15" in near(0.6)
     texts = setup_reasons(payload(), liquidity_atr=0.6)[1]
     assert "price within 0.6 ATR of 1h buy-side liquidity 4303.15" in texts
-    # 5m pool 4309.52 is 4.16 away with ATR 4.4 (0.95 ATR): near only on the screen TF with a wide setting
-    assert "5m:liq:buy:4309.52" in {r.key for r in scan_setups(payload(), liquidity_atr=1.0, screen_tf="5m")}
+    # the 5m screen TF is the confirmation timeframe: its pools are never a location, however wide the setting
+    assert "5m:liq:buy:4309.52" not in {r.key for r in scan_setups(payload(), liquidity_atr=1.0, screen_tf="5m")}
 
 
 def test_divergence_and_footprint_keys():
@@ -239,11 +239,81 @@ def test_a_new_zone_fires_weak_only_at_weak_min():
     # the same zone with the fixture's 15m bearish engulfing inside it: zone + reversal candle = 2 → a call
     d = screen(add_zone(payload(), "15m"), last_signature=seen)
     assert d.fire and d.strength == "weak" and d.reasons[1] == "15m reversal candle (bearish_engulfing) inside a zone"
+    # a 5m zone is not a location (5m = confirmation only): a 15m zone + a 5m zone is still 1 weak reason
     two = add_zone(add_zone(plain(), "15m"), "5m", "order_blocks")
-    d = screen(two, last_signature=seen)
+    assert not screen(two, last_signature=seen).fire
+    # a 15m zone + a new 5m BOS (confirmation at the location) = 2 → a call; then quiet on the next screen
+    conf = add_event(add_zone(plain(), "15m"), "5m", "BOS")
+    d = screen(conf, last_signature=seen)
     assert d.fire and d.strength == "weak" and len(d.reasons) == 2
-    # already dispatched with those zones inside → quiet on the next screen
-    assert not screen(two, last_signature=d.signature).fire
+    assert not screen(conf, last_signature=d.signature).fire
+
+
+def test_weak_calls_need_a_location_when_configured():
+    seen = screen(payload()).signature                        # the fixture has no zone / liquidity at the price
+    confirmations = add_event(plain(), "5m", "BOS")
+    confirmations["orderflow"]["footprint"] = {"data_quality": "real", "timeframe": "15m", "bars": [
+        {"time": last_bar(confirmations, "15m"), "stacked_buy": [], "stacked_sell": [], "absorption": "bid"}]}
+    assert not any(r.kind == "location" for r in scan_setups(confirmations, screen_tf="5m"))
+    # 5m BOS + absorption = 2 new weak reasons, but nowhere: no call with the rule, a call without it
+    assert not screen(confirmations, last_signature=seen, weak_needs_location=True).fire
+    d = screen(confirmations, last_signature=seen, weak_needs_location=False)
+    assert d.fire and d.strength == "weak"
+    # the same confirmations inside a 15m zone (or at 1h liquidity) → a call; the location may be an old key
+    at_zone = add_event(add_zone(plain(), "15m"), "5m", "BOS")
+    d = screen(at_zone, last_signature=seen, weak_needs_location=True)
+    assert d.fire and d.strength == "weak" and any("15m bullish fvg" in r for r in d.reasons)
+    zone_seen = screen(add_zone(plain(), "15m"), weak_min=1).signature
+    confirmations_at_old_zone = add_event(add_zone(plain(), "15m"), "5m", "BOS")
+    confirmations_at_old_zone["orderflow"]["footprint"] = confirmations["orderflow"]["footprint"]
+    d = screen(confirmations_at_old_zone, last_signature=zone_seen, weak_needs_location=True)
+    assert d.fire and d.strength == "weak"
+    liq = add_event(plain(), "5m", "BOS")
+    liq["orderflow"]["footprint"] = confirmations["orderflow"]["footprint"]
+    assert screen(liq, last_signature=seen, liquidity_atr=0.6, weak_needs_location=True).fire   # 1h pool 0.51 ATR
+    # strong setups never need a location
+    assert screen(add_event(payload(), "15m", "BOS"), last_signature=seen, weak_needs_location=True).fire
+
+
+def test_a_repeated_sweep_of_the_same_pool_is_one_setup():
+    first = screen(payload())
+    assert SWEEP_1H in first.signature
+    q = payload()                                  # the next 1h bar sweeps the same pool again → not new
+    q["timeframes"]["1h"]["recent"].append(["2026-09-25T10:00:00.000Z"] + q["timeframes"]["1h"]["recent"][-1][1:])
+    q["timeframes"]["1h"]["structure"]["events"].append({"time": "2026-09-25T10:00:00.000Z", "kind": "sweep",
+                                                         "dir": "bearish", "level": 4295.76})
+    assert SWEEP_1H in setup_signature(scan_setups(q)) and not screen(q, last_signature=first.signature).fire
+    q["timeframes"]["1h"]["structure"]["events"][-1]["level"] = 4290.0          # a different pool → a new setup
+    assert screen(q, last_signature=first.signature).fire
+
+
+def test_5m_candles_and_flow_alone_at_a_seen_location_wait_for_the_models_review():
+    zone = add_zone(plain(), "15m")
+    seen = screen(zone, weak_min=1).signature                      # the model already saw price in this zone
+    p = add_zone(plain(), "15m")
+    p["timeframes"]["5m"]["patterns"]["last_bar"] = ["bullish_engulfing"]
+    p["orderflow"]["footprint"] = {"data_quality": "real", "timeframe": "15m", "bars": [
+        {"time": last_bar(p, "15m"), "stacked_buy": [[4304.0, 4305.0]], "stacked_sell": [], "absorption": None}]}
+    assert not screen(p, last_signature=seen, weak_needs_location=True).fire      # 5m candle + stacked: 2 new, no carrier
+    assert screen(p, last_signature=seen, weak_needs_location=False).fire
+    add_event(p, "5m", "BOS")                                                       # + a 5m break = price action → a call
+    assert screen(p, last_signature=seen, weak_needs_location=True).fire
+    q = add_zone(plain(), "15m")                                                    # a decision-TF candle carries too
+    q["timeframes"]["15m"]["patterns"]["last_bar"] = ["bullish_pin_bar"]
+    q["orderflow"]["footprint"] = p["orderflow"]["footprint"]
+    assert screen(q, last_signature=seen, weak_needs_location=True).fire
+
+
+def test_5m_reversal_candle_counts_only_at_a_location():
+    p = plain()
+    p["timeframes"]["5m"]["patterns"]["last_bar"] = ["bullish_pin_bar"]
+    assert not any(r.key.startswith("5m:pattern") for r in scan_setups(p, screen_tf="5m"))
+    q = add_zone(copy.deepcopy(p), "15m")
+    pat = [r for r in scan_setups(q, screen_tf="5m") if r.key.startswith("5m:pattern")]
+    assert len(pat) == 1 and pat[0].kind == "pattern" and pat[0].strength == "weak" and "at the location" in pat[0].text
+    # 5m zones are never scanned as locations, and a 5m zone alone does not make a 5m candle count
+    r = add_zone(copy.deepcopy(p), "5m", "order_blocks")
+    assert not any(x.key.startswith("5m:") for x in scan_setups(r, screen_tf="5m"))
 
 
 def test_a_new_5m_bos_alone_does_not_call_but_a_new_15m_bos_does():
