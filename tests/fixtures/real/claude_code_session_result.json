@@ -1,0 +1,97 @@
+{
+ "duration_api_ms": 78137,
+ "stop_reason": "end_turn",
+ "session_id": "00000000-0000-0000-0000-000000000000",
+ "total_cost_usd": 0.40220599999999995,
+ "usage": {
+  "input_tokens": 18,
+  "cache_creation_input_tokens": 27314,
+  "cache_read_input_tokens": 176610,
+  "output_tokens": 7415,
+  "output_tokens_details": {
+   "thinking_tokens": 5237
+  },
+  "server_tool_use": {
+   "web_search_requests": 0,
+   "web_fetch_requests": 0
+  },
+  "service_tier": "standard",
+  "cache_creation": {
+   "ephemeral_1h_input_tokens": 27314,
+   "ephemeral_5m_input_tokens": 0
+  },
+  "inference_geo": "not_available",
+  "iterations": [
+   {
+    "input_tokens": 2,
+    "output_tokens": 2389,
+    "cache_read_input_tokens": 26177,
+    "cache_creation_input_tokens": 1137,
+    "cache_creation": {
+     "ephemeral_5m_input_tokens": 0,
+     "ephemeral_1h_input_tokens": 1137
+    },
+    "type": "message"
+   }
+  ],
+  "speed": "standard"
+ },
+ "modelUsage": {
+  "claude-opus-5-5": {
+   "inputTokens": 18,
+   "outputTokens": 7415,
+   "cacheReadInputTokens": 176610,
+   "cacheCreationInputTokens": 27314,
+   "webSearchRequests": 0,
+   "costUSD": 0.40220599999999995,
+   "contextWindow": 1000000,
+   "maxOutputTokens": 128000,
+   "thinkingTokens": 5237,
+   "canonicalModel": "claude-opus-5-5",
+   "provider": "firstParty",
+   "costBasis": "list"
+  }
+ },
+ "permission_denials": [],
+ "terminal_reason": "completed",
+ "fast_mode_state": "off",
+ "fast_mode_disabled_reason": "sdk_opt_in_required",
+ "subagent_stats": {
+  "spawned": 0,
+  "requested": {
+   "background": 0,
+   "foreground": 0,
+   "unset": 0
+  },
+  "started_in_background": 0,
+  "max_depth": 0,
+  "spawned_by_subagents": 0,
+  "completed": 0,
+  "failed": 0,
+  "killed": {
+   "parent": 0,
+   "user": 0,
+   "system": 0
+  },
+  "refused": {
+   "depth_limit": 0,
+   "concurrency_limit": 0,
+   "budget": 0
+  },
+  "by_type": {}
+ },
+ "is_error": false,
+ "num_turns": 10,
+ "subtype": "success",
+ "api_error_status": null,
+ "result": "No overlay changes and no proposals today. No pair has enough resolved outcomes for tuning (BTCUSDT 4, ETHUSDT 1, XAUUSD 0, against 20 needed for strategy keys and 10 for activity keys), and nothing below is a proven defect.\n\n## SUMMARY\nlevel: info\nDaily review, 24h to 12:56 UTC. Nothing needs you today. Kill switches off, drawdown 0%, no open positions or orders, equity 103.85.\nBTCUSDT: 45 answers (29 NO_TRADE), 4 ideas, 2 placed, both closed in profit (+4.07 USD, +1.37R and +1.02R virtual). The gate rejected 2: rr_after_costs would have lost -1R, sl_max_distance would have won +0.80R. 4 AI errors, all ones the code already handles: OAuth refresh race, 403, session limit and one 180s timeout. Only the timeout was in the last 6h.\nETHUSDT: 36 of 37 valid answers were NO_TRADE while price stayed in the 2706-2724 box, so the filter is working. 1 idea, rejected for correlated_exposure; it would have won +1.03R virtual. 1 session-limit error.\nXAUUSD: 0 screens and 0 AI calls because it is the weekend and the gold market is closed. The Binance XAUUSDT feed was killed and restarted 21 times between 22:57 and 23:19 UTC because its heartbeat stopped, then recovered. That feed is not used yet (flow proxy not approved), so it cost nothing. binance_spot shows stopped because gold has no spot symbol, which is expected.\nData: 5 data_not_ready events (15m bar stored late), BTC and ETH, 08:45-09:46 UTC, around the 09:18 restart. None since.\nAI: 76 calls (70 ok), 1.49M tokens in. Cache-read share is 0.28, below 0.5. This is probably because calls are far apart, not a fault, but check it if costs matter. Usage gauge at level 0 (5h 18%, week 17%).\nMetrics: MFE/MAE count is 0 for every idea, likely because the Phase 4 metrics code is not running yet. Escalations (14 decision calls) are not broken down in the pack.\nTuning: no changes, since no pair has enough resolved outcomes (BTC 4, ETH 1, 20 needed). No proposals.\nNote: heartbeats in the data folder stopped advancing while I worked, so I could not confirm the systems are still running.",
+ "ttft_ms": 19179,
+ "type": "result",
+ "duration_ms": 93195,
+ "uuid": "00000000-0000-0000-0000-000000000000",
+ "ttft_stream_ms": 1510,
+ "time_to_request_ms": 255,
+ "first_content_frame_ms": 1510,
+ "queued_turn_count": 0,
+ "result_index": 0
+}

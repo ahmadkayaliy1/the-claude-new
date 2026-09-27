@@ -84,6 +84,12 @@ def pack_stamp(now: int) -> str:
     return time.strftime(TS_FORMAT, time.gmtime(now / 1000))
 
 
+# what a ledger role is (the live review read the trader's 'decision' rows as escalations)
+ROLE_NOTES = {"decision": " (the trader's cycle calls)", "agent_per_pair": " (trader calls recorded before Phase 3)",
+              "escalation": " (stronger-model confirmations)", "review": " (operator review sessions)",
+              "diagnose": " (monitor diagnosis sessions)"}
+
+
 def reviews_dir(s: Settings) -> Path:
     """``data/reviews`` under the data root (shared by every system; honours a scratch root)."""
     return s.paths.data() / "reviews"
@@ -520,7 +526,7 @@ def pair_report(s: Settings, pair: str, since: int, now: int, usage_rows: dict[s
         rep["attribution"] = {k: _breakdown(ideas, k) for k in ("session", "regime", "setup_kinds", "trigger_strength")}
         rep["position_actions"] = _position_actions(con, pair, since)
         rep["rule_executions"] = _rule_executions(con, pair, since)
-        rep["escalations"] = _escalations(con, pair, since)
+        rep["escalations"] = {**_escalations(con, pair, since), "enabled": s.ai.escalation.enabled}
         rep["tuning_changes"] = _tuning_changes(con, pair, since)
         rep["prompt_versions"] = _prompt_versions(con, since)
         # the hashes in force = the latest decision that recorded them; the memory = the latest valid answer
@@ -911,7 +917,7 @@ def _render(d: dict[str, Any], n_ideas: int, n_health: int, n_rows: int) -> str:
           f"{_num(t['cache_read_share'])}) · out {t['output']:,} · turns {t['turns']} · API-equivalent "
           f"${t['api_equivalent_usd']}")
         for r, x in sorted(u["by_role"].items()):
-            p(f"- role {r}: {x['calls']} calls ({x['ok']} ok), in {x['input']:,} (cache-read "
+            p(f"- role {r}{ROLE_NOTES.get(r, '')}: {x['calls']} calls ({x['ok']} ok), in {x['input']:,} (cache-read "
               f"{_num(x['cache_read_share'])}), out {x['output']:,}")
     gz = u.get("gauge") or {}
     if gz.get("error"):
@@ -989,7 +995,9 @@ def _render(d: dict[str, Any], n_ideas: int, n_health: int, n_rows: int) -> str:
         p(f"rule executions (management_state touched in the window): {re_.get('n', 0)} "
           f"({_counts(collections.Counter(re_.get('by_status') or {}))})")
         es = r.get("escalations") or {}
-        if es.get("n"):
+        if not es.get("n"):     # said explicitly: the live review read the 'decision' role rows as escalations
+            p("escalations 0 (ai.escalation.enabled is " + ("on" if es.get("enabled") else "off") + ")")
+        else:
             p(f"escalations {es['n']}: {_counts(collections.Counter(es['verdicts']))}")
             for e in es["last"][:n_rows]:
                 p(f"- {e['time']} {e['decision_id']} {e['verdict']} ({e['label']}) {'; '.join(e['issues'])}")

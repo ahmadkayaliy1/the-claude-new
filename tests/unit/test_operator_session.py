@@ -459,3 +459,12 @@ def test_the_prompt_fills_the_checklist_and_never_reparses_the_reason(rs, tmp_pa
     assert text.startswith("# Diagnosis 20260927T120000Z_diagnose")
     assert "order burst $pair (4 orders)" in text and "at most 900 characters" in text
     assert text.endswith("price $5 and $pair stay literal") and "$review_id" not in text
+
+
+def test_the_real_session_result_is_parsed(rs):
+    """The Phase 4 live daily review (Opus, 10 turns): a finished session with the ledger's token convention."""
+    raw = (Path(__file__).resolve().parents[1] / "fixtures" / "real" / "claude_code_session_result.json").read_text(
+        encoding="utf-8")
+    out = rs.parse_result(raw, "", 0)
+    assert out["status"] == "ok" and not out.get("error")
+    assert out["ledger_tokens"] == {"input": 18 + 176_610 + 27_314, "cached": 176_610, "output": 7_415}
