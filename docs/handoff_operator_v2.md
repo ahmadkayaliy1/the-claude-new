@@ -60,8 +60,12 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
   interrupted cycles and transient retries, OI fix, demo report + go-live checklist; B "goes deeper": §3.9 items
   1, 3, 6, 12, 5, 4, 7 + the one live call, then 10, 11, 13), then a declared 28-day demo window and the go-live
   checklist (§3.9.1). New owner rows H27–H31 (charger/never shut down, recorder restart, git remote + backup
-  off-machine, the `ai:`/`monitor:` block in config.local.yaml, branch/worktree cleanup). Next: the owner's H20 →
-  H19 → H18 → H27–H30, merge this docs branch (`docs/phase5-plan`, ff, no restart), then the kickoff in §3.9.1.
+  off-machine, the `ai:`/`monitor:` block in config.local.yaml, branch/worktree cleanup). **Same day:** the owner did
+  H20 (stop_all 21:26 UTC → merge → start_all 21:50 UTC; Phase 4 LIVE), H19 (the three `TradingSystemOps-*` tasks;
+  the first monitor run at 22:20 UTC warned "low free RAM 147 MB" and started a Sonnet diagnosis — ok, 114 s, no
+  action — so `monitor.diagnose_enabled: false` until A4), H29 (origin = github.com/ahmadkayaliy1/the-claude-new,
+  private, every branch pushed), H27/H28/H30; XAU's first-ever call happened on the closed Saturday market (A5).
+  D-047: the demo window is 5 days, not 28; H18 and the H12 remainder deferred. Next: the kickoff in §3.9.1.
 
 * **2026-09-27 — Phase 4 (P12.4, D-045) is DONE on branch `feat/phase4-watches-learns` (worktree
   `C:\the_claude_new_wt\phase4`); production still runs Phase 3 on `main` until the user's H20.** 1208 unit tests.
@@ -874,6 +878,12 @@ built, in which order, and what is deferred. Where the two differ, this section 
   the `monitor:` block goes in only after the H20 merge — Phase 3 code refuses unknown sections)
   and development sessions run right after a 5-hour reset (21:00 / 02:00 / 07:00 / 12:00 / 17:00 UTC); before go-live
   a second Claude account for production or an API key with hard USD caps (a D entry then).
+- Demo window (amended the same day, D-047): **5 days** from the H20 restart (2026-09-27 21:50 UTC → 2026-10-02),
+  not 28 — the owner's choice; the go-live checklist therefore reports the evidence it has (resolved outcomes, gate
+  classes, availability, incidents) instead of requiring 30 outcomes per pair, and the sample-size statement applies
+  with more force (five days show the absence of catastrophic behaviour and the execution quality, nothing about an
+  edge). H18 (Telegram) and the remaining H12 items (Defender offline scan, password rotation, KMSAuto) are deferred by
+  the owner; the notifier works with the log line and the Windows toast.
 - The ExpressVPN stays as it is: the owner wants it running; nothing in the code, the docs or the sessions asks to
   change, split or disable it. The monitor only learns its adapter name (`monitor.vpn_adapter_names`, H30) so the
   up/down flips are visible; the DNS/connect bursts (≈ 56 disconnects a day on BTC, all healed) are accepted.
@@ -944,25 +954,26 @@ merge/restart steps in Arabic (**H26b**) — stating whether the prompt/legend c
 
 | When | What |
 |---|---|
-| Week 0 | The owner's steps (H20, H19, H18, H27–H30); the demo evaluation window is declared from the H20 date (+28 days). |
-| Week 1 | Checkpoint A merged (H26a); the backup task live; the recorder reaches 72 h → P7.1 → H5 (`max_basis_deviation_pct` from the measured p95); first weekly review pack; H21 gauge calibration after the week. |
-| Week 2 | Checkpoint B merged (H26b); XAU cycles observed; the gold-study verdict → H25 or not. |
-| Weeks 2–4 | Demo continues on Phase 4+5 code; tuning only after ≥ 20 resolved outcomes per pair; no config changes except recorded ones; every incident goes into the demo report with its detection time. |
-| Week 5 | `tools/demo_report.py` → `docs/runs/demo.md`; the checklist filled by `go_live_inputs.py`; the owner's D entries (pairs, subscription route, hardware); a live-refusal rehearsal on a scratch root (`EXECUTION_MODE=live` + the phrase against the demo terminal must fail "account mismatch"; a separate live terminal); a backup restored once; tests green on the exact commit. |
-| Go-live (H9, the owner only) | ONE pair (ETH) at the minimum lot for two weeks, then add pairs; XAU excluded until item 10 and P1.11 pass. Production on a machine that is not the development laptop (a 16 GB upgrade or a small dedicated Windows box) removes sleep, battery, development RAM and shared-plan interference at once. |
+| Days 0–5 (2026-09-27 21:50 UTC → 2026-10-02) | The demo window on Phase 4 code (D-047: 5 days) while checkpoint A is built; the owner's H27–H30 done, H18 and the H12 remainder deferred. |
+| Day ≈ 3–5 | Checkpoint A merged (H26a): backup task live, recorder task, monitor rules, `tools/demo_report.py` → `docs/runs/demo.md` over the window, `docs/go_live_checklist.md` filled by `go_live_inputs.py`; the recorder reaches 72 h → P7.1 → H5. |
+| Day ≈ 5 | The owner's go-live decision (H9) on the checklist as it stands: ONE pair (ETH) at the minimum lot, everything else stays demo; the live-refusal rehearsal on a scratch root (`EXECUTION_MODE=live` + the phrase against the demo terminal must fail "account mismatch") and one restored backup come first. |
+| Days 5–12 | Checkpoint B built and merged (H26b) while the first pair trades live at the minimum lot; XAU cycles observed; the gold-study verdict → H25 or not; H21 gauge calibration after a week. |
+| Later | More pairs only on the weekly review's evidence; XAU excluded until item 10 and P1.11 pass. Production on a machine that is not the development laptop (a 16 GB upgrade or a small dedicated Windows box) removes sleep, battery, development RAM and shared-plan interference at once. |
 
 **Go-live checklist thresholds** (the session writes them into `docs/go_live_checklist.md`, the owner signs):
-≥ 28 demo days on Phase 4+ code; ≥ 30 resolved outcomes per live pair; availability ≥ 95 % of 15m cycles; 0 positions
-ever without SL; no daily-loss or drawdown trip; every gate rejection in an expected class; calls/day ≤ cap with ≤ 1
-subscription-limit error per week; monitor MTTD ≤ 15 min proven by one drill; median `snapshot_build_ms` ≤ 3 s; free
-RAM ≥ 1 GB; 0 sleep/shutdown events in the last 14 days; a backup restored once; P7.2 decided; tests green on the live
-commit; the sample-size statement acknowledged (four weeks show the absence of catastrophic behaviour and the execution
-quality, not a statistical edge).
+the 5 demo days on Phase 4+ code complete (D-047); the resolved outcomes per pair REPORTED (not required — five days
+cannot reach 30); availability ≥ 95 % of 15m cycles; 0 positions ever without SL; no daily-loss or drawdown trip; every
+gate rejection in an expected class; calls/day ≤ cap with ≤ 1 subscription-limit error in the window; monitor MTTD
+≤ 15 min proven by one drill; median `snapshot_build_ms` ≤ 3 s; free RAM ≥ 1 GB; 0 sleep/shutdown events in the
+window; a backup restored once; P7.2 decided or explicitly deferred; tests green on the live commit; the sample-size
+statement acknowledged (five days show the absence of catastrophic behaviour and the execution quality, not a
+statistical edge — the owner signs that knowingly).
 
 #### Kickoff text for the implementing session (Opus 5.5)
 
-Prerequisites the owner completes first: H20 verified (the "phase 4:" line, `logs\monitor.jsonl`, `decision_metrics`
-rows), H19, H18 (recommended), H27–H30, and this docs branch merged. Start right after a 5-hour reset.
+Prerequisites (done 2026-09-27/28): H20 verified (the "phase 4:" line, `logs\monitor.jsonl`, `decision_metrics` rows),
+H19, H27–H30, this docs branch merged; H18 and the H12 remainder deferred by the owner. Start right after a 5-hour
+reset when possible, with Chrome closed (RAM).
 
 ```
 Continue from docs/handoff_operator_v2.md: read §0b (newest entries: 2026-09-28 Phase 5 plan approved; 2026-09-27
