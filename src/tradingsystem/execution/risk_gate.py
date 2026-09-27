@@ -55,6 +55,23 @@ class GateResult:
         return [f"{n}: {d}" for n, ok, d in self.checks if not ok]
 
 
+RR_EPS = 1e-6          # a reward-to-risk equal to the minimum within float noise passes
+
+
+def _rr_ok(rr: float, min_rr: float) -> bool:
+    return rr >= min_rr - RR_EPS
+
+
+def _rr_text(rr: float, min_rr: float, ok: bool) -> str:
+    """``1.500 ≥ 1.5`` / ``1.4996 < 1.5``: 3 decimals, more when rounding would show a value on the wrong side of
+    the limit (RR 1.4996 printed as "1.50 ≥ 1.5" read as a failed pass — the model reads this in ``gate_reason``)."""
+    for d in (3, 4, 6):
+        s = f"{rr:.{d}f}"
+        if _rr_ok(float(s), min_rr) == ok:
+            break
+    return f"{s} {'≥' if ok else '<'} {min_rr}"
+
+
 def entry_price(rec: dict, bid: float, ask: float) -> float | None:
     """Executable entry: MARKET at the touch side; pending orders at the worst edge of their zone."""
     buy = rec["decision"] == "BUY"
@@ -136,7 +153,8 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
     frac = sum(tp["close_fraction"] for tp in tps)
     reward = sum(((tp["price"] - entry) if buy else (entry - tp["price"])) * tp["close_fraction"] for tp in tps) / frac
     rr = reward / risk_dist
-    add("rr_after_costs", rr >= risk.min_rr, f"{rr:.2f} ≥ {risk.min_rr}")
+    ok = _rr_ok(rr, risk.min_rr)
+    add("rr_after_costs", ok, f"{_rr_text(rr, risk.min_rr, ok)}")
     tgt = min(rec.get("risk_management", {}).get("risk_percent_suggested", risk.risk_per_trade_pct),
               risk.risk_per_trade_pct)
     size = size_position(equity=ctx.equity, target_risk_pct=tgt, max_risk_pct=risk.max_risk_per_trade_pct,
@@ -151,8 +169,9 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
         tp = tps[single]["price"]
         rr = ((tp - entry) if buy else (entry - tp)) / risk_dist
         i = next(k for k, c in enumerate(checks) if c[0] == "rr_after_costs")
-        checks[i] = ("rr_after_costs", rr >= risk.min_rr,
-                     f"{rr:.2f} ≥ {risk.min_rr} (single leg at TP{single + 1}: {size.lots} lots cannot be split)")
+        ok = _rr_ok(rr, risk.min_rr)
+        checks[i] = ("rr_after_costs", ok, f"{_rr_text(rr, risk.min_rr, ok)} (single leg at TP{single + 1}: "
+                                           f"{size.lots} lots cannot be split)")
     if size.ok:
         notional = size.lots * ctx.contract_size * entry
         lev = notional / ctx.equity

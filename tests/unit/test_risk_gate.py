@@ -111,3 +111,14 @@ def test_daily_worst_case_counts_open_risk_and_the_new_trade():
     assert ok.approved, ok.failures()                                           # −6 − 3 − 0.48 = −9.5 %
     bad = evaluate(rec(), "XAUUSD", ctx(realized_pnl_today_usd=-600, open_risk_pct_by_pair={"BTCUSDT": 4.0}), r, [])
     assert [c for c, okc, _ in bad.checks if not okc] == ["daily_loss_worst_case"]  # −6 − 4 − 0.48 < −10 %
+
+
+def test_rr_detail_never_shows_a_value_on_the_wrong_side_of_the_limit():
+    """Phase 3 live follow-up (9): RR 1.4996 was printed "1.50 ≥ 1.5" on a failed check."""
+    from tradingsystem.execution.risk_gate import _rr_ok, _rr_text
+    assert not _rr_ok(1.4996, 1.5) and _rr_text(1.4996, 1.5, False) == "1.4996 < 1.5"
+    assert _rr_ok(1.5 - 1e-9, 1.5) and _rr_text(1.5 - 1e-9, 1.5, True) == "1.500 ≥ 1.5"   # float noise passes
+    assert _rr_text(1.6123, 1.5, True) == "1.612 ≥ 1.5" and _rr_text(1.2, 1.5, False) == "1.200 < 1.5"
+    r = rec(take_profits=[{"price": 4310.0, "close_fraction": 1.0}])
+    [c] = [c for c in evaluate(r, "XAUUSD", ctx(), RISK, []).checks if c[0] == "rr_after_costs"]
+    assert not c[1] and "<" in c[2] and "≥" not in c[2]

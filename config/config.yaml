@@ -230,6 +230,13 @@ ai:
     max_per_day_per_pair: 6
     on_failure: withhold               # withhold | keep
     timeout_s: 150
+  usage:                               # Phase 4 usage gauge: rolling token sums of every Claude call (ledger)
+    weekly_token_budget: 12000000      # calibration guesses until a week of data exists (H21)
+    five_hour_token_budget: 1500000
+    cache_read_weight: 0.1             # a cached input token counts this much
+    level1_pct: 70                     # >= : reviews and events only
+    level2_pct: 90                     # >= : events only
+    enforce: false                     # false = published only (status, health report, review pack), never rations
   consensus_providers: []
   budget:                              # D-004 Cost Governor
     daily_usd_cap: 0.0                 # 0 = paid providers blocked (free tier only for now)
@@ -328,3 +335,35 @@ api:
   host: 127.0.0.1
   port: 8765
   token_env: DASHBOARD_TOKEN
+
+adaptive:                              # Phase 4 (D-039): bounded per-pair overlay in data/adaptive/<PAIR>/ (tools/tune.py)
+  enabled: true                        # false = defaults everywhere, tune.py refuses every change
+  max_expiry_days: 14
+  cooldown_days: 7                     # per key
+  max_changes_per_day: 1               # per pair
+  min_samples_strategy: 20             # resolved virtual outcomes in the window
+  min_samples_activity: 10
+  unhealthy_freeze_pct: 25             # no tuning when more of the window than this was unhealthy
+
+notify:                                # Phase 4 (D-043): log line + Windows toast + Telegram (H18: .env TELEGRAM_*)
+  enabled: true
+  toast: true
+  telegram: true                       # used only when TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set
+  min_level: info                      # info | warn | critical
+  rate_per_hour: 20                    # per process
+  dedupe_minutes: 30
+
+monitor:                               # Phase 4: tools/monitor.py every 15 min (Task Scheduler, H19), no Claude
+  stale_heartbeat_min: 15
+  order_burst_per_hour: 3              # more orders of one pair in an hour → that pair's KILL_SWITCH
+  equity_drop_warn_pct: 5              # between two runs
+  equity_drop_kill_pct: 10             # … → the global KILL_SWITCH
+  free_ram_warn_mb: 300
+  snapshot_build_warn_ms: 3000         # engine payload build time (5-min screening)
+  vpn_adapter_names: []                # e.g. ["Local Area Connection 4"] (ExpressVPN TUN)
+  diagnose_enabled: true               # a warning starts a Claude diagnosis session (at most every 3 h)
+
+operator:                              # Phase 4: Claude review sessions from Task Scheduler (tools/operator, H19)
+  daily_max_turns: 30
+  weekly_max_turns: 40
+  diagnose_max_turns: 12

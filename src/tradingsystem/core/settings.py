@@ -29,6 +29,7 @@ LOCAL_CONFIG = PROJECT_ROOT / "config" / "config.local.yaml"
 DEFAULT_ENV = PROJECT_ROOT / ".env"
 
 LIVE_CONFIRMATION_PHRASE = "I ACCEPT REAL-MONEY TRADING RISK"
+TELEGRAM_SECRET_ENV = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")   # Phase 4 notifier (H18), read with secret()
 
 Venue = Literal["binance_spot", "binance_usdm", "mt5"]
 DataType = Literal[
@@ -352,6 +353,26 @@ class AIEscalationCfg(_Model):
     timeout_s: float = Field(150.0, ge=30, le=600)
 
 
+class AIUsageCfg(_Model):
+    """Ledger-based usage gauge (Phase 4): rolling 7-day / 5-hour token sums of every Claude call (decisions,
+    escalations, operator sessions) against budgets. The budgets are calibration guesses until a week of data exists
+    (H21); until ``enforce`` is set the gauge is only published (status, health report, review pack) and never
+    rations calls — the CLI's own usage limit stays the hard stop."""
+    weekly_token_budget: int = Field(12_000_000, ge=100_000)
+    five_hour_token_budget: int = Field(1_500_000, ge=10_000)
+    cache_read_weight: float = Field(0.1, ge=0.0, le=1.0)   # a cached input token counts this much
+    level1_pct: float = Field(70.0, gt=0, le=100)           # ≥ → reviews and events only
+    level2_pct: float = Field(90.0, gt=0, le=100)           # ≥ → events only
+    enforce: bool = False
+    cache_s: float = Field(60.0, ge=5, le=600)              # the sums are re-read at most this often
+
+    @model_validator(mode="after")
+    def _levels(self) -> "AIUsageCfg":
+        if self.level1_pct >= self.level2_pct:
+            raise ValueError("ai.usage.level1_pct must be below level2_pct")
+        return self
+
+
 class AICfg(_Model):
     active_provider: str
     fallback_provider: str | None = None    # used while the active provider is unavailable (D-030)
@@ -379,6 +400,7 @@ class AICfg(_Model):
     charts: ChartsCfg = ChartsCfg()
     models: AIModelsCfg = AIModelsCfg()
     escalation: AIEscalationCfg = AIEscalationCfg()
+    usage: AIUsageCfg = AIUsageCfg()
 
     @model_validator(mode="after")
     def _check_provider(self) -> "AICfg":
@@ -424,6 +446,75 @@ class SupervisorCfg(_Model):
     child_log_backups: int = 2
 
 
+class AdaptiveSettings(_Model):
+    """The per-pair adaptive overlay (Phase 4, D-039): ``data/adaptive/<PAIR>/`` holds bounded, expiring values and a
+    playbook written only by ``tools/tune.py``; the services re-read them without a restart."""
+    enabled: bool = True                     # false = defaults everywhere and tune.py refuses every change
+    reload_check_s: float = Field(5.0, ge=1, le=60)
+    max_expiry_days: int = Field(14, ge=1, le=30)
+    cooldown_days: int = Field(7, ge=0, le=30)          # per key
+    max_changes_per_day: int = Field(1, ge=1, le=5)     # per pair and UTC day
+    min_samples_strategy: int = Field(20, ge=1)         # resolved virtual outcomes in the window (floor, trigger, hints)
+    min_samples_activity: int = Field(10, ge=1)         # … for keys that only reduce activity (spacing, idle, pause)
+    unhealthy_freeze_pct: float = Field(25.0, ge=0, le=100)
+    default_window_hours: int = Field(168, ge=24, le=720)
+
+
+class NotifyCfg(_Model):
+    """Notifications (D-043): always a log line; a Windows toast; Telegram when TELEGRAM_BOT_TOKEN and
+    TELEGRAM_CHAT_ID are in .env (H18). Never raises into the caller."""
+    enabled: bool = True
+    toast: bool = True
+    telegram: bool = True
+    min_level: Literal["info", "warn", "critical"] = "info"
+    toast_min_level: Literal["info", "warn", "critical"] = "info"
+    rate_per_hour: int = Field(20, ge=1, le=500)         # per process
+    dedupe_minutes: int = Field(30, ge=0, le=1440)       # same key → one message (shared by every system)
+    timeout_s: float = Field(10.0, ge=1, le=60)
+
+
+class MonitorCfg(_Model):
+    """The pure-Python monitor (tools/monitor.py, every 15 min from Task Scheduler; docs/monitoring.md)."""
+    enabled: bool = True
+    stale_heartbeat_min: int = Field(15, ge=2)
+    ipc_hung_min: int = Field(5, ge=1)
+    order_burst_per_hour: int = Field(3, ge=1)          # more 'order' events per pair and hour → that pair's switch
+    daily_loss_warn_margin_pct: float = Field(2.0, ge=0)    # warn at −(risk.max_daily_loss_pct − margin)
+    equity_drop_warn_pct: float = Field(5.0, gt=0)      # between two runs
+    equity_drop_kill_pct: float = Field(10.0, gt=0)     # … → the global switch
+    quote_stale_min: int = Field(10, ge=1)
+    free_ram_warn_mb: int = Field(300, ge=0)
+    free_disk_warn_gb: float = Field(5.0, ge=0)
+    restart_loop_per_hour: int = Field(3, ge=1)
+    outage_warn_min: int = Field(10, ge=1)
+    vpn_adapter_names: list[str] = Field(default_factory=list)
+    review_overdue_hours: int = Field(30, ge=1)
+    snapshot_build_warn_ms: int = Field(3000, ge=100)   # the engine's payload build (5-min screening cost)
+    diagnose_enabled: bool = True                       # a warning or worse starts a Claude diagnosis session …
+    diagnose_every_hours: float = Field(3.0, ge=0.5)    # … at most this often
+
+    @model_validator(mode="after")
+    def _drops(self) -> "MonitorCfg":
+        if self.equity_drop_warn_pct >= self.equity_drop_kill_pct:
+            raise ValueError("monitor.equity_drop_warn_pct must be below equity_drop_kill_pct")
+        return self
+
+
+class OperatorCfg(_Model):
+    """Claude operator sessions from Task Scheduler (tools/operator; docs/operator_sessions.md)."""
+    enabled: bool = True
+    daily_max_turns: int = Field(30, ge=1, le=100)
+    weekly_max_turns: int = Field(40, ge=1, le=100)
+    diagnose_max_turns: int = Field(12, ge=1, le=100)
+    daily_timeout_min: int = Field(20, ge=1, le=120)
+    weekly_timeout_min: int = Field(40, ge=1, le=180)
+    diagnose_timeout_min: int = Field(15, ge=1, le=120)
+    daily_pack_hours: int = Field(24, ge=1, le=720)
+    weekly_pack_hours: int = Field(168, ge=1, le=720)
+    summary_max_chars: int = Field(1500, ge=100, le=4000)
+    record_usage: bool = True            # sessions are written to the shared AI ledger (role review / diagnose)
+
+
 # --------------------------------------------------------------------------- root
 class InstanceCfg(_Model):
     """One fully independent system for one pair (D-042): ``run all --instance <PAIR>``."""
@@ -450,6 +541,10 @@ class Settings(_Model):
     api: ApiCfg = ApiCfg()
     supervisor: SupervisorCfg = SupervisorCfg()
     instances: dict[str, InstanceCfg] = Field(default_factory=dict)
+    adaptive: AdaptiveSettings = AdaptiveSettings()
+    notify: NotifyCfg = NotifyCfg()
+    monitor: MonitorCfg = MonitorCfg()
+    operator: OperatorCfg = OperatorCfg()
 
     # populated by the loader, not by YAML
     config_hash: str = ""
@@ -518,6 +613,7 @@ class Settings(_Model):
         for n in (self.binance.api_key_env, self.binance.api_secret_env):
             if n:
                 names.add(n)
+        names.update(TELEGRAM_SECRET_ENV)         # the notifier's bot (H18): the chat id is personal data too
         names.update(k for k in os.environ if _SECRET_NAME_RE.search(k))
         return names
 

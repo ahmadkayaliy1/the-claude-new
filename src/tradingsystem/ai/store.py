@@ -41,11 +41,26 @@ _DDL = [
     "CREATE INDEX IF NOT EXISTS ai_sub_outputs_decision ON ai_sub_outputs(decision_id)",
     # the engine's small persistent state per pair (last setup signature, price at the last call, last event id)
     "CREATE TABLE IF NOT EXISTS engine_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ms INTEGER NOT NULL)",
+    # Phase 4 (§3.8): what happened after a decision, measured on real bars; the prompt versions in force; tuning
+    """CREATE TABLE IF NOT EXISTS decision_metrics (decision_id TEXT PRIMARY KEY, computed_ms INTEGER NOT NULL,
+        mfe_r REAL, mae_r REAL, tp1_hit INTEGER, tp2_hit INTEGER, tp3_hit INTEGER, minutes_to_resolve INTEGER,
+        exit_reason TEXT, slippage REAL, spread_at_gate REAL, commission REAL, swap REAL,
+        rejected_but_virtual_win INTEGER, no_trade_counterfactual_atr REAL, detail TEXT)""",
+    """CREATE TABLE IF NOT EXISTS prompt_versions (prompt_hash TEXT PRIMARY KEY, role TEXT NOT NULL,
+        library_hash TEXT NOT NULL, versions TEXT NOT NULL, git_sha TEXT, first_seen_ms INTEGER NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS tuning_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
+        pair TEXT NOT NULL, key TEXT NOT NULL, old_value TEXT, new_value TEXT, reason TEXT, evidence TEXT,
+        window_hours INTEGER, expires_ms INTEGER, review_id TEXT, actor TEXT, reverted_ms INTEGER)""",
+    "CREATE INDEX IF NOT EXISTS tuning_changes_pair_ts ON tuning_changes(pair, ts)",
 ]
 
 # Phase 3 columns (added in place on existing databases; old code ignores them)
 EXTRA_COLUMNS = (("actions_state", "TEXT"), ("library_hash", "TEXT"), ("trigger_strength", "TEXT"),
-                 ("setup_strength", "TEXT"))
+                 ("setup_strength", "TEXT"),
+                 # Phase 4 attribution (at record time) and the broker's outcome split (at settlement)
+                 ("setup_kinds", "TEXT"), ("session", "TEXT"), ("regime", "TEXT"), ("htf_bias", "TEXT"),
+                 ("data_warnings", "TEXT"), ("playbook_hash", "TEXT"), ("adaptive_hash", "TEXT"),
+                 ("outcome_detail", "TEXT"))
 ACTION_STATES = ("pending", "done")
 
 EXECUTION_STATES = ("not_executed", "queued", "executing", "executed", "rejected", "expired", "cancelled")
@@ -84,6 +99,14 @@ class DecisionRecord:
     library_hash: str | None = None          # the whole prompt library's hash (prompt versions in force)
     actions_state: str | None = None         # 'pending' while position_actions await the executor
     setup_strength: str | None = None        # a setup that would have called by itself (also under an event label)
+    # Phase 4 attribution: what the market looked like when the decision was made (from its payload)
+    setup_kinds: list[str] | None = None     # kinds of the setup reasons on screen (structure, location, pattern, flow)
+    session: str | None = None               # killzone or active session
+    regime: str | None = None                # decision-TF regime
+    htf_bias: str | None = None              # confluence bias
+    data_warnings: list[str] | None = None
+    playbook_hash: str | None = None         # the pair's playbook in force (adaptive overlay)
+    adaptive_hash: str | None = None         # the pair's adaptive values in force
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     ts: int = field(default_factory=now_ms)
 
@@ -128,14 +151,18 @@ class DecisionStore:
                 """INSERT INTO ai_decisions(id, ts, pair, mode, trigger, provider, model, prompt_hash, payload_hash,
                    config_hash, git_sha, status, decision, order_type, confidence, rr_computed, valid_until,
                    recommendation, raw_text, errors, cost_usd, latency_ms, input_tokens, output_tokens,
-                   trigger_strength, library_hash, actions_state, setup_strength)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   trigger_strength, library_hash, actions_state, setup_strength, setup_kinds, session, regime,
+                   htf_bias, data_warnings, playbook_hash, adaptive_hash)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (rec.id, rec.ts, rec.pair, rec.mode, rec.trigger, rec.provider, rec.model, rec.prompt_hash,
                  rec.payload_hash, self.config_hash, self.git_sha, rec.status, r.get("decision"), r.get("order_type"),
                  r.get("confidence"), rec.rr_computed, valid_until,
                  json.dumps(r, default=str) if r else None, rec.raw_text, json.dumps(rec.errors) if rec.errors else None,
                  rec.cost_usd, rec.latency_ms, rec.input_tokens, rec.output_tokens, rec.trigger_strength,
-                 rec.library_hash, rec.actions_state, rec.setup_strength))
+                 rec.library_hash, rec.actions_state, rec.setup_strength,
+                 json.dumps(rec.setup_kinds) if rec.setup_kinds is not None else None, rec.session, rec.regime,
+                 rec.htf_bias, json.dumps(rec.data_warnings) if rec.data_warnings is not None else None,
+                 rec.playbook_hash, rec.adaptive_hash))
             for s in rec.sub_outputs:
                 self._con.execute(
                     "INSERT INTO ai_sub_outputs(decision_id, role, label, provider, model, prompt_hash, ok, output, errors, cost_usd) "
