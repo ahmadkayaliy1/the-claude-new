@@ -7,9 +7,11 @@ until it passes that validation.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import datetime as dt
 import json
+import logging
 import os
 import re
 import time
@@ -23,7 +25,12 @@ from dotenv import dotenv_values
 from ...core.settings import DEFAULT_ENV, AIProviderCfg
 from ...core.timeutil import MS_PER_DAY, MS_PER_HOUR, iso, now_ms
 
+log = logging.getLogger(__name__)
+
 SchemaFlavor = Literal["anthropic", "gemini", "openai_strict", "plain"]
+# marker in the ProviderError raised when the Claude Code CLI accepts neither stream-json user-message shape: the
+# caller (ai/repair.py) retries the same attempt as text only — a decision is never lost because of the charts
+CHARTS_DISABLED = "charts_disabled_cli_shape"
 _DROP_ALWAYS = {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength",
                 "pattern", "minItems", "maxItems", "default", "title"}
 
@@ -52,6 +59,17 @@ class ImageInput:
     data: bytes
     media_type: str = "image/png"
     token_est: int = 0
+
+
+def image_content_blocks(user: str, images: list[ImageInput]) -> list[dict[str, Any]]:
+    """Anthropic Messages content blocks for a user turn with images: the prompt text first, then per image its
+    caption (so the model knows which timeframe it is looking at) followed by the base64 image."""
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": user}]
+    for img in images:
+        blocks.append({"type": "text", "text": img.label})
+        blocks.append({"type": "image", "source": {"type": "base64", "media_type": img.media_type,
+                                                   "data": base64.b64encode(img.data).decode("ascii")}})
+    return blocks
 
 
 class ProviderError(RuntimeError):
@@ -147,14 +165,20 @@ def extract_json(text: str) -> Any:
 
 
 class LLMProvider(ABC):
+    # True when ``_call`` accepts ``images=`` (chart images, Phase 3); other providers get text only (one warning)
+    supports_images: bool = False
+
     def __init__(self, name: str, cfg: AIProviderCfg, model: str, api_key: str | None) -> None:
         self.name, self.cfg, self.model, self.api_key = name, cfg, model, api_key
         self.cooldown_until_ms = 0
         self.cooldown_reason = ""
+        self._images_warned = False
 
     @abstractmethod
     async def _call(self, system: str, user: str, schema: dict | None, schema_name: str,
-                    max_output_tokens: int) -> LLMResult: ...
+                    max_output_tokens: int, *, images: list[ImageInput] | None = None) -> LLMResult:
+        """One model call. ``images`` is passed (as a keyword) only when there are images and the provider declares
+        ``supports_images`` — a text-only provider may implement the five-argument form."""
 
     def cool_down(self, until_ms: int, reason: str) -> None:
         """Take the provider out of rotation until ``until_ms`` (auth/model errors, quota or usage limits): the
@@ -168,10 +192,17 @@ class LLMProvider(ABC):
         return None
 
     async def generate(self, *, system: str, user: str, schema: dict | None = None, schema_name: str = "output",
-                       max_output_tokens: int | None = None) -> LLMResult:
+                       max_output_tokens: int | None = None, images: list[ImageInput] | None = None) -> LLMResult:
+        imgs = self.usable_images(images)
+        max_tokens = max_output_tokens or self.cfg.max_output_tokens
         t0 = time.perf_counter()
-        res = await self._call(system, user, schema, schema_name, max_output_tokens or self.cfg.max_output_tokens)
+        if imgs:
+            res = await self._call(system, user, schema, schema_name, max_tokens, images=imgs)
+        else:
+            res = await self._call(system, user, schema, schema_name, max_tokens)
         res.latency_ms = int((time.perf_counter() - t0) * 1000)
+        res.extra["images"] = len(imgs)
+        res.extra["image_tokens_est"] = sum(i.token_est for i in imgs)
         if res.data is None and res.text:
             try:
                 res.data = extract_json(res.text)
@@ -179,6 +210,18 @@ class LLMProvider(ABC):
                 res.data = None
         res.cost_usd = self.cost_of(res)
         return res
+
+    def usable_images(self, images: list[ImageInput] | None) -> list[ImageInput]:
+        """The images this provider will actually send: all of them, or none (with one warning per provider
+        instance) when it cannot take images — the call then goes out as text only."""
+        imgs = list(images or [])
+        if imgs and not self.supports_images:
+            if not getattr(self, "_images_warned", False):
+                log.warning("%s: this provider does not take images — %d chart image(s) dropped, text-only call",
+                            self.name, len(imgs))
+                self._images_warned = True
+            return []
+        return imgs
 
     def prices(self) -> tuple[float, float]:
         """(input, output) USD per million tokens for the active model (0, 0 when unknown)."""

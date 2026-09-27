@@ -28,19 +28,25 @@ from pydantic import ValidationError
 
 from ..analysis.snapshot import SnapshotBuilder, payload_hash
 from ..core.instruments import InstrumentRegistry
+from ..core.sessions import calendar_for
 from ..core.settings import Settings
-from ..core.timeutil import iso, now_ms, parse_date_spec
+from ..core.timeutil import MS_PER_DAY, iso, now_ms, parse_date_spec
 from .budget import CostGovernor, RateLimiter, UsageStore
-from .contract import (AssessmentSet, Decision, Recommendation, RecommendationSet, RiskReview,
+from .contract import (AssessmentSet, Decision, EscalationReview, Recommendation, RecommendationSet, RiskReview,
                        TimeframeAssessment)
 from .model_view import view
-from .prompts import render
+from .prompts import library_hash, render
 from .providers import LLMProvider, ProviderError, make_provider
+from .providers.base import ImageInput
 from .repair import Generation, generate_validated
 from .store import DecisionRecord, DecisionStore
 
 log = logging.getLogger(__name__)
 ANALYST_TFS = ["1w", "1d", "4h", "1h", "15m", "5m"]
+NO_CHARTS = "No charts this cycle."
+NO_PLAYBOOK = "(no playbook yet)"
+# a confirmed escalation must keep every one of these exactly as the trader proposed them
+ESCALATION_FIXED = ("decision", "order_type", "entry", "stop_loss", "take_profits", "management", "position_actions")
 
 
 @dataclass
@@ -52,23 +58,26 @@ class CycleRequest:
 
 class Orchestrator:
     def __init__(self, settings: Settings, registry: InstrumentRegistry, builder: SnapshotBuilder,
-                 store: DecisionStore, usage: UsageStore, governor: CostGovernor) -> None:
+                 store: DecisionStore, usage: UsageStore, governor: CostGovernor, charts=None) -> None:
         self.s, self.reg, self.builder, self.store = settings, registry, builder, store
         self.usage, self.governor = usage, governor
-        self._providers: dict[str, LLMProvider] = {}
+        self.charts = charts                      # analysis.charts.ChartRenderer | None (Phase 3)
+        self.library_hash = library_hash()        # the prompt library in force (stored with every decision)
+        self._providers: dict[tuple, LLMProvider] = {}
         self._limiters: dict[str, RateLimiter] = {}
         self._sem = asyncio.Semaphore(max(1, settings.ai.max_parallel_calls))
         self.route: tuple[str, str | None] = (settings.ai.active_provider, None)   # (provider in use, why rerouted)
 
     # ------------------------------------------------------------------ plumbing
-    def provider(self, name: str | None = None) -> LLMProvider:
+    def provider(self, name: str | None = None, role: str = "decision") -> LLMProvider:
         """A named provider, or (no name) the active one — rerouted to ``ai.fallback_provider`` while the active
-        provider is unavailable (not signed in, usage limit reached, missing key; D-030)."""
+        provider is unavailable (not signed in, usage limit reached, missing key; D-030). ``role`` picks the model and
+        effort of ``ai.models.<role>`` (claude_code only; D-043)."""
         if name is not None:
-            return self._get(name)
+            return self._get(name, role)
         active, fallback = self.s.ai.active_provider, self.s.ai.fallback
         try:
-            prov = self._get(active)
+            prov = self._get(active, role)
             why = prov.unavailable_reason()
         except ProviderError as exc:
             if not fallback:
@@ -80,7 +89,7 @@ class Orchestrator:
         if not fallback:
             raise ProviderError(why, retryable=False)
         try:
-            fb = self._get(fallback)
+            fb = self._get(fallback, role)
             fb_why = fb.unavailable_reason()
         except ProviderError as exc:
             fb_why = str(exc)
@@ -89,13 +98,26 @@ class Orchestrator:
         self._set_route(fallback, why)
         return fb
 
-    def _get(self, name: str) -> LLMProvider:
-        if name not in self._providers:
-            prov = make_provider(self.s, name)
-            self._providers[name] = prov
-            self._limiters[prov.name] = RateLimiter(prov.name, prov.cfg, self.usage, instance=self.s.paths.instance,
-                                                    daily_cap=self.s.ai.daily_calls_per_pair)
-        return self._providers[name]
+    def role_model(self, name: str, role: str) -> tuple[str | None, str | None]:
+        """(model, effort) overrides of ``ai.models.<role>`` for provider ``name`` — only claude_code takes the
+        aliases (sonnet | opus | fable); other providers keep their configured model."""
+        rm = getattr(self.s.ai.models, role, None)
+        if rm is None or self.s.ai.providers[name].kind != "claude_code":
+            return None, None
+        return rm.model, rm.effort
+
+    def _get(self, name: str, role: str = "decision") -> LLMProvider:
+        model, effort = self.role_model(name, role)
+        key = (name, model, effort)
+        if key not in self._providers:
+            prov = make_provider(self.s, name, model=model, effort=effort) if (model or effort) \
+                else make_provider(self.s, name)
+            self._providers[key] = prov
+            if prov.name not in self._limiters:        # one limiter per provider: every role shares the daily cap
+                self._limiters[prov.name] = RateLimiter(prov.name, prov.cfg, self.usage,
+                                                        instance=self.s.paths.instance,
+                                                        daily_cap=self.s.ai.daily_calls_per_pair)
+        return self._providers[key]
 
     def _set_route(self, name: str, why: str | None) -> None:
         if (name, why) != self.route:
@@ -155,24 +177,60 @@ class Orchestrator:
         return {"now_utc": iso(as_of), "trigger_reason": reason, "payload": payload_json,
                 "max_valid_until": iso(as_of + self.horizon_ms(pair)),
                 "account_equity": f"{float(eq):.2f}" if eq is not None else "unknown",
-                "account_currency": account.get("currency", "USD"), **extra}
+                "account_currency": account.get("currency", "USD"),
+                "charts_note": NO_CHARTS, "playbook": NO_PLAYBOOK, **extra}
 
     async def _gen(self, provider: LLMProvider, model_cls, system: str, user: str, purpose: str,
-                   pair: str | None) -> Generation:
+                   pair: str | None, *, images: list[ImageInput] | None = None,
+                   role: str | None = "decision") -> Generation:
         try:
             async with self._sem:
+                kw = {"images": images, "role": role} if (images or role) else {}
                 return await generate_validated(provider, model_cls, system=system, user=user,
                                                 limiter=self._limiters[provider.name], governor=self.governor,
                                                 usage=self.usage, purpose=purpose,
                                                 # one system per pair: every call counts towards its share (D-042)
                                                 pair=pair or self.s.paths.instance,
-                                                est_input_tokens=max(2000, len(user) // 3))
+                                                est_input_tokens=max(2000, len(user) // 3), **kw)
         except Exception as exc:  # noqa: BLE001 — one failed sub-call must not take its siblings down (F4)
             log.exception("%s %s: generation failed", pair or "*", purpose)
             msg = f"{type(exc).__name__}: {exc}"[:300]
             return Generation(False, None, errors=[msg], provider_error=msg)
 
     # ------------------------------------------------------------------ entry point
+    async def charts_for(self, pair: str, as_of: int, payload: dict) -> tuple[list[ImageInput], str]:
+        """The pair's chart images (rendered in a worker thread, cached per closed bar) and the cycle-message note.
+        Never fails the cycle: without charts the call goes out as text only."""
+        if self.charts is None or not self.s.ai.charts.enabled:
+            return [], NO_CHARTS
+        inst = self.reg.primary(pair)
+        out = self.s.paths.state() / "charts" / pair
+
+        def render() -> list:
+            cal = calendar_for(inst.venue, inst.symbol, self.s.pairs[pair].asset_class)
+            imgs = self.charts.render_set(self.builder.reader(inst), inst, as_of, payload, cal)
+            try:                                  # the latest set, for the dashboard (never a reason to fail)
+                out.mkdir(parents=True, exist_ok=True)
+                for c in imgs:
+                    tmp = out / f"{c.tf}.png.tmp"
+                    tmp.write_bytes(c.png)
+                    tmp.replace(out / f"{c.tf}.png")
+            except OSError as exc:
+                log.warning("%s: could not store the chart PNGs: %s", pair, exc)
+            return imgs
+
+        try:
+            imgs = await asyncio.to_thread(render)
+        except Exception:  # noqa: BLE001
+            log.exception("%s: chart rendering failed — text-only call", pair)
+            return [], NO_CHARTS
+        if not imgs:
+            return [], NO_CHARTS
+        cfg = self.s.ai.charts
+        note = (f"Attached: {len(imgs)} charts ({', '.join(c.tf for c in imgs)}), {cfg.width}×{cfg.height}, the last "
+                f"closed candles of each timeframe, analysis prices ({inst.key}).")
+        return [c.as_input(pair, inst.key) for c in imgs], note
+
     async def run_cycle(self, requests: list[CycleRequest], *, as_of: int | None = None,
                         account: dict | None = None, payloads: dict[str, dict] | None = None,
                         deadline_s: float | None = None) -> list[DecisionRecord]:
@@ -184,6 +242,7 @@ class Orchestrator:
         mode, why = self.effective_mode()
         label = mode if why == "configured" else f"{mode} ({why})"
         reasons = {rq.pair: rq.reason for rq in requests}
+        self._strength = {rq.pair: rq.strength for rq in requests}
         built: dict[str, dict] = {}
         out: list[DecisionRecord] = []
         for rq in requests:
@@ -243,7 +302,8 @@ class Orchestrator:
             job = lambda p: self._consensus(p, payloads[p], reasons[p], as_of, account)  # noqa: E731
         else:
             review = mode == "agent_per_pair_with_risk_reviewer"
-            job = lambda p: self._per_pair(p, payloads[p], reasons[p], as_of, account, review=review)  # noqa: E731
+            job = lambda p: self._per_pair(p, payloads[p], reasons[p], as_of, account, review=review,  # noqa: E731
+                                           charts=True)
         return [([p], _as_list(job(p))) for p in payloads]
 
     @staticmethod
@@ -253,6 +313,8 @@ class Orchestrator:
 
     def _finish(self, rec: DecisionRecord, label: str, as_of: int, payload: dict | None) -> DecisionRecord:
         rec.mode = label
+        rec.library_hash = rec.library_hash or self.library_hash
+        rec.trigger_strength = rec.trigger_strength or getattr(self, "_strength", {}).get(rec.pair)
         if rec.status == "valid" and rec.recommendation:
             try:
                 self._finalize(rec, as_of, payload)
@@ -293,14 +355,33 @@ class Orchestrator:
                 return _reject(rec, f"valid_until {iso(vu)} is not after the cycle time {iso(as_of)}")
             r["valid_until"] = iso(as_of + self.s.pairs[rec.pair].decision_timeframe.ms)
         r["next_review"] = self._review_plan(r.get("next_review") or {}, payload, notes)
+        r["position_actions"] = self._action_targets(r.get("position_actions") or [], payload, notes)
         try:
             v = Recommendation.model_validate(r)
         except ValidationError as exc:
             return _reject(rec, f"normalised recommendation invalid: {exc.errors()[:3]}"[:300])
         rec.recommendation = json.loads(v.model_dump_json())
         rec.rr_computed = v.rr_computed()
+        rec.actions_state = "pending" if v.position_actions else None
         if notes:
             rec.errors.append("normalised: " + "; ".join(notes))
+
+    @staticmethod
+    def _action_targets(actions: list[dict], payload: dict | None, notes: list[str]) -> list[dict]:
+        """Keep only actions whose target is a live position / pending order of this pair in the payload the model
+        saw (the executor re-checks everything against the broker before acting)."""
+        acct = (payload or {}).get("account") or {}
+        live = {("position", str(x.get("decision"))) for x in acct.get("open_positions") or []}
+        live |= {("order", str(x.get("decision"))) for x in acct.get("pending_orders") or []}
+        keep = []
+        for a in actions:
+            t = a.get("target") or {}
+            if (t.get("kind"), str(t.get("decision"))) in live:
+                keep.append(a)
+            else:
+                notes.append(f"position action {a.get('action')} on {t.get('kind')} {t.get('decision')} dropped "
+                             "(not a live trade of this pair)")
+        return keep
 
     def _review_plan(self, nr: dict, payload: dict | None, notes: list[str]) -> dict:
         """Time-based reviews never come sooner than the normal spacing; price/candle conditions (something
@@ -354,12 +435,17 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ modes
     async def _per_pair(self, pair: str, payload: dict, reason: str, as_of: int, account: dict, *,
-                        review: bool = False, provider_name: str | None = None) -> DecisionRecord:
+                        review: bool = False, provider_name: str | None = None, charts: bool = False) -> DecisionRecord:
         prov = self.provider(provider_name)
-        pr = render("agent_per_pair", self._system_vars(pair, account),
-                    self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account))
-        gen = await self._gen(prov, Recommendation, pr.system, pr.user, "agent_per_pair", pair)
+        images, note = await self.charts_for(pair, as_of, payload) if charts else ([], NO_CHARTS)
+        uv = self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account,
+                             charts_note=note)
+        pr = render("agent_per_pair", self._system_vars(pair, account), uv)
+        gen = await self._gen(prov, Recommendation, pr.system, pr.user, "agent_per_pair", pair, images=images)
         rec = self._record(pair, "agent_per_pair", reason, payload, gen, prov, pr.prompt_hash)
+        rec.trigger_strength = getattr(self, "_strength", {}).get(pair)
+        if rec.status == "valid" and rec.recommendation["decision"] != Decision.NO_TRADE.value:
+            await self._escalate(rec, pair, payload, reason, as_of, account, uv, images)
         if not review or rec.status != "valid" or rec.recommendation["decision"] == Decision.NO_TRADE.value:
             return rec
         rv = render("risk_reviewer", self._system_vars(pair, account),
@@ -384,6 +470,71 @@ class Orchestrator:
             rec.status = "invalid"
             rec.errors.append("risk review failed — trade withheld")
         return rec
+
+    def escalation_due(self, rec: DecisionRecord, pair: str) -> str | None:
+        """Why a strong trade idea goes to the stronger model first (None = no escalation)."""
+        esc = self.s.ai.escalation
+        if not esc.enabled or rec.trigger_strength not in esc.on_strength:
+            return None
+        if int(rec.recommendation.get("confidence") or 0) < esc.min_confidence:
+            return None
+        day0 = now_ms() // MS_PER_DAY * MS_PER_DAY
+        if self.usage.count_role_since("escalation", day0, pair) >= esc.max_per_day_per_pair:
+            return None
+        left, _ = self.quota()
+        if left is not None and left < 2:
+            return None
+        return f"{rec.trigger_strength} setup, confidence {rec.recommendation.get('confidence')}"
+
+    async def _escalate(self, rec: DecisionRecord, pair: str, payload: dict, reason: str, as_of: int, account: dict,
+                        uv: dict, images: list[ImageInput]) -> None:
+        """D-043: a stronger model (``ai.models.escalation``) may confirm the trade unchanged or downgrade it to
+        NO_TRADE; it can never change levels, raise confidence or add risk."""
+        why = self.escalation_due(rec, pair)
+        if why is None:
+            return
+        esc = self.s.ai.escalation
+        first = rec.recommendation
+        try:
+            prov = self.provider(role="escalation")
+            pr = render("escalation", self._system_vars(pair, account), {**uv, "proposal": json.dumps(first)})
+            g = await asyncio.wait_for(self._gen(prov, EscalationReview, pr.system, pr.user, "escalation", pair,
+                                                 images=images, role="escalation"), esc.timeout_s)
+        except Exception as exc:  # noqa: BLE001 — timeout, provider or prompt error: the failure policy decides
+            g, prov = None, None
+            err = f"escalation failed: {type(exc).__name__}: {exc}"[:300]
+        rec.sub_outputs.append({"role": "trader", "label": pair, "provider": rec.provider, "model": rec.model,
+                                "prompt_hash": rec.prompt_hash, "ok": True, "output": first, "cost_usd": rec.cost_usd})
+        if g is not None:
+            rec.sub_outputs.append({"role": "escalation", "label": why, "provider": prov.name, "model": prov.model,
+                                    "prompt_hash": pr.prompt_hash, "ok": g.ok,
+                                    "output": json.loads(g.value.model_dump_json()) if g.ok else None,
+                                    "errors": g.errors, "cost_usd": g.cost_usd})
+            rec.cost_usd += g.cost_usd
+        if g is None or not g.ok:
+            msg = err if g is None else "escalation invalid: " + "; ".join(g.errors[:3])
+            if esc.on_failure == "withhold":
+                rec.status = "invalid"
+                rec.errors.append(f"{msg} — trade withheld")
+            else:
+                rec.errors.append(f"{msg} — trader's decision kept")
+            return
+        final = json.loads(g.value.final_recommendation.model_dump_json())
+        if g.value.verdict == "confirm":
+            changed = [k for k in ESCALATION_FIXED if final.get(k) != first.get(k)]
+            if changed:
+                rec.status, rec.recommendation, rec.rr_computed = "invalid", None, None
+                rec.errors.append(f"escalation altered levels ({', '.join(changed)}) — trade withheld")
+                return
+            conf = min(int(first.get("confidence") or 0), int(g.value.confidence), int(final.get("confidence") or 0))
+            rec.recommendation = {**first, "confidence": conf}
+            rec.errors.append(f"escalation: confirmed ({why}); confidence {first.get('confidence')} → {conf}")
+            return
+        final["confidence"] = min(int(final.get("confidence") or 0), int(first.get("confidence") or 0))
+        final["position_actions"] = first.get("position_actions") or []    # protective actions stand
+        rec.recommendation = final
+        rec.rr_computed = None
+        rec.errors.append("escalation: downgraded to NO_TRADE — " + "; ".join(g.value.issues[:4]))
 
     async def _global(self, payloads: dict, reasons: dict, as_of: int, account: dict) -> list[DecisionRecord]:
         prov = self.provider()

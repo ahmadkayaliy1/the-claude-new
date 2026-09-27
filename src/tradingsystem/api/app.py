@@ -26,7 +26,7 @@ from typing import Any
 import psutil
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -158,7 +158,35 @@ def create_app(s: Settings) -> FastAPI:
             p = _rows(con, "SELECT payload_z FROM ai_payloads WHERE payload_hash=?", (d.get("payload_hash"),))
             d["payload"] = json.loads(zlib.decompress(p[0]["payload_z"])) if p else None
             d["paper_legs"] = _rows(con, "SELECT * FROM paper_legs WHERE decision_id=? ORDER BY id", (decision_id,))
+            # Phase 3: what the system did on this trade (rules) and what this decision asked for (model actions)
+            d["position_actions"] = _rows(con, "SELECT * FROM position_actions WHERE source_decision=? OR "
+                                               "target_decision=? ORDER BY id", (decision_id, decision_id))
+            for a in d["position_actions"]:
+                for k in ("requested", "detail"):
+                    if a.get(k):
+                        try:
+                            a[k] = json.loads(a[k])
+                        except ValueError:
+                            pass
         return d
+
+    @app.get("/api/charts/{pair}")
+    def charts_list(pair: str) -> list[dict]:
+        """The latest chart images the model received for ``pair`` (Phase 3)."""
+        if pair not in pair_names:
+            raise HTTPException(404, "unknown pair")
+        d = s.paths.state() / "charts" / pair
+        return [{"tf": tf, "updated_ms": int((d / f"{tf}.png").stat().st_mtime * 1000)}
+                for tf in s.ai.charts.timeframes if (d / f"{tf}.png").exists()]
+
+    @app.get("/api/charts/{pair}/{tf}")
+    def chart(pair: str, tf: str) -> FileResponse:
+        if pair not in pair_names or tf not in s.ai.charts.timeframes:      # never a path from the request
+            raise HTTPException(404, "unknown chart")
+        f = s.paths.state() / "charts" / pair / f"{tf}.png"
+        if not f.exists():
+            raise HTTPException(404, "no chart yet")
+        return FileResponse(f, media_type="image/png", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/performance")
     def performance() -> dict:

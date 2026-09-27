@@ -28,16 +28,18 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 
 from ..ai.budget import CostGovernor, UsageStore, usage_db
 from ..ai.orchestrator import CycleRequest, Orchestrator
 from ..ai.store import DecisionRecord, DecisionStore
-from ..ai.triggers import decide, review_due
+from ..ai.triggers import decide, review_due_split
 from ..core.instruments import InstrumentRegistry
 from ..core.logsetup import setup_from_settings
 from ..core.sessions import calendar_for
 from ..core.settings import PROJECT_ROOT, Settings, load_settings
-from ..core.timeutil import iso, now_ms
+from ..core.timeframes import Timeframe
+from ..core.timeutil import MS_PER_DAY, iso, now_ms
 from ..ingest.common.appdb import AppDB
 from ..storage.tablespec import spec_for
 from .registry import matrix_markdown
@@ -50,6 +52,10 @@ HEARTBEAT_S = 10.0          # collector_status heartbeat, independent of the AI 
 QUIET_MS = 10 * 60_000      # repeated warnings (AI not ready, quota) are logged at most this often
 EXECUTOR_FRESH_MS = 120_000  # the executor's account report is used while it is at most this old
 MAX_FAILS = 8               # back-off exponent cap
+EVENT_COALESCE_MS = 60_000  # executor events are gathered this long before they wake the model (fill + order …)
+# executor events that wake the model (Phase 3): a placement, a fill, a closed position, a settled outcome, and the
+# result of its own position_actions
+WAKE_EVENTS = ("order", "mgmt_filled", "mgmt_position_closed", "outcome", "action_applied", "action_rejected")
 
 
 class Engine:
@@ -62,8 +68,14 @@ class Engine:
         self.usage = UsageStore(usage_db(s))
         self.governor = CostGovernor(s.ai.budget, self.usage, profit_fn=self.store.realised_since,
                                      instance=s.paths.instance)
-        self.orch = Orchestrator(s, self.reg, self.builder, self.store, self.usage, self.governor)
-        self.processed: dict[str, int] = {}
+        self.orch = Orchestrator(s, self.reg, self.builder, self.store, self.usage, self.governor,
+                                 charts=self._chart_renderer())
+        self.processed: dict[str, int] = {}          # last decision-TF bar evaluated at its close
+        self.processed_screen: dict[str, int] = {}   # last screen-TF (5m) bar evaluated at its close
+        self._closes: dict[str, dict[str, float]] = {}   # last closed bar close per TF (candle review conditions)
+        self._events: dict[str, list[dict]] = {}     # executor events waiting to wake the model, per pair
+        self._event_id = 0                            # set from the DB in run() (older events never wake)
+        self._build_ms: deque[int] = deque(maxlen=20)   # snapshot build times (5-min screening cost on this PC)
         self.last_call: dict[str, int] = {}          # last dispatch per pair (the DB covers restarts)
         self.fails: dict[str, int] = {}              # consecutive failed cycles per pair → back-off
         self.inflight: dict[str, asyncio.Task] = {}  # pair → its running cycle
@@ -74,6 +86,17 @@ class Engine:
         self.stop = False
 
     _ai_problem: str = ""
+
+    def _chart_renderer(self):
+        """The chart renderer (matplotlib is only imported when charts are on — RAM on 8 GB machines)."""
+        if not self.s.ai.charts.enabled:
+            return None
+        try:
+            from .charts import ChartRenderer
+            return ChartRenderer(self.s.ai.charts)       # the orchestrator stores the PNGs per pair
+        except Exception:  # noqa: BLE001 — no charts is a degraded mode, never a reason not to start
+            log.exception("chart renderer unavailable — text-only AI calls")
+            return None
 
     def live_account(self, pair: str | None) -> dict:
         """The ``account`` block of the payload (Phase 2): the live account this system trades, as its executor last
@@ -122,11 +145,50 @@ class Engine:
             self._ai_problem = str(exc)
             return False
 
-    def _data_ready(self, pair: str, bar_open: int) -> bool:
+    def _data_ready(self, pair: str, bar_open: int, tf: Timeframe | None = None) -> bool:
         inst = self.reg.primary(pair)
-        tf = self.s.pairs[pair].decision_timeframe
+        tf = tf or self.s.pairs[pair].decision_timeframe
         last = self.builder.reader(inst).last_time(spec_for(inst, "candles", tf))
         return last is not None and last >= bar_open
+
+    def screen_tf(self, pair: str) -> Timeframe:
+        """The timeframe Python screens on (``ai.screen_timeframe``, 5m) — the decision timeframe itself when the pair
+        does not collect it or it is not shorter."""
+        pcfg = self.s.pairs[pair]
+        dec = pcfg.decision_timeframe
+        try:
+            stf = Timeframe.parse(self.s.ai.screen_timeframe)
+        except ValueError:
+            return dec
+        tfs = {Timeframe.parse(t).value for t in (pcfg.timeframes or self.s.timeframes)}
+        return stf if stf.ms < dec.ms and stf.value in tfs else dec
+
+    def _pair_events(self, pair: str) -> list[dict]:
+        """New executor events of ``pair`` (the all-pairs system has every pair's events in one table)."""
+        rows = self.store.events_after(self._event_id, WAKE_EVENTS)
+        if rows:
+            self._event_id = rows[-1]["id"]
+        for r in rows:
+            owner = None
+            try:
+                owner = (json.loads(r["detail"]) or {}).get("pair") if r["detail"] else None
+            except (ValueError, AttributeError):
+                owner = None
+            if owner is None:           # older plain-text events: "<mode> <PAIR> <id>: …" or "<PAIR> <id>: …"
+                owner = next((p for p in self.s.enabled_pairs() if f"{p} " in f" {r['detail'] or ''} "), None)
+            if owner:
+                self._events.setdefault(owner, []).append(r)
+        return self._events.get(pair, [])
+
+    @staticmethod
+    def _event_text(r: dict) -> str:
+        d = r.get("detail") or ""
+        try:
+            j = json.loads(d)
+            d = j.get("text") or ", ".join(f"{k} {v}" for k, v in j.items() if k != "pair")
+        except (ValueError, AttributeError):
+            pass
+        return f"{r['event']} {d}"[:160]
 
     def _policy(self) -> str:
         return "on_setup_event" if self.governor.state().level >= 2 else self.s.ai.trigger_policy
@@ -150,22 +212,45 @@ class Engine:
         return (q["bid"] + q["ask"]) / 2 if q.get("bid") and q.get("ask") else None
 
     def evaluate(self, pair: str, now: int, at_close: bool, payload: dict | None,
-                 policy: str | None = None) -> tuple[bool, list[str], str]:
+                 policy: str | None = None, *, at_decision_close: bool | None = None,
+                 events: list[dict] | None = None) -> tuple[bool, list[str], str]:
+        """The trigger decision for ``pair`` now (Phase 3: screened at every 5m close, called only on change).
+        ``at_close`` = a screen-TF bar just closed (a payload was built); ``at_decision_close`` = the decision-TF
+        bar too. The current setup signature is kept in ``self._sig[pair]`` for the dispatch."""
+        if payload:
+            self._closes[pair] = {tf: t["recent"][-1][4] for tf, t in (payload.get("timeframes") or {}).items()
+                                  if t.get("recent")}
         last = self.store.last_decision(pair)
         attempt = self.store.last_attempt_ts(pair)
         answered = self.store.last_attempt_ts(pair, answered=True)
-        rr: list[str] = []
+        time_r: list[str] = []
+        cond_r: list[str] = []
         if last and not (answered is not None and answered > last["ts"]):  # a review is consumed by one answer
-            closed = {tf: t["recent"][-1][4] for tf, t in ((payload or {}).get("timeframes") or {}).items()
-                      if t.get("recent")}
-            rr = review_due(last, now, self._review_mid(pair, last, now), closed)
+            time_r, cond_r = review_due_split(last, now, self._review_mid(pair, last, now), self._closes.get(pair, {}))
         # spacing counts from the dispatch (a row's ts is when the answer was stored — a slow call must not push
         # the next decision-bar close out of reach); the DB row only stands in after a restart
         last_call = self.last_call.get(pair, attempt)
+        tf = self.s.pairs[pair].decision_timeframe
+        last_dec_close = tf.floor(now)                      # close time of the last closed decision bar
+        move_atr = None
+        ref = self.store.kv_get(f"{pair}:last_call_price")
+        atr = (((payload or {}).get("timeframes") or {}).get(tf.value) or {}).get("indicators", {}).get("atr14")
+        mid = _payload_mid(payload) if payload else None
+        if ref and atr and mid:
+            move_atr = abs(mid - float(ref)) / float(atr)
+        sig = self.store.kv_get(f"{pair}:signature")
         d = decide(policy or self._policy(), payload, last_call_ms=last_call, now=now,
                    min_spacing_min=self.s.ai.min_minutes_between_calls, max_idle_min=self.s.ai.max_idle_minutes,
-                   review_reasons=rr, at_close=at_close, review_floor_min=self.s.ai.review_floor_minutes,
-                   backoff_ms=self._backoff_ms(pair))
+                   review_reasons=cond_r, at_close=at_close, review_floor_min=self.s.ai.review_floor_minutes,
+                   backoff_ms=self._backoff_ms(pair), weak_min=self.s.ai.weak_min,
+                   liquidity_atr=self.s.ai.liquidity_atr, screen_tf=self.screen_tf(pair).value,
+                   last_signature=frozenset(sig) if sig is not None else None, time_reasons=time_r,
+                   event_reasons=[self._event_text(e) for e in events or []], at_decision_close=at_decision_close,
+                   decision_bar_since_last_call=last_call is None or last_dec_close > last_call,
+                   move_atr=move_atr, screen_move_atr=self.s.ai.screen_move_atr)
+        self._sig = getattr(self, "_sig", {})
+        if d.signature or payload:
+            self._sig[pair] = sorted(d.signature)
         return d.fire, d.reasons, d.strength
 
     async def tick(self) -> None:
@@ -181,6 +266,8 @@ class Engine:
                 continue
             tf = pcfg.decision_timeframe
             bar = tf.floor(now) - tf.ms
+            stf = self.screen_tf(pair)
+            sbar = stf.floor(now) - stf.ms
             if not self._data_ready(pair, bar):
                 # never analyse (or review on) a decision bar that is not stored — wait for it (stall F5)
                 if now >= bar + tf.ms + DATA_WAIT_MS and self._waiting.get(pair) != bar \
@@ -190,13 +277,29 @@ class Engine:
                     log.warning("%s — not analysed until it arrives", msg)
                     self.appdb.add_event("engine", "data_not_ready", msg)
                 continue
-            at_close = bar > self.processed.get(pair, 0) and now >= bar + tf.ms + SETTLE_MS
-            payload = self.orch.payload(pair, now, self.live_account(pair)) if at_close else None
-            fire, reasons, strength = self.evaluate(pair, now, at_close, payload, policy)
+            at_dec = bar > self.processed.get(pair, 0) and now >= bar + tf.ms + SETTLE_MS
+            at_screen = (sbar > self.processed_screen.get(pair, 0) and now >= sbar + stf.ms + SETTLE_MS
+                         and (stf == tf or self._data_ready(pair, sbar, stf)))
+            at_close = at_dec or at_screen
+            payload = None
             if at_close:
+                t0 = time.perf_counter()
+                payload = self.orch.payload(pair, now, self.live_account(pair))
+                self._build_ms.append(int((time.perf_counter() - t0) * 1000))
+            evs = self._pair_events(pair)
+            wake = [e for e in evs if now - int(e["ts"]) >= EVENT_COALESCE_MS] and evs      # all, once the first is ripe
+            if wake and not self._event_budget(pair, now):
+                self._events[pair] = []                  # today's event calls are used up: the events stay in history
+                wake = []
+            fire, reasons, strength = self.evaluate(pair, now, at_close, payload, policy, at_decision_close=at_dec,
+                                                    events=wake or None)
+            if at_screen:
+                self.processed_screen[pair] = sbar
+            if at_dec:
                 self.processed[pair] = bar
-                log.info("%s %s close %s: trigger=%s (%s) %s", pair, tf.value, iso(bar), fire, strength,
-                         "; ".join(reasons)[:300])
+            if at_close:
+                log.info("%s %s close %s: trigger=%s (%s) %s", pair, (tf if at_dec else stf).value,
+                         iso(bar if at_dec else sbar), fire, strength, "; ".join(reasons)[:300])
             if fire:
                 fired.append((pair, reasons, strength, payload))
         if fired:
@@ -211,7 +314,7 @@ class Engine:
         fired = self._ration(fired, now)
         payloads: dict[str, dict] = {}
         queue: list[CycleRequest] = []
-        for pair, reasons, _, payload in fired:
+        for pair, reasons, strength, payload in fired:
             p = payload or self.orch.payload(pair, now, self.live_account(pair))
             problems = data_problems(p, now, self.s.risk.max_data_staleness_s)
             if problems:
@@ -221,7 +324,7 @@ class Engine:
                 log.warning("%s: AI call skipped — %s", pair, "; ".join(problems)[:300])
                 continue
             payloads[pair] = p
-            queue.append(CycleRequest(pair, "; ".join(reasons)[:600]))
+            queue.append(CycleRequest(pair, "; ".join(reasons)[:600], strength))
         if not queue:
             return
         task = asyncio.create_task(self._cycle(queue, payloads, now))
@@ -229,6 +332,24 @@ class Engine:
             self.last_call[q.pair] = now          # counted at dispatch, whatever the outcome (F15)
             self.inflight[q.pair] = task
             self.inflight_since[q.pair] = now
+            self._remember_call(q.pair, payloads[q.pair], q.strength)
+
+    def _remember_call(self, pair: str, payload: dict, strength: str | None) -> None:
+        """At dispatch: the setup signature and price the next "did anything change?" test compares against, and
+        the executor events this call now covers."""
+        sig = getattr(self, "_sig", {}).get(pair)
+        if sig is not None:
+            self.store.kv_set(f"{pair}:signature", sig)
+        mid = _payload_mid(payload)
+        if mid:
+            self.store.kv_set(f"{pair}:last_call_price", mid)
+        if strength == "event" or self._events.get(pair):
+            self._events[pair] = []
+
+    def _event_budget(self, pair: str, now: int) -> bool:
+        """Event-woken calls per pair and UTC day (``ai.event_calls_per_day``)."""
+        day0 = now // MS_PER_DAY * MS_PER_DAY
+        return self.store.count_strength_since(pair, "event", day0) < self.s.ai.event_calls_per_day
 
     def _ration(self, fired: list, now: int) -> list:
         """Quota pressure (F8): the fewer requests left in the provider's quota day, the stronger a trigger must be."""
@@ -236,7 +357,8 @@ class Engine:
         if left is None or not cap:
             return fired
         frac = left / cap
-        ok = (set() if left <= 0 else {"review"} if frac < 0.2 else {"review", "strong"} if frac < 0.5 else None)
+        ok = (set() if left <= 0 else {"review", "event"} if frac < 0.2 else {"review", "event", "strong"}
+              if frac < 0.5 else None)
         keep = fired if ok is None else [f for f in fired if f[2] in ok]
         if len(keep) < len(fired):
             dropped = ", ".join(f[0] for f in fired if f not in keep)
@@ -287,7 +409,11 @@ class Engine:
             "quota_left_today": left, "quota_per_day": cap,
             "cycles_inflight": {p: iso(t) for p, t in self.inflight_since.items()},
             "backoff_fails": {p: n for p, n in self.fails.items() if n},
-            "processed": {p: iso(b) for p, b in self.processed.items()}})
+            "processed": {p: iso(b) for p, b in self.processed.items()},
+            "screened": {p: iso(b) for p, b in self.processed_screen.items()},
+            "snapshot_build_ms": {"last": self._build_ms[-1] if self._build_ms else None,
+                                  "max": max(self._build_ms) if self._build_ms else None},
+            "events_waiting": {p: len(v) for p, v in self._events.items() if v}})
 
     async def _heartbeat(self) -> None:
         while not self.stop:
@@ -303,6 +429,9 @@ class Engine:
         for pair, pcfg in self.s.enabled_pairs().items():   # don't fire for the bar that closed before start-up
             tf = pcfg.decision_timeframe
             self.processed[pair] = tf.floor(now) - tf.ms
+            stf = self.screen_tf(pair)
+            self.processed_screen[pair] = stf.floor(now) - stf.ms
+        self._event_id = self.store.last_event_id()          # events from before the start do not wake the model
         hb = asyncio.create_task(self._heartbeat())
         try:
             while not self.stop:
@@ -381,3 +510,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = ["Engine", "main", "to_json"]
+
+
+def _payload_mid(payload: dict | None) -> float | None:
+    """Analysis-instrument mid of a payload (bid/ask, else the last 1m close)."""
+    ap = ((payload or {}).get("market") or {}).get("analysis_price") or {}
+    if ap.get("bid") and ap.get("ask"):
+        return (ap["bid"] + ap["ask"]) / 2
+    return ap.get("last_close_1m")

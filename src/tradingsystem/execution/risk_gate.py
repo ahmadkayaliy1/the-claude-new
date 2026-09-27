@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from ..core.settings import RiskCfg
 from ..core.timeutil import parse_date_spec
-from .sizing import SizeResult, size_position
+from .sizing import SizeResult, single_leg_index, size_position, split_volume
 
 
 @dataclass
@@ -49,6 +49,7 @@ class GateResult:
     entry: float | None = None
     size: SizeResult | None = None
     rr_exec: float | None = None
+    single_leg_tp: int | None = None        # 0-based TP index when the volume cannot be split (one position)
 
     def failures(self) -> list[str]:
         return [f"{n}: {d}" for n, ok, d in self.checks if not ok]
@@ -142,6 +143,16 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
                          entry=entry, stop=sl, contract_size=ctx.contract_size, volume_min=ctx.volume_min,
                          volume_step=ctx.volume_step, volume_max=ctx.volume_max)
     add("position_size", size.ok, f"{size.lots} lots, risk {size.risk_pct:.2f}% (${size.risk_usd:.2f}) — {size.reason}")
+    # at the minimum lot the backends place ONE position (largest close fraction): measure RR on that leg (Phase 3)
+    single = None
+    if size.ok and len(tps) > 1 and split_volume(size.lots, [t["close_fraction"] for t in tps], ctx.volume_step,
+                                                 ctx.volume_min) is None:
+        single = single_leg_index([t["close_fraction"] for t in tps])
+        tp = tps[single]["price"]
+        rr = ((tp - entry) if buy else (entry - tp)) / risk_dist
+        i = next(k for k, c in enumerate(checks) if c[0] == "rr_after_costs")
+        checks[i] = ("rr_after_costs", rr >= risk.min_rr,
+                     f"{rr:.2f} ≥ {risk.min_rr} (single leg at TP{single + 1}: {size.lots} lots cannot be split)")
     if size.ok:
         notional = size.lots * ctx.contract_size * entry
         lev = notional / ctx.equity
@@ -166,4 +177,4 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
         f"realised today {realised:.2f}% − open SL risk {open_risk:.2f}% − this trade "
         f"{size.risk_pct if size.ok else 0:.2f}% = {worst:.2f}% (≥ −{risk.max_daily_loss_pct}%)")
     approved = all(ok for _, ok, _ in checks)
-    return GateResult(approved, checks, entry, size, rr)
+    return GateResult(approved, checks, entry, size, rr, single)

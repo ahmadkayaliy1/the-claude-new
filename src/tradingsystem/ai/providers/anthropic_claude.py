@@ -7,17 +7,20 @@
 * Adaptive thinking is left at the model default; depth is set with ``output_config.effort``.
 * Refusals: server-side fallbacks (``fallbacks: "default"``, beta ``server-side-fallback-2026-07-01``) are
   enabled by default; a final ``stop_reason == "refusal"`` is surfaced as :class:`Refusal`.
+* Chart images (Phase 3): sent as base64 ``image`` content blocks, each after its caption text block.
 """
 from __future__ import annotations
 
 import anthropic
 
-from .base import LLMProvider, LLMResult, ProviderError, Refusal, transport_schema
+from .base import ImageInput, LLMProvider, LLMResult, ProviderError, Refusal, image_content_blocks, transport_schema
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
 class AnthropicProvider(LLMProvider):
+    supports_images = True
+
     def __init__(self, *a, **kw) -> None:
         super().__init__(*a, **kw)
         if not self.api_key:
@@ -32,8 +35,9 @@ class AnthropicProvider(LLMProvider):
         return base + written * self.prices()[0] * 0.25 / 1e6
 
     async def _call(self, system: str, user: str, schema: dict | None, schema_name: str,
-                    max_output_tokens: int) -> LLMResult:
+                    max_output_tokens: int, *, images: list[ImageInput] | None = None) -> LLMResult:
         output_config: dict = {"effort": self.effort}
+        content: str | list[dict] = image_content_blocks(user, images) if images else user
         if schema:
             output_config["format"] = {"type": "json_schema", "schema": transport_schema(schema, "anthropic")}
         try:
@@ -41,7 +45,7 @@ class AnthropicProvider(LLMProvider):
                 model=self.model,
                 max_tokens=max(max_output_tokens, 16000),
                 system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": user}],
+                messages=[{"role": "user", "content": content}],
                 output_config=output_config,
                 betas=[FALLBACK_BETA],
                 fallbacks="default",

@@ -120,6 +120,36 @@ empty history): use `switch_to_pairs.bat` or `tools\migrate_instance.py <PAIR>` 
 
 ---
 
+## 1b. What Claude sees and does (Phase 3, D-043)
+
+- **Charts.** Every call carries six candle charts (1w, 1d, 4h, 1h, 15m, 5m; 720×400) with the levels, zones,
+  liquidity, structure and your live trades drawn on them. The latest set is in `data\instances\<PAIR>\charts\<PAIR>\`
+  and in the dashboard (Decisions → a decision → "Charts sent to the model").
+- **Called only when something changed.** Python screens every 5-minute close; Claude is called on a new setup, one
+  of its own review conditions, an executor event (fill, target or stop hit, closed position, outcome, the result of
+  its own actions) or the 2-hour idle review — at most **40 calls per pair per day** (`ai.daily_calls_per_pair`;
+  repairs and confirmations count too).
+- **Trades are managed.** The system executes the management plan Claude declares with a trade (breakeven after the
+  first target with a spread buffer, trailing, partial close when the size allows, time stop), and on later calls
+  Claude may tighten a stop, take profit, adjust a target or cancel a pending order. It can never widen or remove a
+  stop or add size; every action is checked first and listed in the dashboard ("Actions applied").
+- **The kill switch blocks new orders only.** Protective actions (tightening a stop, closing, cancelling) keep running
+  while a kill switch is on — they reduce risk.
+- **Models per role** (`ai.models` in `config\config.yaml`; override in `config\config.local.yaml`): the decisions use
+  the provider's model (Sonnet); `escalation.enabled: true` makes Opus (or `models.escalation.model: fable`) confirm or
+  downgrade strong setups before they can be executed.
+
+Rollback switches in `config\config.local.yaml` (then `scripts\restart_all.bat`), no code change:
+
+| Problem | Switch |
+|---|---|
+| Charts use too much RAM or time | `ai: {charts: {enabled: false}}` |
+| Trade management misbehaves | `execution: {management: {dry_run: true}}` (records what it would do) or `enabled: false` |
+| Claude's own actions on live trades misbehave | `execution: {position_actions: {enabled: false}}` |
+| Too many calls | `ai: {daily_calls_per_pair: 25}` |
+
+---
+
 ## 2. Never let the laptop sleep (H2)
 
 **What happened on 2026-09-25.** The laptop was on battery. At 11:28:59 UTC the lid was closed and Windows went

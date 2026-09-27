@@ -51,5 +51,12 @@ def translate(rec: dict, basis: float, tick: float) -> dict:
     for c in (r.get("next_review") or {}).get("conditions", []):
         if c.get("kind") in ("price_above", "price_below", "candle_close_above", "candle_close_below"):
             c["value"] = _round(c["value"] + basis, tick)
+    # Phase 3: the management plan and the actions on live trades are price levels too
+    for m in r.get("management") or []:
+        if m.get("trigger") in ("price_reached", "candle_close") and m.get("value") is not None:
+            m["value"] = _round(m["value"] + basis, tick)
+    for a in r.get("position_actions") or []:
+        if a.get("action") in ("modify_sl", "modify_tp") and a.get("value") is not None:
+            a["value"] = _round(a["value"] + basis, tick)
     r["price_reference_translated"] = {"basis": basis, "from": rec.get("price_reference")}
     return r

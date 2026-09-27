@@ -13,7 +13,13 @@ Each call spawns ``claude -p`` (print mode):
   settings are loaded. Data collection, the risk gate and execution stay in our own code;
 * a minimal child environment: our secrets (MT5 password, Gemini key, dashboard token) are not passed on, and
   ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` are dropped so a call can only run on the subscription login
-  (``claude auth login`` once, or a long-lived ``claude setup-token`` given as ``CLAUDE_CODE_OAUTH_TOKEN``).
+  (``claude auth login`` once, or a long-lived ``claude setup-token`` given as ``CLAUDE_CODE_OAUTH_TOKEN``);
+* chart images (Phase 3): print mode takes images only as stream-json input — ONE ``{"type": "user", …}`` line with
+  text + base64 image blocks on stdin, ``--output-format stream-json --verbose``, the schema always in the system
+  prompt (``--json-schema`` would add a tool round-trip). The user-line shape the installed CLI accepts is probed once
+  per machine and kept in ``cli_capabilities.json`` in the CLI work folder; a parser rejection makes no API request.
+  If the CLI takes neither shape the call fails with ``charts_disabled_cli_shape`` and ``ai/repair.py`` re-sends it
+  as text. Without images nothing changes.
 
 Usage counts against the plan's shared 5-hour / weekly limits (the same pool as interactive Claude use). When
 the CLI reports a usage limit the provider cools down until the reset (or ``DEFAULT_COOLDOWN_MS``) and
@@ -25,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -36,8 +43,12 @@ from pathlib import Path
 from typing import Any
 
 from ...core.filelock import FileLock
+from ...core.settings import AIProviderCfg
 from ...core.timeutil import now_ms
-from .base import LLMProvider, LLMResult, ProviderError, secret, transport_schema
+from .base import (CHARTS_DISABLED, ImageInput, LLMProvider, LLMResult, ProviderError, image_content_blocks, secret,
+                   transport_schema)
+
+log = logging.getLogger(__name__)
 
 # environment passed to the CLI: what Windows and the CLI need to run and find its login — nothing else
 ENV_KEEP = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATH", "PATHEXT", "COMSPEC", "USERPROFILE", "HOMEDRIVE",
@@ -62,7 +73,13 @@ _REFRESH_RACE_RE = re.compile(r"another claude code process is refreshing", re.I
 _AUTH_TRANSIENT_RE = re.compile(r"403 request not allowed|failed to refresh oauth token", re.I)
 START_STAGGER_S = 15.0           # minimum gap between two CLI starts on this machine (token refresh happens at start)
 START_STAMP = "last_start.txt"   # in the CLI work folder, shared by every system of this Windows user (D-042)
-
+CAPS_FILE = "cli_capabilities.json"   # in the CLI work folder: the stream-json user-line shape this CLI accepts
+SHAPES = ("message", "content")       # documented SDK shape first; the alternate is tried once if a CLI refuses it
+SHAPE_REJECT_WINDOW_S = 5.0      # a parser rejection exits within ~2 s of the start (console.error + exit(1))
+SHAPE_RETRY_S = 3600.0           # after both shapes failed: text-only calls for this long, then probe again
+LAST_STREAM = "last_stream_json.jsonl"   # in the CLI work folder: the last image call's output (diagnosis, fixture)
+# the CLI's own words for an unreadable stream-json line (2.1.28x: "Error parsing streaming input line (type=…")
+_INPUT_REJECT_RE = re.compile(r"streaming input|stream-json (input|message)", re.I)
 
 
 def claim_start(workdir: Path, gap_s: float | None = None) -> float:
@@ -92,6 +109,97 @@ def claim_start(workdir: Path, gap_s: float | None = None) -> float:
 
 class AuthCheckFailed(RuntimeError):
     """``claude auth status`` itself failed (timeout, broken start) — not evidence of a sign-out."""
+
+
+def user_message_line(user: str, images: list[ImageInput], shape: str = "message") -> str:
+    """The ONE stream-json input line of an image call: the prompt, then per image its caption and the base64 PNG.
+    ``message`` = ``{"type": "user", "message": {"role": "user", "content": [...]}}`` (the SDK shape), ``content`` =
+    ``{"type": "user", "content": [...]}``. ASCII-only JSON (every non-ASCII character escaped), so nothing inside
+    the line can be read as a line break."""
+    blocks = image_content_blocks(user, images)
+    if shape == "message":
+        doc: dict[str, Any] = {"type": "user", "message": {"role": "user", "content": blocks}}
+    elif shape == "content":
+        doc = {"type": "user", "content": blocks}
+    else:
+        raise ValueError(f"unknown stream-json user shape {shape!r}")
+    return json.dumps(doc, ensure_ascii=True, separators=(",", ":")) + "\n"
+
+
+def read_capabilities(workdir: Path) -> dict[str, Any]:
+    """What an earlier probe learned about the installed CLI ({} when never probed or unreadable)."""
+    try:
+        doc = json.loads((workdir / CAPS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def write_capabilities(workdir: Path, doc: dict[str, Any]) -> None:
+    """Atomic replace: every system on the machine reads this file, possibly while another one writes it."""
+    tmp = workdir / f"{CAPS_FILE}.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+    os.replace(tmp, workdir / CAPS_FILE)
+
+
+def _keep_last_stream(workdir: Path, stdout: str) -> None:
+    """The last image call's stream-json output (overwritten per call): the source of the redacted parser fixture
+    and the first thing to read when a CLI update changes the log. It holds the model's answer, never the input."""
+    try:
+        (workdir / LAST_STREAM).write_text(stdout, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def json_lines(stdout: str) -> list[dict[str, Any]]:
+    """The JSON-object lines of CLI output (a stream-json NDJSON log); warnings and other text are skipped."""
+    docs = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict):
+            docs.append(d)
+    return docs
+
+
+def result_doc(stdout: str) -> dict[str, Any] | None:
+    """The CLI's final ``{"type": "result"}`` object: the whole output (``--output-format json``) or the LAST result
+    line of a stream-json log (init / assistant / rate-limit lines come before it). None when there is none."""
+    try:
+        whole = json.loads(stdout)
+    except ValueError:
+        whole = None
+    if isinstance(whole, dict) and whole.get("type") == "result":
+        return whole
+    return next((d for d in reversed(json_lines(stdout)) if d.get("type") == "result"), None)
+
+
+def failure_text(stdout: str, stderr: str, returncode: int | None) -> str:
+    """What to report when the CLI printed no result: stderr, else its plain-text output (a crash message), else a
+    count of its events. JSON events are never quoted, not even their type — a stream-json ``rate_limit_event``
+    saying "allowed" must not be classified as a usage limit by ``_error``."""
+    text = stderr.strip()
+    if not text:
+        text = "\n".join(ln for ln in stdout.splitlines() if ln.strip() and not ln.lstrip().startswith("{")).strip()
+    if not text:
+        events = json_lines(stdout)
+        if events:
+            text = f"CLI exited with code {returncode} without a result ({len(events)} stream-json events)"
+    return text[:300] or f"CLI exited with code {returncode}"
+
+
+def input_rejected(stdout: str, stderr: str, elapsed_s: float) -> bool:
+    """True when the CLI refused the stream-json input line itself: no model turn started (no assistant or result
+    line) and it ended quickly or said so. No API request was made — trying the other shape costs nothing."""
+    if any(d.get("type") in ("assistant", "result") for d in json_lines(stdout)):
+        return False
+    return elapsed_s <= SHAPE_REJECT_WINDOW_S or bool(_INPUT_REJECT_RE.search(f"{stderr}\n{stdout}"))
+
 
 def find_cli(configured: str | None) -> str | None:
     """The Claude Code executable: ``cli_path`` if set, else PATH, else the native installer's location."""
@@ -151,8 +259,14 @@ def _main_model(model_usage: dict[str, Any], default: str) -> str:
 
 
 class ClaudeCodeProvider(LLMProvider):
-    def __init__(self, *a, **kw) -> None:
-        super().__init__(*a, **kw)
+    supports_images = True
+
+    def __init__(self, name: str, cfg: AIProviderCfg, model: str, api_key: str | None, *,
+                 effort: str | None = None) -> None:
+        """``effort``: this role's depth (``ai.models.<role>.effort``) instead of the provider's configured one."""
+        super().__init__(name, cfg, model, api_key)
+        self.effort = effort or cfg.effort
+        self._shapes_failed_until = float("-inf")
         self.exe = find_cli(self.cfg.cli_path)
         if not self.exe:
             raise ProviderError(f"{self.name}: Claude Code CLI not found (install it or set cli_path)", retryable=False)
@@ -223,22 +337,27 @@ class ClaudeCodeProvider(LLMProvider):
         return auth_problem(self.name, st)
 
     # ------------------------------------------------------------------ call
-    def build_args(self, system_file: str, schema: dict | None) -> list[str]:
-        args = [self.exe, "-p", "--output-format", "json", "--model", self.model,
+    def build_args(self, system_file: str, schema: dict | None, images: bool = False) -> list[str]:
+        """CLI arguments. ``images``: the prompt arrives as one stream-json line on stdin and the answer as a
+        stream-json log (``--verbose`` is required for it in print mode); never ``--json-schema`` — the schema goes
+        in the system prompt (see ``system_text(force_prompt=True)``)."""
+        io = (["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"] if images
+              else ["--output-format", "json"])
+        args = [self.exe, "-p", *io, "--model", self.model,
                 "--system-prompt-file", system_file, "--tools", "", "--strict-mcp-config",
                 "--setting-sources", "", "--no-session-persistence"]
-        if self.cfg.effort:
-            args += ["--effort", self.cfg.effort]
+        if self.effort:
+            args += ["--effort", self.effort]
         if self.cfg.fallback_model:
             args += ["--fallback-model", self.cfg.fallback_model]
-        if schema and self.cfg.structured_output == "native":
+        if schema and not images and self.cfg.structured_output == "native":
             args += ["--json-schema", json.dumps(transport_schema(schema, "anthropic"), separators=(",", ":"))]
         return args
 
-    def system_text(self, system: str, schema: dict | None) -> str:
-        """The system prompt; in prompt mode followed by the output schema (static per role → cached by the CLI).
-        Schema ``title`` keys only repeat the field names and are left out."""
-        if not schema or self.cfg.structured_output == "native":
+    def system_text(self, system: str, schema: dict | None, force_prompt: bool = False) -> str:
+        """The system prompt; in prompt mode (or ``force_prompt``: an image call) followed by the output schema
+        (static per role → cached by the CLI). Schema ``title`` keys only repeat the field names and are left out."""
+        if not schema or (self.cfg.structured_output == "native" and not force_prompt):
             return system
         return (f"{system}\n\n# Output format\nReply with ONLY one JSON object - no prose before or after it, no code "
                 "fences - that validates against this JSON Schema (respect every enum, maxLength and numeric bound):\n"
@@ -257,59 +376,105 @@ class ClaudeCodeProvider(LLMProvider):
                 await asyncio.sleep(min(wait, START_STAGGER_S))
             self._last_start = time.monotonic()
 
-    async def _call(self, system: str, user: str, schema: dict | None, schema_name: str,
-                    max_output_tokens: int) -> LLMResult:
+    def _check_available(self) -> None:
         why = self.unavailable_reason(refresh=False)
         if why:
             raise ProviderError(why, retryable=False, rate_limited=now_ms() < self.cooldown_until_ms)
+
+    async def _call(self, system: str, user: str, schema: dict | None, schema_name: str,
+                    max_output_tokens: int, *, images: list[ImageInput] | None = None) -> LLMResult:
+        self._check_available()
+        if images and time.monotonic() < self._shapes_failed_until:
+            raise ProviderError(f"{self.name}: {CHARTS_DISABLED} — the CLI refused both stream-json user shapes "
+                                "earlier; images off until the next probe", retryable=False)
         if self._slots is None:
             self._slots = asyncio.Semaphore(max(1, self.cfg.max_concurrency))
         async with self._slots:
-            why = self.unavailable_reason(refresh=False)   # another call may have hit the limit while we waited
-            if why:
-                raise ProviderError(why, retryable=False, rate_limited=now_ms() < self.cooldown_until_ms)
-            await self._staggered_start()
+            self._check_available()                   # another call may have hit the limit while we waited
             fd, system_file = tempfile.mkstemp(prefix="system_", suffix=".md", dir=self.workdir)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(self.system_text(system, schema))
+                f.write(self.system_text(system, schema, force_prompt=bool(images)))
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *self.build_args(system_file, schema), stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=self.workdir,
-                    env=child_env(self.api_key), creationflags=_NO_WINDOW)
-                try:
-                    out, err = await asyncio.wait_for(proc.communicate(user.encode("utf-8")), self.cfg.timeout_s)
-                except asyncio.TimeoutError:
-                    # not retried: the timed-out call has most likely used the plan's limits already
-                    raise ProviderError(f"{self.name}: no answer within {self.cfg.timeout_s:.0f}s",
-                                        retryable=False) from None
-                finally:
-                    if proc.returncode is None:        # timed out or cancelled: never leave a CLI running
-                        _kill(proc)
-                        try:
-                            await asyncio.wait_for(proc.wait(), 5)
-                        except (asyncio.TimeoutError, OSError):
-                            pass
-            except OSError as exc:
-                raise ProviderError(f"{self.name}: cannot start the Claude Code CLI ({exc})", retryable=False) from exc
+                if images:
+                    return await self._call_with_images(system_file, user, images)
+                out, err, rc, _ = await self._run(self.build_args(system_file, schema), user.encode("utf-8"))
             finally:
                 try:
                     os.unlink(system_file)
                 except OSError:
                     pass
-        return self.parse(out.decode("utf-8", "replace"), err.decode("utf-8", "replace"), proc.returncode)
+        return self.parse(out, err, rc)
+
+    async def _call_with_images(self, system_file: str, user: str, images: list[ImageInput]) -> LLMResult:
+        """The stream-json call. The shape learned on this machine goes first; a parser rejection (no API request)
+        is retried once with the other shape and the winner is kept for every later call and every system."""
+        args = self.build_args(system_file, None, images=True)
+        known = read_capabilities(self.workdir).get("stream_json_user_shape")
+        first = known if known in SHAPES else SHAPES[0]
+        refused: list[str] = []
+        for shape in (first, *(x for x in SHAPES if x != first)):
+            out, err, rc, elapsed = await self._run(args, user_message_line(user, images, shape).encode("utf-8"))
+            if input_rejected(out, err, elapsed):
+                refused.append(f"{shape}: {failure_text(out, err, rc)[:100]}")
+                log.warning("%s: the CLI refused the stream-json %r user line after %.1fs (%s)", self.name, shape,
+                            elapsed, refused[-1])
+                continue
+            _keep_last_stream(self.workdir, out)
+            if shape != known and result_doc(out) is not None:
+                self._remember_shape(shape, out)
+            return self.parse(out, err, rc)
+        self._shapes_failed_until = time.monotonic() + SHAPE_RETRY_S
+        log.error("%s: %s — the CLI accepts neither stream-json user shape; calls go out as text only",
+                  self.name, CHARTS_DISABLED)
+        raise ProviderError(f"{self.name}: {CHARTS_DISABLED} ({'; '.join(refused)})"[:400], retryable=False)
+
+    def _remember_shape(self, shape: str, stdout: str) -> None:
+        version = next((d.get("claude_code_version") for d in json_lines(stdout)
+                        if d.get("type") == "system" and d.get("claude_code_version")), None)
+        try:
+            write_capabilities(self.workdir, {"stream_json_user_shape": shape, "cli_version": version,
+                                              "updated_ms": now_ms()})
+        except OSError as exc:                         # another system holds the file: it learns the same shape
+            log.warning("%s: cannot record the CLI capabilities (%s)", self.name, exc)
+            return
+        log.info("%s: the CLI takes stream-json user lines of shape %r (CLI %s) — recorded", self.name, shape,
+                 version or "version unknown")
+
+    async def _run(self, args: list[str], stdin: bytes) -> tuple[str, str, int | None, float]:
+        """Start one CLI process (machine-wide staggered), feed ``stdin`` and close it, wait for the exit.
+        Returns (stdout, stderr, exit code, seconds from start to exit). A timeout or a cancellation kills it."""
+        await self._staggered_start()
+        t0 = time.monotonic()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, cwd=self.workdir, env=child_env(self.api_key),
+                creationflags=_NO_WINDOW)
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(stdin), self.cfg.timeout_s)
+            except asyncio.TimeoutError:
+                # not retried: the timed-out call has most likely used the plan's limits already
+                raise ProviderError(f"{self.name}: no answer within {self.cfg.timeout_s:.0f}s",
+                                    retryable=False) from None
+            finally:
+                if proc.returncode is None:        # timed out or cancelled: never leave a CLI running
+                    _kill(proc)
+                    try:
+                        await asyncio.wait_for(proc.wait(), 5)
+                    except (asyncio.TimeoutError, OSError):
+                        pass
+        except OSError as exc:
+            raise ProviderError(f"{self.name}: cannot start the Claude Code CLI ({exc})", retryable=False) from exc
+        return (out.decode("utf-8", "replace"), err.decode("utf-8", "replace"), proc.returncode,
+                time.monotonic() - t0)
 
     # ------------------------------------------------------------------ output
     def parse(self, stdout: str, stderr: str, returncode: int | None) -> LLMResult:
-        doc = None
-        for chunk in (stdout, *reversed(stdout.strip().splitlines())):
-            try:
-                doc = json.loads(chunk)
-                break
-            except ValueError:
-                continue
-        if not isinstance(doc, dict) or doc.get("type") != "result":
-            raise self._error((stderr or stdout).strip()[:300] or f"CLI exited with code {returncode}", None)
+        """The call's result from ``--output-format json`` (one document) or ``stream-json`` (an NDJSON log whose last
+        ``result`` line carries the same fields: result, usage, total_cost_usd, num_turns, modelUsage)."""
+        doc = result_doc(stdout)
+        if doc is None:
+            raise self._error(failure_text(stdout, stderr, returncode), None)
         if doc.get("is_error") or doc.get("subtype") != "success":
             raise self._error(str(doc.get("result") or doc.get("subtype") or "error")[:300],
                               doc.get("api_error_status"))

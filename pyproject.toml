@@ -19,6 +19,8 @@ dependencies = [
     "tenacity",
     "MetaTrader5; sys_platform == 'win32'",
     "tzdata",                                   # ZoneInfo on Windows (no system tz database)
+    "matplotlib>=3.8",                          # chart images for the model (Phase 3, OO API + Agg only)
+    "pillow>=10",                               # PNG encoding for matplotlib; decoding in tests
 ]
 
 [project.optional-dependencies]

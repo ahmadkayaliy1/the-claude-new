@@ -80,5 +80,7 @@ def test_split_legs_breakeven_and_idempotency(tmp_path, ticks):
     assert not again["ok"] and "duplicate" in again["reason"]
     pb.process("mt5:XAUUSD@", ticks[1:])
     legs = pb.decision_legs("d4")
-    if legs[0]["status"] == "closed" and legs[0]["close_reason"] == "tp":
-        assert legs[1]["sl"] == pytest.approx(legs[1]["fill_price"])     # moved to breakeven
+    assert legs[0]["status"] == "closed" and legs[0]["close_reason"] == "tp"
+    # Phase 3: the breakeven rule is applied by execution.management.PositionManager (one source of truth for paper
+    # and MT5, with the spread buffer — see test_management.py), never inside the tick simulation
+    assert legs[1]["sl"] == r["stop_loss"]

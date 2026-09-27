@@ -39,6 +39,8 @@ _DDL = [
         id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT NOT NULL, role TEXT NOT NULL, label TEXT,
         provider TEXT, model TEXT, prompt_hash TEXT, ok INTEGER, output TEXT, errors TEXT, cost_usd REAL)""",
     "CREATE INDEX IF NOT EXISTS ai_sub_outputs_decision ON ai_sub_outputs(decision_id)",
+    # the engine's small persistent state per pair (last setup signature, price at the last call, last event id)
+    "CREATE TABLE IF NOT EXISTS engine_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ms INTEGER NOT NULL)",
 ]
 
 # Phase 3 columns (added in place on existing databases; old code ignores them)
@@ -147,6 +149,44 @@ class DecisionStore:
         with self._lock:
             self._con.execute("UPDATE ai_decisions SET execution_state=?, execution_detail=? WHERE id=?",
                               (state, json.dumps(detail, default=str) if detail else None, decision_id))
+
+    # ------------------------------------------------------------------ engine state (Phase 3)
+    def kv_get(self, key: str, default: Any = None) -> Any:
+        with self._lock:
+            r = self._con.execute("SELECT value FROM engine_kv WHERE key=?", (key,)).fetchone()
+        return json.loads(r[0]) if r else default
+
+    def kv_set(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._con.execute("INSERT INTO engine_kv(key, value, updated_ms) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE "
+                              "SET value=excluded.value, updated_ms=excluded.updated_ms",
+                              (key, json.dumps(value, default=str), now_ms()))
+
+    def events_after(self, after_id: int, kinds: tuple[str, ...], collector: str = "executor",
+                     limit: int = 200) -> list[dict[str, Any]]:
+        """``ingestion_events`` rows of ``collector`` newer than ``after_id`` (the executor's fills, closes, outcomes,
+        actions — they wake the model). Empty when the table does not exist yet."""
+        try:
+            with self._lock:
+                rows = self._con.execute(
+                    f"SELECT id, ts, event, detail FROM ingestion_events WHERE collector=? AND id>? AND event IN "
+                    f"({','.join('?' * len(kinds))}) ORDER BY id LIMIT ?", (collector, after_id, *kinds, limit)).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [{"id": r[0], "ts": r[1], "event": r[2], "detail": r[3]} for r in rows]
+
+    def last_event_id(self) -> int:
+        try:
+            with self._lock:
+                r = self._con.execute("SELECT COALESCE(max(id), 0) FROM ingestion_events").fetchone()
+        except sqlite3.OperationalError:
+            return 0
+        return int(r[0])
+
+    def count_strength_since(self, pair: str, strength: str, since_ms: int) -> int:
+        with self._lock:
+            return int(self._con.execute("SELECT count(*) FROM ai_decisions WHERE pair=? AND trigger_strength=? AND ts>=?",
+                                         (pair, strength, since_ms)).fetchone()[0])
 
     def pending_actions(self, pair: str, since_ms: int) -> list[dict[str, Any]]:
         """Valid decisions of ``pair`` whose ``position_actions`` the executor has not handled yet."""

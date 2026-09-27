@@ -250,6 +250,11 @@ async function showDecision(id, scroll = true) {
     <p class="small"><b>Reasoning:</b> ${esc(r.reasoning_trace || "")}</p>
     ${r.instructions ? `<p class="small"><b>Instructions:</b> ${esc(r.instructions)}</p>` : ""}
     ${(r.data_quality_notes || []).length ? `<p class="small"><b>Data quality:</b> ${esc(r.data_quality_notes.join(" · "))}</p>` : ""}
+    ${r.operator_notes ? `<p class="small"><b>Operator notes:</b> ${esc(r.operator_notes)}</p>` : ""}
+    ${(r.management || []).length ? `<p class="small"><b>Management plan:</b> ${esc(r.management.map((m) => `${m.action} on ${m.trigger}${m.value != null ? " " + m.value : ""}${Object.keys(m.params || {}).length ? " " + JSON.stringify(m.params) : ""}`).join(" · "))}</p>` : ""}
+    ${(r.position_actions || []).length ? `<p class="small"><b>Actions on live trades:</b> ${esc(r.position_actions.map((a) => `${a.action} ${a.target.kind} ${a.target.decision}${a.value != null ? " → " + a.value : ""}${a.fraction != null ? " (" + Math.round(a.fraction * 100) + " %)" : ""} — ${a.reason}`).join(" · "))}</p>` : ""}
+    ${(d.position_actions || []).length ? `<h2>Actions applied</h2><table class="grid"><tr><th>time</th><th>source</th><th>action</th><th>leg</th><th>status</th><th>detail</th></tr>${d.position_actions.map((a) => `<tr><td>${fmtT(a.ts)}</td><td>${esc(a.source)}</td><td>${esc(a.action)}</td><td>${esc(a.leg)}</td><td class="${a.status === "applied" ? "pass" : a.status === "deferred" || a.status === "skipped" ? "" : "fail"}">${esc(a.status)}</td><td class="small">${esc(typeof a.detail === "string" ? a.detail : JSON.stringify(a.detail || {}).slice(0, 240))}</td></tr>`).join("")}</table>` : ""}
+    <div class="charts-strip" data-pair="${esc(d.pair)}"></div>
     <p class="small"><b>Capabilities used:</b> ${caps}</p>
     ${d.errors ? `<p class="small fail">${esc(JSON.stringify(d.errors))}</p>` : ""}
     ${gate ? `<h2>Risk gate (${esc(d.execution_state)})</h2><table class="grid"><tbody>${gate}</tbody></table>` : ""}
@@ -259,7 +264,19 @@ async function showDecision(id, scroll = true) {
     <details><summary>Payload sent to the model</summary><pre>${esc(JSON.stringify(d.payload, null, 1))}</pre></details>
     <details><summary>Raw model output</summary><pre>${esc(d.raw_text || "")}</pre></details>`;
   updateCountdowns();
+  loadCharts(el.querySelector(".charts-strip"));
   if (scroll) el.scrollIntoView({ behavior: "smooth" });
+}
+
+/* the latest chart images the model received (Phase 3) */
+async function loadCharts(box) {
+  if (!box) return;
+  try {
+    const list = await api(`/api/charts/${encodeURIComponent(box.dataset.pair)}`);
+    if (!list.length) return;
+    box.innerHTML = `<h2>Charts sent to the model (latest)</h2>` + list.map((c) =>
+      `<figure class="chart-thumb"><img loading="lazy" alt="${esc(c.tf)} chart" src="/api/charts/${encodeURIComponent(box.dataset.pair)}/${encodeURIComponent(c.tf)}?t=${c.updated_ms}"><figcaption class="small muted">${esc(c.tf)} · ${fmtT(c.updated_ms)}</figcaption></figure>`).join("");
+  } catch (e) { /* charts are optional */ }
 }
 
 /* ------------------------------------------------------------------ performance */

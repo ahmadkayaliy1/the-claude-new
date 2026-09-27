@@ -9,7 +9,7 @@ SYS = dict(pair="XAUUSD", pair_list="BTCUSDT, ETHUSDT, XAUUSD", decision_tf="15m
            max_risk_pct=1.0, account_equity=158, account_currency="USD", price_reference="mt5:XAUUSD@",
            output_language="English", timeframe="1h", scope_text=" for XAUUSD")
 USER = dict(now_utc="2026-09-25T10:00:00Z", trigger_reason="15m close", payload="{}", max_valid_until="x",
-            assessments="[]", proposal="{}")
+            assessments="[]", proposal="{}", charts_note="No charts this cycle.", playbook="(no playbook yet)")
 TRADING_ROLES = ["agent_per_pair", "single_agent_global", "coordinator"]
 
 

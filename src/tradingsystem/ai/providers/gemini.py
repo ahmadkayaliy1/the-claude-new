@@ -31,6 +31,8 @@ _BLOCKED = ("SAFETY", "PROHIBITED", "BLOCKLIST", "RECITATION", "SPII", "LANGUAGE
 
 
 class GeminiProvider(LLMProvider):
+    supports_images = False     # fallback provider: chart images are dropped (one warning), the call goes out as text
+
     def __init__(self, *a, **kw) -> None:
         super().__init__(*a, **kw)
         if not self.api_key:

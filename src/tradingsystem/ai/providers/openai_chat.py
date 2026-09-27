@@ -15,6 +15,8 @@ from .base import LLMProvider, LLMResult, ProviderError, Refusal, transport_sche
 
 
 class OpenAIChatProvider(LLMProvider):
+    supports_images = False     # endpoints differ in vision support: chart images are dropped (one warning)
+
     def __init__(self, *a, **kw) -> None:
         super().__init__(*a, **kw)
         key = self.api_key or ("ollama" if self.cfg.base_url and "127.0.0.1" in self.cfg.base_url else None)

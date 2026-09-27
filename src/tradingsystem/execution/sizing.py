@@ -11,6 +11,24 @@ import math
 from dataclasses import dataclass
 
 
+def split_volume(total: float, fractions: list[float], step: float, vmin: float) -> list[float] | None:
+    """Split ``total`` lots by fractions on the volume step; None if any leg would fall below the minimum (then the
+    backends place ONE position at the take-profit with the largest fraction, ties → the nearest)."""
+    steps = round(total / step)
+    raw = [steps * f / sum(fractions) for f in fractions]
+    legs = [math.floor(x) for x in raw]
+    for i in sorted(range(len(raw)), key=lambda i: raw[i] - legs[i], reverse=True)[: steps - sum(legs)]:
+        legs[i] += 1
+    vols = [round(n * step, 8) for n in legs]
+    return vols if all(v >= vmin - 1e-12 for v in vols) else None
+
+
+def single_leg_index(fractions: list[float]) -> int:
+    """The take-profit a single position goes to when the volume cannot be split: the largest close fraction,
+    ties → the nearest target (take-profits are ordered nearest first)."""
+    return max(range(len(fractions)), key=lambda i: (fractions[i], -i))
+
+
 @dataclass
 class SizeResult:
     ok: bool

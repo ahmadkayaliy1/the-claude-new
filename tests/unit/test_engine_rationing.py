@@ -40,9 +40,16 @@ def events(e, name):
     return one(e, "SELECT count(*) FROM ingestion_events WHERE event=?", name)[0]
 
 
-def test_review_fires_once_per_decision(eng):
+def price_review(eng, monkeypatch, level=100.0):
+    """A decision whose next_review waits for a price condition (met: the quote is 101/102)."""
     rec = rec_for()
-    rec["next_review"] = {"in_minutes": 30}
+    rec["next_review"] = {"in_minutes": 240, "conditions": [{"kind": "price_above", "value": level}]}
+    monkeypatch.setattr(eng.builder, "quote_at", lambda inst, now: {"bid": 101, "ask": 102})
+    return rec
+
+
+def test_review_fires_once_per_decision(eng, monkeypatch):
+    rec = price_review(eng, monkeypatch)
     eng.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=rec, ts=T0))
     fire, reasons, strength = eng.evaluate("XAUUSD", T0 + 31 * MIN, False, None, "hybrid")
     assert fire and strength == "review"
@@ -51,11 +58,10 @@ def test_review_fires_once_per_decision(eng):
         assert not eng.evaluate("XAUUSD", t, False, None, "hybrid")[0]
 
 
-def test_review_survives_a_call_that_never_answered(eng):
+def test_review_survives_a_call_that_never_answered(eng, monkeypatch):
     """Integration review: an 'error' (e.g. usage limit) or data-gate 'skipped' row does not consume the review;
     it re-fires after the floor instead of being lost."""
-    rec = rec_for()
-    rec["next_review"] = {"in_minutes": 30}
+    rec = price_review(eng, monkeypatch)
     eng.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=rec, ts=T0))
     eng.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "review", "error", ts=T0 + 31 * MIN))
     eng.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "setup", "skipped", ts=T0 + 32 * MIN))
@@ -142,3 +148,51 @@ def test_quota_pressure(eng, monkeypatch, left, kept):
     monkeypatch.setattr(eng.orch, "quota", lambda name=None: (left, 100))
     fired = [("a", [], "weak", None), ("b", [], "strong", None), ("c", [], "review", None)]
     assert {f[0] for f in eng._ration(fired, T0)} == kept
+
+
+# ------------------------------------------------------------------ Phase 3: time reviews only on change, events
+def test_time_review_needs_a_change(eng, monkeypatch):
+    """§3.7.2: a pure time-based next_review fires only when a decision bar closed since the call AND a new setup
+    appeared or price moved more than screen_move_atr × ATR."""
+    rec = rec_for()
+    rec["next_review"] = {"in_minutes": 30}
+    eng.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation=rec, ts=T0))
+    eng.last_call["XAUUSD"] = T0
+    eng.store.kv_set("XAUUSD:signature", sorted(eng.evaluate("XAUUSD", T0, True, PAYLOAD, "hybrid") and
+                                                 eng._sig.get("XAUUSD", [])))      # nothing new since the call
+    mid = (PAYLOAD["market"]["analysis_price"]["bid"] + PAYLOAD["market"]["analysis_price"]["ask"]) / 2 \
+        if PAYLOAD["market"].get("analysis_price", {}).get("bid") else PAYLOAD["market"]["analysis_price"]["last_close_1m"]
+    eng.store.kv_set("XAUUSD:last_call_price", mid)                                # price has not moved
+    assert not eng.evaluate("XAUUSD", T0 + 31 * MIN, True, PAYLOAD, "hybrid")[0]
+    atr = PAYLOAD["timeframes"]["15m"]["indicators"]["atr14"]
+    eng.store.kv_set("XAUUSD:last_call_price", mid - 0.8 * atr)                     # 0.8 ATR move since the call
+    fire, reasons, strength = eng.evaluate("XAUUSD", T0 + 31 * MIN, True, PAYLOAD, "hybrid")
+    assert fire and strength == "review" and any("ATR since the last call" in r for r in reasons)
+
+
+def test_executor_events_wake_the_model_after_coalescing(eng):
+    eng.last_call["XAUUSD"] = T0
+    eng.appdb.add_event("executor", "order", "demo XAUUSD abcd1234: [placed]")
+    rows = eng._pair_events("XAUUSD")
+    assert len(rows) == 1
+    ts = int(rows[0]["ts"])
+    ripe = [e for e in rows if ts + 61_000 - int(e["ts"]) >= eng_mod.EVENT_COALESCE_MS]
+    fire, reasons, strength = eng.evaluate("XAUUSD", ts + 61_000 if ts + 61_000 > T0 + 5 * MIN else T0 + 6 * MIN,
+                                           False, None, "hybrid", events=ripe)
+    assert fire and strength == "event" and reasons[0].startswith("event:") and "XAUUSD" in reasons[0]
+    eng._remember_call("XAUUSD", PAYLOAD, "event")
+    assert eng._events["XAUUSD"] == []                                              # consumed by the call
+
+
+def test_event_calls_have_a_daily_budget(eng):
+    now = T0 + 10 * MIN
+    for i in range(eng.s.ai.event_calls_per_day):
+        r = DecisionRecord("XAUUSD", "agent_per_pair", "event: x", "valid", ts=now - i)
+        r.trigger_strength = "event"
+        eng.store.save(r)
+    assert not eng._event_budget("XAUUSD", now)
+    assert eng._event_budget("BTCUSDT", now)
+
+
+def test_screen_timeframe_is_5m_for_15m_pairs(eng):
+    assert eng.screen_tf("XAUUSD").value == "5m"

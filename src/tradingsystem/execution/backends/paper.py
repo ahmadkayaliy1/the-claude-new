@@ -4,7 +4,10 @@ the execution instrument. Nothing is sent to any broker.
 Fill rules: BUY fills at the ask, SELL at the bid; BUY_LIMIT when ask ≤ price, BUY_STOP when ask ≥ price
 (fills at the ask → real slippage), SELL_LIMIT when bid ≥ price, SELL_STOP when bid ≤ price. A BUY position's
 SL/TP trigger on the bid (exit at the bid, so gaps slip through the stop), a SELL's on the ask. Multiple TPs
-are separate legs sized by close fraction; ``move_sl_to_breakeven`` after TP k is applied to the remaining legs.
+are separate legs sized by close fraction. The trade's ``management`` rules (breakeven after TP k, trailing, partial
+closes, time stops) are NOT applied here: :class:`..management.PositionManager` applies them to paper and MT5 legs
+alike (one source of truth) through :meth:`PaperBackend.modify_leg` / :meth:`close_legs` / :meth:`cancel_decision`,
+which also serve the model's own ``position_actions``.
 State persists in ``app.db`` (``paper_account`` / ``paper_legs``). Each leg keeps a persisted watermark ``eval_key``
 (key of the last tick it was evaluated on, written in the same transaction as its state), so a restart replays
 exactly the ticks it missed and no tick is ever applied twice (idempotent replay, e.g. after a breakeven move).
@@ -190,11 +193,102 @@ class PaperBackend:
         return {"ok": True, "legs": [r[0] for r in rows], "volumes": vols, "note": note,
                 "fill_price": rows[0][15] if rec["order_type"] == "MARKET" else None}
 
-    def cancel_decision(self, decision_id: str, reason: str = "cancelled") -> int:
+    def cancel_decision(self, decision_id: str, reason: str = "cancelled", leg_ids: list[str] | None = None) -> int:
+        """Cancel the decision's pending legs (only ``leg_ids`` when given). Returns how many were cancelled."""
+        q = "UPDATE paper_legs SET status=?, close_reason=? WHERE decision_id=? AND status=?"
+        args: tuple = (CANCELLED, reason, decision_id, PENDING)
+        if leg_ids is not None:
+            q, args = q + f" AND id IN ({','.join('?' * len(leg_ids))})", args + tuple(leg_ids)
         with self._lock:
-            cur = self._con.execute("UPDATE paper_legs SET status=?, close_reason=? WHERE decision_id=? AND status=?",
-                                    (CANCELLED, reason, decision_id, PENDING))
-            return cur.rowcount
+            return self._con.execute(q, args).rowcount
+
+    # ------------------------------------------------------------------ management (PositionManager / model actions)
+    def modify_leg(self, leg_id: str, sl: float | None = None, tp: float | None = None,
+                   quote: Tick | None = None) -> dict:
+        """Move an open or pending leg's stop and/or take-profit. The stop only ever tightens (BUY: higher, SELL:
+        lower) and is never removed; with ``quote``, an open leg's new stop must be on the protective side of the
+        price (else ``deferred``) and its new take-profit on the profit side (else ``rejected``). The venue's stops
+        level is the caller's check (the paper account has none)."""
+        with self._lock:
+            row = self._con.execute("SELECT side, status, sl, tp FROM paper_legs WHERE id=?", (leg_id,)).fetchone()
+            if row is None:
+                return {"ok": False, "status": "failed", "reason": f"paper leg {leg_id} not found"}
+            side, status, cur_sl, cur_tp = row
+            if status not in (OPEN, PENDING):
+                return {"ok": False, "status": "failed", "reason": f"paper leg {leg_id} is {status}"}
+            buy = side == "BUY"
+            live = status == OPEN and quote is not None
+            if sl is not None:
+                if sl <= 0:
+                    return {"ok": False, "status": "rejected", "reason": "refused: a stop can never be removed"}
+                if not (sl >= cur_sl if buy else sl <= cur_sl):
+                    return {"ok": False, "status": "rejected",
+                            "reason": f"refused: stop {sl} would widen {cur_sl} of a {side} (tighten only)"}
+                if live and not (sl < quote.bid if buy else sl > quote.ask):
+                    return {"ok": False, "status": "deferred",
+                            "reason": f"stop {sl} is not on the protective side of the {'bid' if buy else 'ask'} "
+                                      f"{quote.bid if buy else quote.ask}"}
+            if tp is not None and live and not (tp > quote.bid if buy else tp < quote.ask):
+                return {"ok": False, "status": "rejected",
+                        "reason": f"take-profit {tp} is not on the profit side of the {'bid' if buy else 'ask'}"}
+            self._con.execute("UPDATE paper_legs SET sl=COALESCE(?, sl), tp=COALESCE(?, tp) WHERE id=? AND status IN "
+                              "(?,?)", (sl, tp, leg_id, OPEN, PENDING))
+        return {"ok": True, "status": "applied", "reason": "modified", "sl": sl if sl is not None else cur_sl,
+                "tp": tp if tp is not None else cur_tp}
+
+    def close_legs(self, decision_id: str, volume: float | None, quote: Tick, leg_ids: list[str] | None = None,
+                   reason: str = "rule") -> dict:
+        """Close ``volume`` lots (None = all) of the decision's open legs (only ``leg_ids`` when given) at the real
+        bid (BUY) / ask (SELL) of ``quote``: whole legs in TP order, then part of the next one. A partial close
+        shrinks the leg and books the closed part as its own closed row (``<leg id>:p<n>``) with its PnL, so realised
+        PnL, outcomes and the account stay consistent. ``reason`` (rule | model) is the closed rows' close_reason."""
+        with self._lock:
+            cur = self._con.execute("SELECT * FROM paper_legs WHERE decision_id=? AND status=? ORDER BY tp_index, id",
+                                    (decision_id, OPEN))
+            cols = [c[0] for c in cur.description]
+            legs = [dict(zip(cols, r)) for r in cur.fetchall()]
+            if leg_ids is not None:
+                legs = [lg for lg in legs if lg["id"] in set(leg_ids)]
+            if not legs:
+                return {"ok": False, "status": "failed", "reason": "no open paper leg to close"}
+            left = sum(lg["volume"] for lg in legs) if volume is None else float(volume)
+            closed, realized = [], 0.0
+            self._con.execute("BEGIN")
+            try:
+                for lg in legs:
+                    if left <= 1e-9:
+                        break
+                    v = min(lg["volume"], left)
+                    px = quote.bid if lg["side"] == "BUY" else quote.ask
+                    t = max(quote.time_msc, lg["fill_ms"] or 0)
+                    pnl = round(((px - lg["fill_price"]) if lg["side"] == "BUY" else (lg["fill_price"] - px))
+                                * v * lg["contract_size"], 4)
+                    if v >= lg["volume"] - 1e-9:
+                        self._con.execute("UPDATE paper_legs SET status=?, close_price=?, close_ms=?, close_reason=?, "
+                                          "pnl_usd=? WHERE id=? AND status=?",
+                                          (CLOSED, px, t, reason, pnl, lg["id"], OPEN))
+                        cid = lg["id"]
+                    else:
+                        n = self._con.execute("SELECT count(*) FROM paper_legs WHERE id LIKE ?",
+                                              (lg["id"] + ":p%",)).fetchone()[0]
+                        cid = f"{lg['id']}:p{n + 1}"
+                        self._con.execute("UPDATE paper_legs SET volume=? WHERE id=?",
+                                          (round(lg["volume"] - v, 8), lg["id"]))
+                        row = {**lg, "id": cid, "volume": round(v, 8), "status": CLOSED, "close_price": px,
+                               "close_ms": t, "close_reason": reason, "pnl_usd": pnl}
+                        self._con.execute(f"INSERT INTO paper_legs ({', '.join(cols)}) "
+                                          f"VALUES ({','.join('?' * len(cols))})", [row[c] for c in cols])
+                    closed.append({"leg": cid, "volume": round(v, 8), "price": px, "pnl_usd": pnl})
+                    realized += pnl
+                    left = round(left - v, 8)
+                if realized:
+                    self._con.execute("UPDATE paper_account SET realized_usd = realized_usd + ?", (realized,))
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+        return {"ok": True, "status": "applied", "reason": f"closed {sum(c['volume'] for c in closed):g} lots",
+                "closed": closed, "realized_usd": round(realized, 4)}
 
     # ------------------------------------------------------------------ simulation
     def watermarks(self) -> dict[str, int]:
@@ -246,8 +340,6 @@ class PaperBackend:
                         leg.update(status=CLOSED, close_price=px, close_ms=t.time_msc, close_reason=reason,
                                    pnl_usd=round(pnl, 4))
                         events.append({"leg": leg["id"], "event": reason, "price": px, "pnl_usd": leg["pnl_usd"]})
-                        if reason == "tp":
-                            _apply_management(legs, leg)
         with self._lock:
             self._con.execute("BEGIN")
             for leg in legs:
@@ -308,16 +400,6 @@ def _exit_hit(leg: dict, t: Tick) -> tuple[str, float] | None:
         if leg["tp"] is not None and t.ask <= leg["tp"]:
             return "tp", leg["tp"]
     return None
-
-
-def _apply_management(legs: list[dict], closed_leg: dict) -> None:
-    rules = json.loads(closed_leg.get("management") or "[]")
-    for r in rules:
-        if r.get("action") == "move_sl_to_breakeven" and r.get("trigger") == "tp_hit" \
-                and int(r.get("value") or 1) == closed_leg["tp_index"]:
-            for other in legs:
-                if other["decision_id"] == closed_leg["decision_id"] and other["status"] == OPEN:
-                    other["sl"] = other["fill_price"]
 
 
 __all__ = ["PaperBackend", "Tick", "split_volume", "sqlite3"]

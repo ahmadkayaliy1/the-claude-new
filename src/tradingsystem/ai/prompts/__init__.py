@@ -22,6 +22,7 @@ ROLE_FILES = {
     "timeframe_analyst": ("timeframe_analyst/system.md", "timeframe_analyst/instructions.md"),
     "coordinator": ("coordinator/system.md", "coordinator/instructions.md"),
     "risk_reviewer": ("risk_reviewer/system.md", "risk_reviewer/instructions.md"),
+    "escalation": ("escalation/system.md", "escalation/instructions.md"),
 }
 
 
@@ -70,6 +71,19 @@ def render(role: str, system_vars: dict[str, object], user_vars: dict[str, objec
     system = _fill(_read(sys_file), base, sys_file)
     user = _fill(_read(user_file), {**system_vars, **user_vars}, user_file)
     return RenderedPrompt(role, system, user)
+
+
+_VERSION = re.compile(r"^<!-- prompt: (\S+) · version (\d+) -->", re.M)
+
+
+def versions() -> dict[str, int]:
+    """``{"shared/core_rules": 6, …}`` from the files' version headers (recorded with the library hash)."""
+    out = {}
+    for p in sorted(DIR.rglob("*.md")):
+        m = _VERSION.search(p.read_text(encoding="utf-8"))
+        if m:
+            out[m.group(1)] = int(m.group(2))
+    return out
 
 
 def library_hash() -> str:

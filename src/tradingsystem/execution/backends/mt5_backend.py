@@ -5,24 +5,49 @@ For every leg: build request (FOK filling, SL + TP attached, expiration in *serv
 retries for retryable codes (a timeout is only retried after verifying nothing was created) → post-fill
 slippage recorded. Every attempt is returned with its retcode meaning — no silent failures (spec §7.3).
 ``dry_run=True`` stops after ``order_check`` (used until the user approves demo orders, H6).
+
+Live-trade management (Phase 3, called only by ``PositionManager`` and the model's position actions): ``modify_sl``
+only ever tightens a stop and defers one the venue would refuse right now (closer than stops level + spread, or
+inside the freeze level); ``modify_tp`` keeps the take-profit on the profit side; ``close_position`` closes all or
+part of a position; ``cancel_order`` removes a pending order; ``legs_of`` lists a decision's positions, pending
+orders and closed legs (how each ended, from the deal history).
 """
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 from ...core.timeutil import now_ms, parse_date_spec
 from ...ingest.mt5.servertime import ServerTimeModel
 from ...ingest.mt5.terminal import MT5Terminal
 from ..exposure import aggregate, leg
+from ..management import Leg
 from ..retcodes import SUCCESS, describe, retryable
 from .paper import Tick, split_volume
 
 log = logging.getLogger(__name__)
+NO_CHANGES = 10025              # TRADE_RETCODE_NO_CHANGES: the request asks for what is already there → ok
+INVALID_FILL = 10030            # unsupported filling mode → try the next one
+TIMEOUT = 10012
+RETRY_SLEEP_S = 0.5             # between retries of a retryable code (× attempt number)
+HISTORY_DAYS = 45               # legs_of: how far back the history is searched for a decision's closed legs
 
 
 def tag(decision_id: str, leg: int) -> str:
     return f"ts:{decision_id[:20]}:{leg}"          # ≤ 31 chars (MT5 comment limit)
+
+
+def _tp_index(comment: str) -> int:
+    """1-based TP index from the tag ``ts:<id20>:<k>`` (1 when unreadable)."""
+    try:
+        return max(1, int((comment or "").split(":")[2]))
+    except (IndexError, ValueError):
+        return 1
+
+
+def _res(ok: bool, status: str, code: int | None, meaning: str, **kw) -> dict:
+    return {"ok": ok, "status": status, "retcode": code, "meaning": meaning, **kw}
 
 
 class MT5Backend:
@@ -256,30 +281,272 @@ class MT5Backend:
                 time.sleep(0.5 * (attempt + 1))
         return {"ok": True, "placed": results, "attempts": attempts, "note": note}
 
-    # ------------------------------------------------------------------ management
-    def modify_sl(self, ticket: int, symbol: str, sl: float, tp: float) -> dict:
-        res = self.mt5.order_send({"action": self.mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": symbol,
-                                   "sl": sl, "tp": tp, "magic": self.magic})
-        return {"ok": getattr(res, "retcode", None) in SUCCESS, "meaning": describe(getattr(res, "retcode", None))}
+    # ------------------------------------------------------------------ management (Phase 3)
+    def _send(self, req: dict, *, max_retries: int = 2, refresh=None,
+              settled=None) -> tuple[bool, int | None, object, list[dict]]:
+        """``order_send`` with bounded retries of retryable codes. ``refresh(req)`` updates the request before each
+        attempt (a fresh price); after a timeout / no answer, ``settled()`` checks whether the request took effect
+        anyway — it is never resent blindly. Every attempt is returned with its retcode meaning."""
+        attempts: list[dict] = []
+        code, res = None, None
+        for attempt in range(max_retries + 1):
+            if refresh is not None:
+                refresh(req)
+            res = self.mt5.order_send(req)
+            code = getattr(res, "retcode", None)
+            attempts.append({"attempt": attempt + 1, "retcode": code, "meaning": describe(code),
+                             "price": getattr(res, "price", None)})
+            if code in SUCCESS or code == NO_CHANGES:
+                return True, code, res, attempts
+            if code in (TIMEOUT, None) and settled is not None:
+                time.sleep(RETRY_SLEEP_S)
+                try:
+                    done = settled()
+                except Exception as exc:  # noqa: BLE001 — cannot verify → never resend blindly
+                    attempts[-1]["note"] = f"could not verify after the timeout: {exc!r}"[:200]
+                    return False, code, res, attempts
+                if done:
+                    attempts[-1]["note"] = "took effect despite the missing confirmation"
+                    return True, code, res, attempts
+            if not retryable(code) or attempt == max_retries:
+                return False, code, res, attempts
+            time.sleep(RETRY_SLEEP_S * (attempt + 1))
+        return False, code, res, attempts
 
-    def cancel_order(self, ticket: int) -> dict:
-        res = self.mt5.order_send({"action": self.mt5.TRADE_ACTION_REMOVE, "order": ticket, "magic": self.magic})
-        return {"ok": getattr(res, "retcode", None) in SUCCESS, "meaning": describe(getattr(res, "retcode", None))}
+    def _position(self, ticket: int):
+        return next(iter(self._ask(f"position {ticket}", self.mt5.positions_get(ticket=ticket))), None)
 
-    def close_position(self, ticket: int) -> dict:
-        """Market-close one of our positions at the current bid/ask (demo tests, manual flatten)."""
+    def _venue_now(self, symbol: str):
+        """(symbol_info, tick) or raises: nothing is changed at the broker without its live limits and price."""
+        info, q = self.mt5.symbol_info(symbol), self.mt5.symbol_info_tick(symbol)
+        if info is None or q is None:
+            raise RuntimeError(f"MT5 has no symbol info / quote for {symbol} ({self.mt5.last_error()})")
+        return info, q
+
+    @staticmethod
+    def _frozen(pos, q, freeze: float, buy: bool) -> str | None:
+        """A position whose current stop or take-profit is within the freeze level cannot be modified now."""
+        if freeze <= 0:
+            return None
+        px = q.bid if buy else q.ask
+        for name, lvl in (("stop", pos.sl), ("take-profit", pos.tp)):
+            if lvl and abs(px - lvl) <= freeze:
+                return f"deferred: the current {name} {lvl} is within the freeze level {freeze:.5g} of the price {px}"
+        return None
+
+    def modify_sl(self, ticket: int, symbol: str, sl: float, tp: float | None = None, *,
+                  max_retries: int = 2) -> dict:
+        """Tighten a position's stop (``tp`` None keeps its take-profit). Refused — ``rejected`` — when it would
+        widen or remove the stop (the position's current stop is read first); ``deferred`` when the venue would
+        refuse it now (closer than stops level + spread to the bid/ask it triggers on, or a freeze level applies);
+        retcode 10025 (no changes) counts as done; retryable codes are retried ``max_retries`` times."""
         m = self.mt5
-        pos = next(iter(m.positions_get(ticket=ticket) or ()), None)
+        pos = self._position(ticket)
         if pos is None:
-            return {"ok": False, "meaning": f"position {ticket} not found"}
-        q = m.symbol_info_tick(pos.symbol)
+            return _res(False, "failed", None, f"position {ticket} not found (closed?)")
+        info, q = self._venue_now(symbol)
+        sl = round(float(sl), info.digits)
         buy = pos.type == m.POSITION_TYPE_BUY
-        res = m.order_send({"action": m.TRADE_ACTION_DEAL, "position": ticket, "symbol": pos.symbol,
-                            "volume": pos.volume, "type": m.ORDER_TYPE_SELL if buy else m.ORDER_TYPE_BUY,
-                            "price": q.bid if buy else q.ask, "magic": self.magic, "comment": pos.comment[:31],
-                            "type_filling": self._filling(self.specs(pos.symbol))})
-        code = getattr(res, "retcode", None)
-        return {"ok": code in SUCCESS, "retcode": code, "meaning": describe(code), "price": getattr(res, "price", None)}
+        cur = pos.sl or None
+        if sl <= 0:
+            return _res(False, "rejected", None, "refused: a stop can never be removed", sl=sl)
+        if cur is not None and abs(sl - cur) < info.point / 2:
+            return _res(True, "applied", NO_CHANGES, f"{describe(NO_CHANGES)} — the stop is already {cur}", sl=sl)
+        if cur is not None and not (sl > cur if buy else sl < cur):
+            return _res(False, "rejected", None, f"refused: stop {sl} would widen {cur} of a "
+                                                 f"{'BUY' if buy else 'SELL'} (tighten only)", sl=sl)
+        stops, freeze = info.trade_stops_level * info.point, getattr(info, "trade_freeze_level", 0) * info.point
+        px = q.bid if buy else q.ask
+        dist, need = (px - sl) if buy else (sl - px), stops + (q.ask - q.bid)
+        if dist < need - 1e-9 or dist <= freeze:
+            return _res(False, "deferred", None, f"deferred: stop {sl} is {dist:.5g} from the {'bid' if buy else 'ask'} "
+                                                 f"{px} (needs ≥ stops level + spread {need:.5g}"
+                                                 f"{f', > freeze level {freeze:.5g}' if freeze else ''})", sl=sl)
+        if (why := self._frozen(pos, q, freeze, buy)) is not None:
+            return _res(False, "deferred", None, why, sl=sl)
+        keep_tp = round(float(tp), info.digits) if tp else (pos.tp or 0.0)
+        ok, code, _, attempts = self._send({"action": m.TRADE_ACTION_SLTP, "position": ticket, "symbol": symbol,
+                                            "sl": sl, "tp": keep_tp, "magic": self.magic}, max_retries=max_retries)
+        return _res(ok, "applied" if ok else "failed", code, describe(code), sl=sl, attempts=attempts)
+
+    def modify_tp(self, ticket: int, symbol: str, tp: float, *, max_retries: int = 2) -> dict:
+        """Move a position's take-profit (either way), keeping its stop. It must stay on the profit side of the
+        price it triggers on (bid for a BUY, ask for a SELL) and at least the stops level away (else ``rejected``);
+        a freeze level in force → ``deferred``."""
+        m = self.mt5
+        pos = self._position(ticket)
+        if pos is None:
+            return _res(False, "failed", None, f"position {ticket} not found (closed?)")
+        info, q = self._venue_now(symbol)
+        tp = round(float(tp), info.digits)
+        buy = pos.type == m.POSITION_TYPE_BUY
+        if tp <= 0:
+            return _res(False, "rejected", None, "refused: a take-profit needs a price > 0", tp=tp)
+        if pos.tp and abs(tp - pos.tp) < info.point / 2:
+            return _res(True, "applied", NO_CHANGES, f"{describe(NO_CHANGES)} — the take-profit is already {pos.tp}",
+                        tp=tp)
+        stops, freeze = info.trade_stops_level * info.point, getattr(info, "trade_freeze_level", 0) * info.point
+        px = q.bid if buy else q.ask
+        dist = (tp - px) if buy else (px - tp)
+        if dist < stops - 1e-9 or dist <= freeze:
+            return _res(False, "rejected", None, f"refused: take-profit {tp} is {dist:.5g} beyond the "
+                                                 f"{'bid' if buy else 'ask'} {px} (profit side, ≥ stops level "
+                                                 f"{stops:.5g})", tp=tp)
+        if (why := self._frozen(pos, q, freeze, buy)) is not None:
+            return _res(False, "deferred", None, why, tp=tp)
+        ok, code, _, attempts = self._send({"action": m.TRADE_ACTION_SLTP, "position": ticket, "symbol": symbol,
+                                            "sl": pos.sl or 0.0, "tp": tp, "magic": self.magic},
+                                           max_retries=max_retries)
+        return _res(ok, "applied" if ok else "failed", code, describe(code), tp=tp, attempts=attempts)
+
+    def _fillings(self, spec: dict) -> list[int]:
+        """The symbol's preferred filling mode first (as ``place``), then the others in FOK → IOC → RETURN order."""
+        m, first = self.mt5, self._filling(spec)
+        return [first] + [f for f in (m.ORDER_FILLING_FOK, m.ORDER_FILLING_IOC, m.ORDER_FILLING_RETURN) if f != first]
+
+    def close_position(self, ticket: int, volume: float | None = None, *, max_retries: int = 2) -> dict:
+        """Market-close ``volume`` lots (None = all) of one of our positions at the current bid/ask, keeping its
+        magic and comment tag. A partial volume is rounded down to the volume step and must leave at least the
+        minimum lot open. An unsupported filling mode falls through to the next; a timeout is verified against the
+        position's remaining volume before any retry (a close is never sent twice)."""
+        m = self.mt5
+        pos = self._position(ticket)
+        if pos is None:
+            return _res(False, "failed", None, f"position {ticket} not found (closed?)")
+        spec = self.specs(pos.symbol)
+        step, vmin, before = spec["volume_step"], spec["volume_min"], float(pos.volume)
+        full = volume is None or volume >= before - 1e-9
+        vol = before if full else round(math.floor(float(volume) / step + 1e-7) * step, 8)
+        if not full and vol < vmin - 1e-9:
+            return _res(False, "rejected", None, f"refused: {vol:g} lots is below the minimum lot {vmin:g}", volume=vol)
+        if not full and before - vol < vmin - 1e-9:
+            return _res(False, "rejected", None, f"refused: closing {vol:g} of {before:g} lots would leave less than "
+                                                 f"the minimum lot {vmin:g}", volume=vol)
+        buy = pos.type == m.POSITION_TYPE_BUY
+
+        def refresh(r: dict) -> None:
+            q = m.symbol_info_tick(pos.symbol)
+            if q is None:
+                raise RuntimeError(f"MT5 has no quote for {pos.symbol} ({m.last_error()})")
+            r["price"] = q.bid if buy else q.ask
+
+        def settled() -> bool:
+            p = self._position(ticket)
+            return p is None or float(p.volume) <= before - vol + 1e-9
+
+        req = {"action": m.TRADE_ACTION_DEAL, "position": ticket, "symbol": pos.symbol, "volume": float(vol),
+               "type": m.ORDER_TYPE_SELL if buy else m.ORDER_TYPE_BUY, "price": 0.0, "magic": self.magic,
+               "comment": (pos.comment or "")[:31]}
+        attempts: list[dict] = []
+        ok, code, res = False, None, None
+        for filling in self._fillings(spec):
+            req["type_filling"] = filling
+            ok, code, res, att = self._send(req, max_retries=max_retries, refresh=refresh, settled=settled)
+            attempts += [{**a, "filling": filling} for a in att]
+            if ok or code != INVALID_FILL:
+                break
+        return _res(ok, "applied" if ok else "failed", code, describe(code), price=getattr(res, "price", None),
+                    volume=vol, attempts=attempts)
+
+    def cancel_order(self, ticket: int, *, max_retries: int = 2) -> dict:
+        """Remove one of our pending orders; every attempt with its retcode meaning."""
+        m = self.mt5
+        if not self._ask(f"order {ticket}", m.orders_get(ticket=ticket)):
+            return _res(False, "failed", None, f"order {ticket} not found (filled, cancelled or expired)")
+
+        def settled() -> bool:
+            return not self._ask(f"order {ticket}", m.orders_get(ticket=ticket))
+
+        ok, code, _, attempts = self._send({"action": m.TRADE_ACTION_REMOVE, "order": ticket, "magic": self.magic},
+                                           max_retries=max_retries, settled=settled)
+        return _res(ok, "applied" if ok else "failed", code, describe(code), attempts=attempts)
+
+    # ------------------------------------------------------------------ a decision's legs
+    def _utc(self, server_ms) -> int | None:
+        try:
+            return self.model.server_to_utc(int(server_ms), prefer="earlier") if server_ms else None
+        except Exception:  # noqa: BLE001 — a timestamp we cannot map is unknown, not wrong
+            return None
+
+    def legs_of(self, decision_id: str, *, since_s: int | None = None, history: bool = True,
+                positions=None, orders=None) -> list[Leg]:
+        """This system's legs of one decision (comment tag ``ts:<id20>:<k>``, :meth:`mine` ownership): open
+        positions, pending orders and — with ``history`` — closed legs: filled positions no longer open (how they
+        ended from the last closing deal: ``DEAL_REASON_TP`` → tp, ``DEAL_REASON_SL`` → sl, anything else →
+        other) and orders that never filled (expired / cancelled). A closed position whose closing deals do not yet
+        cover its volume (history still syncing) is left out until they do — unknown, never "closed".
+        ``positions`` / ``orders`` reuse a snapshot already read this loop. Raises when the terminal cannot be asked."""
+        m, prefix = self.mt5, f"ts:{decision_id[:20]}:"
+        pos = self._ask("positions", m.positions_get() if positions is None else positions)
+        ords = self._ask("orders", m.orders_get() if orders is None else orders)
+        buy_orders = {getattr(m, f"ORDER_TYPE_{n}", None) for n in ("BUY", "BUY_LIMIT", "BUY_STOP", "BUY_STOP_LIMIT")}
+        out: list[Leg] = []
+        open_ids, pending_ids = set(), set()
+        for p in pos:
+            if not (self.mine(p) and (p.comment or "").startswith(prefix)):
+                continue
+            open_ids.add(getattr(p, "identifier", 0) or p.ticket)
+            out.append(Leg(key=str(p.ticket), decision_id=decision_id, pair=self._pair(p.symbol), symbol=p.symbol,
+                           side="BUY" if p.type == m.POSITION_TYPE_BUY else "SELL", kind="position",
+                           volume=float(p.volume), fill=float(p.price_open), sl=p.sl or None,
+                           tp=getattr(p, "tp", 0) or None, tp_index=_tp_index(p.comment),
+                           opened_ms=self._utc(getattr(p, "time_msc", 0))))
+        for o in ords:
+            if not (self.mine(o) and (o.comment or "").startswith(prefix)):
+                continue
+            pending_ids.add(o.ticket)
+            out.append(Leg(key=str(o.ticket), decision_id=decision_id, pair=self._pair(o.symbol), symbol=o.symbol,
+                           side="BUY" if o.type in buy_orders else "SELL", kind="order",
+                           volume=float(o.volume_current), order_price=float(o.price_open), sl=o.sl or None,
+                           tp=getattr(o, "tp", 0) or None, tp_index=_tp_index(o.comment),
+                           opened_ms=self._utc(getattr(o, "time_setup_msc", 0))))
+        if not history:
+            return out
+        now_s = int(time.time())
+        hist = self._ask("history orders", m.history_orders_get(
+            since_s if since_s is not None else now_s - HISTORY_DAYS * 86_400, now_s + 86_400))
+        by_pos: dict[int, list] = {}
+        unfilled = []
+        for o in hist:
+            if not (self.mine(o) and (o.comment or "").startswith(prefix)):
+                continue
+            pid = getattr(o, "position_id", 0) or 0
+            if pid:
+                by_pos.setdefault(pid, []).append(o)       # the opening order and our own closing orders
+            elif o.ticket not in pending_ids:
+                unfilled.append(o)
+        state_reason = {getattr(m, "ORDER_STATE_EXPIRED", 6): "expired",
+                        getattr(m, "ORDER_STATE_CANCELED", 2): "cancelled"}
+        for o in unfilled:
+            out.append(Leg(key=str(o.ticket), decision_id=decision_id, pair=self._pair(o.symbol), symbol=o.symbol,
+                           side="BUY" if o.type in buy_orders else "SELL", kind="closed",
+                           volume=float(getattr(o, "volume_initial", 0) or getattr(o, "volume_current", 0)),
+                           order_price=o.price_open or None, sl=o.sl or None, tp=getattr(o, "tp", 0) or None,
+                           tp_index=_tp_index(o.comment), opened_ms=self._utc(getattr(o, "time_setup_msc", 0)),
+                           closed_reason=state_reason.get(getattr(o, "state", None), "other")))
+        for pid in sorted(by_pos):
+            if pid not in open_ids and (lg := self._closed_leg(decision_id, pid, by_pos[pid])) is not None:
+                out.append(lg)
+        return out
+
+    def _closed_leg(self, decision_id: str, pid: int, orders: list) -> Leg | None:
+        m = self.mt5
+        deals = self._ask(f"deals of position {pid}", m.history_deals_get(position=pid))
+        ins = [d for d in deals if d.entry == m.DEAL_ENTRY_IN]
+        outs = [d for d in deals if d.entry in (m.DEAL_ENTRY_OUT, m.DEAL_ENTRY_OUT_BY)]
+        v_in, v_out = sum(d.volume for d in ins), sum(d.volume for d in outs)
+        if not ins or not outs or v_out + 1e-9 < v_in:
+            return None
+        last = max(outs, key=lambda d: (getattr(d, "time_msc", 0), getattr(d, "ticket", 0)))
+        reason = {getattr(m, "DEAL_REASON_SL", 4): "sl", getattr(m, "DEAL_REASON_TP", 5): "tp"}.get(
+            getattr(last, "reason", None), "other")
+        opener = next((o for o in orders if o.ticket == pid), orders[0])
+        symbol = getattr(ins[0], "symbol", None) or opener.symbol
+        return Leg(key=str(pid), decision_id=decision_id, pair=self._pair(symbol), symbol=symbol,
+                   side="BUY" if ins[0].type == m.DEAL_TYPE_BUY else "SELL", kind="closed", volume=float(v_in),
+                   fill=sum(d.price * d.volume for d in ins) / v_in, order_price=opener.price_open or None,
+                   sl=opener.sl or None, tp=getattr(opener, "tp", 0) or None, tp_index=_tp_index(opener.comment),
+                   opened_ms=self._utc(getattr(ins[0], "time_msc", 0)), closed_reason=reason)
 
     # ------------------------------------------------------------------ outcomes (P9.6)
     def _ask(self, what: str, value):

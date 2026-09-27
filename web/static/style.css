@@ -50,3 +50,9 @@ details summary { cursor: pointer; color: var(--blue); margin: 8px 0; }
 .pass { color: var(--green); } .fail { color: var(--red); }
 .q-real { color: var(--green); } .q-approx { color: var(--amber); } .q-proxy { color: var(--violet); } .q-unavailable { color: var(--muted); }
 @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } header { flex-wrap: wrap; } }
+
+/* Phase 3: chart thumbnails of the images sent to the model */
+.charts-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.charts-strip h2 { flex-basis: 100%; }
+.chart-thumb { margin: 0; max-width: 360px; }
+.chart-thumb img { width: 100%; height: auto; border: 1px solid var(--line, #333); border-radius: 4px; }

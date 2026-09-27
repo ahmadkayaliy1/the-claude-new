@@ -92,6 +92,14 @@ class UsageStore:
         with self._lock:
             return int(self._con.execute(sql, args).fetchone()[0])
 
+    def count_role_since(self, role: str, since_ms: int, pair: str | None = None) -> int:
+        """Ledger rows of one role (e.g. 'escalation') since ``since_ms`` — for per-role daily limits."""
+        sql, args = "SELECT count(*) FROM ai_usage WHERE role=? AND ts>=?", [role, since_ms]
+        if pair:
+            sql, args = sql + " AND pair=?", args + [pair]
+        with self._lock:
+            return int(self._con.execute(sql, args).fetchone()[0])
+
     def cost_since(self, since_ms: int, pair: str | None = None) -> float:
         sql, args = "SELECT COALESCE(sum(cost_usd),0) FROM ai_usage WHERE ts>=?", [since_ms]
         if pair:
