@@ -183,6 +183,12 @@ def test_no_result_never_quotes_events(prov):
 def test_parse_real_stream_json_capture(prov):
     r = prov.parse((FIX / "claude_code_stream_json_result.jsonl").read_text(encoding="utf-8"), "", 0)
     assert r.text and r.input_tokens > 0 and r.output_tokens > 0 and r.extra["num_turns"] == 1
+    # the Phase 3 live call (6 images): the numbers the ledger recorded, and an answer the contract accepts
+    assert (r.input_tokens, r.output_tokens, r.model) == (24864, 2608, "claude-sonnet-5")
+    from tradingsystem.ai.contract import Recommendation
+    from tradingsystem.ai.providers.base import extract_json
+    rec = Recommendation.model_validate(extract_json(r.text))
+    assert rec.decision.value == "NO_TRADE" and rec.position_actions == []
 
 
 def test_input_rejected_rules(monkeypatch):

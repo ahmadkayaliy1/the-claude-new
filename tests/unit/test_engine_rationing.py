@@ -3,6 +3,7 @@ data directory; the AI side is replaced by awaitable stand-ins, market data come
 import asyncio
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -196,3 +197,36 @@ def test_event_calls_have_a_daily_budget(eng):
 
 def test_screen_timeframe_is_5m_for_15m_pairs(eng):
     assert eng.screen_tf("XAUUSD").value == "5m"
+
+
+def test_once_waits_for_the_first_sign_in_answer(monkeypatch):
+    """``engine --once`` must not fall back just because the background ``claude auth status`` has not answered."""
+    from tradingsystem.analysis.engine import wait_for_provider
+
+    class Prov:
+        def __init__(self, answers_after):
+            self.asked, self.after = 0, answers_after
+
+        def unavailable_reason(self):
+            self.asked += 1
+            return None if self.asked > self.after else "claude_code: checking the Claude Code sign-in"
+
+        @property
+        def availability_pending(self):
+            return self.asked <= self.after
+
+    class Orch:
+        def __init__(self, prov):
+            self.prov = prov
+            self.s = type("S", (), {"ai": type("A", (), {"active_provider": "claude_code"})()})()
+
+        def _get(self, name, role):
+            return self.prov
+
+    p = Prov(3)
+    wait_for_provider(Orch(p), timeout_s=5, poll_s=0.01)
+    assert p.asked == 4 and not p.availability_pending
+    slow = Prov(10_000)
+    t0 = time.monotonic()
+    wait_for_provider(Orch(slow), timeout_s=0.1, poll_s=0.01)      # bounded: gives up and lets the cycle report it
+    assert time.monotonic() - t0 < 2

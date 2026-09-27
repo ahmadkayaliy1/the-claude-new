@@ -486,6 +486,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.once:
             pairs = [p for p in (args.pairs.split(",") if args.pairs else s.enabled_pairs()) if p]
+            wait_for_provider(eng.orch)
             now = now_ms()
             payloads = {p: eng.orch.payload(p, now, eng.live_account(p)) for p in pairs}
             for p, pl in payloads.items():          # manual run: the data gate only warns
@@ -510,7 +511,23 @@ def main(argv: list[str] | None = None) -> int:
         eng.close()
 
 
-__all__ = ["Engine", "main", "to_json"]
+__all__ = ["Engine", "main", "to_json", "wait_for_provider"]
+
+
+def wait_for_provider(orch: Orchestrator, timeout_s: float = 120.0, poll_s: float = 0.5) -> None:
+    """``--once``: the active provider's first availability check (the Claude Code sign-in, ``claude auth status``)
+    runs in a background thread and answers "checking" until done — the long-running engine simply asks again on its
+    next tick, a one-shot run must wait for that first answer or it would always fall back. Bounded; never raises."""
+    try:
+        prov = orch._get(orch.s.ai.active_provider, "decision")      # the instance the cycle will use
+    except Exception:  # noqa: BLE001 — the cycle reports a provider that cannot even be built
+        return
+    deadline = time.monotonic() + timeout_s
+    while True:
+        prov.unavailable_reason()                       # starts (or re-starts after a stagger) the background check
+        if not prov.availability_pending or time.monotonic() >= deadline:
+            return
+        time.sleep(poll_s)
 
 
 def _payload_mid(payload: dict | None) -> float | None:

@@ -217,7 +217,11 @@ def test_overlay_spec_reads_the_real_payload(xau):
 def test_overlay_spec_only_requested_and_missing_blocks(xau):
     assert set(overlay_spec(xau, "15m", ["levels"])) == {"levels"}
     s = overlay_spec(xau, "1w", ALL)                                      # 1w: "insufficient history" block
-    assert s["zones"] == [] and s["liquidity"] == [] and s["structure"] == [] and len(s["levels"]) == 7
+    assert s["zones"] == [] and s["liquidity"] == [] and s["structure"] == []
+    # the weekly / daily charts draw only their own horizon's levels; 4h and lower draw all seven
+    assert [lv["name"] for lv in s["levels"]] == ["week_open"]
+    assert [lv["name"] for lv in overlay_spec(xau, "1d", ["levels"])["levels"]] == ["pdh", "pdl", "pdc", "week_open"]
+    assert len(overlay_spec(xau, "4h", ["levels"])["levels"]) == 7
     assert overlay_spec({}, "5m", ALL) == {"levels": [], "zones": [], "liquidity": [], "structure": [],
                                            "ema": [20, 50], "holdings": []}
     junk = {"levels": {"a": None, "b": True, "c": "1", "d": float("nan"), "e": 5}, "timeframes": [1, 2],

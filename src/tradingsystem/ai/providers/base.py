@@ -185,6 +185,11 @@ class LLMProvider(ABC):
         orchestrator then routes to ``ai.fallback_provider`` and the engine reports the reason (F12)."""
         self.cooldown_until_ms, self.cooldown_reason = until_ms, reason
 
+    @property
+    def availability_pending(self) -> bool:
+        """True while the first availability check (e.g. the Claude Code sign-in) has not answered yet."""
+        return False
+
     def unavailable_reason(self) -> str | None:
         """Why the provider cannot take calls right now (e.g. not signed in, usage limit), or None."""
         if now_ms() < self.cooldown_until_ms:

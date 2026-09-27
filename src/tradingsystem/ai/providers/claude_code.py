@@ -273,7 +273,8 @@ class ClaudeCodeProvider(LLMProvider):
         self.workdir = Path(tempfile.gettempdir()) / "tradingsystem-claude-code"
         self.workdir.mkdir(parents=True, exist_ok=True)
         self._auth_checked = float("-inf")
-        self._auth_problem: str | None = f"{self.name}: checking the Claude Code sign-in"
+        self._auth_pending_msg = f"{self.name}: checking the Claude Code sign-in"
+        self._auth_problem: str | None = self._auth_pending_msg
         self._auth_ok_once = False
         self._auth_refreshing = False
         self._slots: asyncio.Semaphore | None = None
@@ -283,6 +284,10 @@ class ClaudeCodeProvider(LLMProvider):
             self._auth_problem, self._auth_ok_once, self._auth_checked = None, True, time.monotonic()
 
     # ------------------------------------------------------------------ availability
+    @property
+    def availability_pending(self) -> bool:
+        return self._auth_problem == self._auth_pending_msg
+
     def unavailable_reason(self, refresh: bool = True) -> str | None:
         """Cooldown, else the cached login check. Every check runs in a background thread — ``claude auth status``
         can take ~1 min on a cold, busy machine (measured 55 s) and the engine's event loop (heartbeat) must never

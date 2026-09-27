@@ -92,6 +92,13 @@ def token_estimate(width: int, height: int) -> int:
 
 
 # ------------------------------------------------------------------------------------------------------ overlay spec
+# Session and daily levels mean nothing at weekly / daily scale (and crowd the edge labels): those charts draw only
+# the levels of their own horizon; the 4h and lower charts draw every level.
+HTF_LEVELS = {"1w": frozenset({"week_open", "pwh", "pwl", "pmh", "pml", "month_open", "year_open"}),
+              "1d": frozenset({"pdh", "pdl", "pdc", "week_open", "pwh", "pwl", "pmh", "pml", "month_open",
+                               "year_open"})}
+
+
 def overlay_spec(payload: dict, tf: str, overlays: list[str]) -> dict:
     """The overlays of one timeframe's chart, extracted from the payload (pure; JSON-serialisable so it can be hashed
     for the cache). Only the requested overlays appear; a missing or malformed payload block gives an empty list."""
@@ -99,8 +106,9 @@ def overlay_spec(payload: dict, tf: str, overlays: list[str]) -> dict:
     tfb = _as_dict(_as_dict(payload.get("timeframes")).get(tf))
     spec: dict[str, Any] = {}
     if "levels" in want:
+        keep = HTF_LEVELS.get(tf)
         spec["levels"] = [{"name": str(k), "price": float(v)} for k, v in _as_dict(payload.get("levels")).items()
-                          if _finite(v)]
+                          if _finite(v) and (keep is None or str(k) in keep)]
     if "zones" in want:
         z = _as_dict(tfb.get("zones"))
         spec["zones"] = ([r for r in (_zone("ob", x) for x in _rows(z.get("order_blocks"))[:MAX_ZONES]) if r]
