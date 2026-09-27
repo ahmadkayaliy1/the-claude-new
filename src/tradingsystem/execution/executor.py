@@ -66,6 +66,7 @@ BASIS_QUOTE_MAX_MS = 60_000          # management / model actions: both quotes a
 BASIS_CACHE_S = 15.0                 # … checked against its 60-min history at most this often per pair
 ACTION_SETTLE_MS = 30_000            # a model action sent with an unknown outcome is re-read (not re-sent) this long
 ACTION_ERROR_REPEAT_MS = 10 * MS_PER_MINUTE   # a failing decision's action_error event at most this often
+PRICED = ("modify_sl", "modify_tp")  # actions with a price (translated by the live basis)
 
 
 class PlacementBusy(RuntimeError):
@@ -833,18 +834,24 @@ class Executor:
                                                 "text": f"{pair} actions of {d['id'][:8]} could not run yet: {exc!r}"[:200]})
 
     def _actions_of(self, d: dict, pair: str, now: int) -> bool:
-        """Handle one decision's actions; True when every action has a final result."""
-        rec = d["rec"]
+        """Handle one decision's actions; True when every action has a final result.
+
+        An action is planned ONCE: its per-leg plan (legs, volumes, prices) is written ahead of the first send and
+        carried out exactly — a restart or an unknown outcome re-reads the legs and re-sends only what did not take
+        effect, never re-plans a fraction on a reduced position. Only a waiting (deferred) stop is re-checked by the
+        gate every loop. Priced actions (a stop, a target) need the live basis; close and cancel_order do not."""
+        rec, d = d["rec"], {**d, "pair": pair}
         acts = rec.get("position_actions") or []
         if not acts:
             return True
         exe = self.reg.with_role(pair, "execution")[0]
-        rec_x = rec
-        if self.reg.primary(pair).key != exe.key:
+        rec_x, no_basis = rec, False
+        if self.reg.primary(pair).key != exe.key and any(a.get("action") in PRICED for a in acts):
             basis = self._live_basis(pair)
             if basis is None:
-                return False                                  # no fresh quotes: retried next loop
-            rec_x = translate(rec, basis, (exe.contract or {}).get("tick_size", 0.01))
+                no_basis = True                               # priced actions wait; close / cancel need no price
+            else:
+                rec_x = translate(rec, basis, (exe.contract or {}).get("tick_size", 0.01))
         cfg = self.s.execution.position_actions
         rec_ts = parse_date_spec(rec["timestamp"])
         market_open = calendar_for(exe.venue, exe.symbol, self.s.pairs[pair].asset_class).is_open(now)
@@ -852,6 +859,9 @@ class Executor:
         for seq, a in enumerate(rec_x.get("position_actions") or []):
             if seq >= cfg.max_per_decision:
                 break
+            if no_basis and a.get("action") in PRICED:
+                done = False
+                continue
             short = a["target"]["decision"]
             target = self._resolve_target(pair, short)
             if target is None:
@@ -862,44 +872,32 @@ class Executor:
                                                    "text": f"{a['action']} on {short}: unknown or ambiguous target"})
                 continue
             legs = self.model_legs.legs_of(target)
-            rows = {lg.key: self._action_row(d["id"], seq, target, lg.key) for lg in legs}
-            settling = False
-            for lg in legs:
-                st, det, ts = rows[lg.key]
-                if st == "pending" and _action_took_effect(det, lg):
-                    # sent before an interruption / with an unknown outcome, and the leg shows it: never sent twice
-                    self.actions.record("model", d["id"], seq, target, lg.key, a["action"], a, "applied",
-                                        {**det, "reconciled": "found applied at the venue"}, pair=pair)
-                    self._emit("action_applied", {"pair": pair, "decision": d["id"][:8], "target": target[:8],
-                                                  "leg": lg.key, "text": f"{a['action']} on {target[:8]} leg "
-                                                                         f"{lg.key}: applied (reconciled)"[:200]})
-                    rows[lg.key] = ("applied", det, ts)
-                elif st == "pending" and now - ts < ACTION_SETTLE_MS:
-                    settling = True                           # re-read on the next loops before anything is re-sent
-                elif st == "deferred" and lg.kind == "closed":
-                    self.actions.record("model", d["id"], seq, target, lg.key, a["action"], a, "skipped",
-                                        {**det, "reason": "the leg closed before the stop could be moved"}, pair=pair)
-                    rows[lg.key] = ("skipped", det, ts)
-            if settling:
-                done = False
+            rows = self.actions.action_rows("model", d["id"], seq, target)
+            if any((r[1] or {}).get("pending") for r in rows.values()):
+                done = self._resume_plan(d, seq, target, a, legs, rows, now) and done
                 continue
-            final = {k for k, r in rows.items() if r[0] in ("applied", "rejected", "skipped")}
-            if any(r[0] == "applied" for r in rows.values()) and                     {lg.key for lg in legs if lg.kind in ("position", "order")} <= final:
-                continue                                      # already carried out (e.g. reconciled just now)
+            by_key = {lg.key: lg for lg in legs}
+            for k, (st, det, ts) in list(rows.items()):
+                if st == "deferred" and (k not in by_key or by_key[k].kind == "closed"):
+                    self.actions.record("model", d["id"], seq, target, k, a["action"], a, "skipped",
+                                        {**det, "reason": "the leg closed before the stop could be moved"}, pair=pair)
+                    rows[k] = ("skipped", det, ts)
             ctx = ActionContext(now_ms=now, pair=pair, rec_ts_ms=rec_ts, max_age_s=self.s.risk.max_recommendation_age_s,
                                 market_open=market_open, cfg=cfg,
                                 applied_today=self.actions.applied_today(pair, "model"),
                                 last_sl_change_ms=self.actions.last_sl_change_ms,
                                 deferred_legs=frozenset(k for k, r in rows.items() if r[0] == "deferred"))
+            to_send = []
             for plan in gate_action(a, legs, self.model_legs.venue, ctx):
                 leg_key = plan.leg.key if plan.leg else "-"
-                if (rows.get(leg_key) or self._action_row(d["id"], seq, target, leg_key))[0] in \
-                        ("applied", "rejected", "skipped"):
+                if (rows.get(leg_key) or (None,))[0] in ("applied", "rejected", "skipped"):
                     continue
                 checks = [{"check": n, "ok": ok, "detail": x} for n, ok, x in plan.checks]
                 if plan.status == "deferred":
                     self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a, "deferred",
                                         {"checks": checks, "reason": plan.reason}, pair=pair)
+                    if plan.op == "set_sl":
+                        self.actions.supersede_deferred(leg_key, d["id"], d["ts"])
                     done = False
                     continue
                 if plan.status != "apply":
@@ -911,22 +909,66 @@ class Executor:
                 lg = plan.leg
                 before = {"op": plan.op, "value": plan.value, "volume": plan.volume, "leg_volume_before": lg.volume,
                           "sl_before": lg.sl, "tp_before": lg.tp, "kind_before": lg.kind}
-                self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a, "pending",
-                                    {"checks": checks, "pending": before}, pair=pair)   # write-ahead: never twice
-                res = self._apply_plan(plan)
-                if res.status == "unknown":                   # sent, no confirmation: stays pending, re-read first
-                    done = False
-                    continue
-                status = res.status if res.status in ("applied", "deferred", "rejected") else "failed"
-                self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a,
-                                    "rejected" if status == "failed" else status,
-                                    {"checks": checks, "result": res.detail, "retcode": res.retcode}, pair=pair)
-                if status == "deferred":
-                    done = False
-                    continue
-                kind = "action_applied" if status == "applied" else "action_rejected"
-                self._emit(kind, {"pair": pair, "decision": d["id"][:8], "target": target[:8], "leg": leg_key,
-                                  "text": f"{a['action']} on {target[:8]} leg {leg_key}: {status} — {res.detail}"[:200]})
+                to_send.append((plan, checks, before))
+            # write-ahead the whole plan first: a crash between two legs resumes exactly this plan
+            for plan, checks, before in to_send:
+                self.actions.record("model", d["id"], seq, target, plan.leg.key, a["action"], a, "pending",
+                                    {"checks": checks, "pending": before}, pair=pair)
+            for plan, checks, before in to_send:
+                done = self._send_model_plan(d, seq, target, a, plan, checks, before) and done
+        return done
+
+    def _send_model_plan(self, d: dict, seq: int, target: str, a: dict, plan, checks: list, before: dict) -> bool:
+        """Send one planned leg action (its 'pending' row is written); True when it ended final."""
+        pair, leg_key = d["pair"], plan.leg.key
+        res = self._apply_plan(plan)
+        if res.status == "unknown":                   # sent, no confirmation: stays pending, re-read first
+            return False
+        if res.status == "deferred":                  # the venue said "not now" (freeze level …): the gate re-checks
+            self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a, "deferred",
+                                {"checks": checks, "result": res.detail, "retcode": res.retcode}, pair=pair)
+            return False
+        status = "applied" if res.status == "applied" else "rejected"
+        self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a, status,
+                            {"checks": checks, "pending": before, "result": res.detail, "retcode": res.retcode},
+                            pair=pair)
+        if status == "applied" and plan.op == "set_sl":
+            self.actions.supersede_deferred(leg_key, d["id"], d["ts"])
+        kind = "action_applied" if status == "applied" else "action_rejected"
+        self._emit(kind, {"pair": pair, "decision": d["id"][:8], "target": target[:8], "leg": leg_key,
+                          "text": f"{a['action']} on {target[:8]} leg {leg_key}: {status} — {res.detail}"[:200]})
+        return True
+
+    def _resume_plan(self, d: dict, seq: int, target: str, a: dict, legs: list, rows: dict, now: int) -> bool:
+        """An action planned (and partly sent) before: reconcile each pending leg against the venue and re-send
+        only what did not take effect, with the recorded volume / price. True when every leg is final."""
+        from .action_gate import LegPlan
+        pair, by_key, done = d["pair"], {lg.key: lg for lg in legs}, True
+        for k, (st, det, ts) in rows.items():
+            if st != "pending":
+                continue
+            pend, lg = det.get("pending") or {}, by_key.get(k)
+            if lg is not None and _action_took_effect(det, lg):
+                self.actions.record("model", d["id"], seq, target, k, a["action"], a, "applied",
+                                    {**det, "reconciled": "found applied at the venue"}, pair=pair)
+                self._emit("action_applied", {"pair": pair, "decision": d["id"][:8], "target": target[:8], "leg": k,
+                                              "text": f"{a['action']} on {target[:8]} leg {k}: applied (reconciled)"})
+                if pend.get("op") == "set_sl":
+                    self.actions.supersede_deferred(k, d["id"], d["ts"])
+                continue
+            if now - ts < ACTION_SETTLE_MS:
+                done = False                               # the venue may still be processing it: re-read later
+                continue
+            if lg is None or lg.kind not in ("position", "order"):
+                gone = pend.get("op") in ("close", "cancel")
+                self.actions.record("model", d["id"], seq, target, k, a["action"], a,
+                                    "applied" if gone else "skipped",
+                                    {**det, "reason": "the leg is no longer live" + (" — the close took effect"
+                                                                                     if gone else "")}, pair=pair)
+                continue
+            plan = LegPlan(lg, pend.get("op"), value=pend.get("value"), volume=pend.get("volume"))
+            self.actions.record("model", d["id"], seq, target, k, a["action"], a, "pending", det, pair=pair)
+            done = self._send_model_plan(d, seq, target, a, plan, det.get("checks") or [], pend) and done
         return done
 
     def _apply_plan(self, plan):
@@ -967,7 +1009,7 @@ def _action_took_effect(det: dict, lg) -> bool:
         return lg.kind == "closed" or lg.volume <= float(pend.get("leg_volume_before") or 0) \
             - float(pend.get("volume") or 0) + 1e-9
     if op == "cancel":
-        return lg.kind != "order"
+        return lg.kind == "closed"                 # an order that filled meanwhile is not cancelled
     return False
 
 

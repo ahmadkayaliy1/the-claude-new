@@ -360,8 +360,8 @@ def _plan(idx: int, rule: dict, leg: Leg, ven: Callable[[Leg], Venue], running: 
         target = to_tick(px - k * atr if buy else px + k * atr, v.tick_size, "down" if buy else "up", v.digits)
         return _stop_plan(base, leg, v, target, f"ATR trail {target} ({k:g}×{atr:.5g})", running, ctx, why)
     swing = ctx.swing_low if buy else ctx.swing_high
-    if swing is None:
-        return PlannedAction(**base, action="set_sl", status="bar_done", reason=f"{why} → no confirmed swing")
+    if swing is None:          # not known yet (the bar just closed is not stored, no basis): asked again next loop
+        return PlannedAction(**base, action="set_sl", status="noop", reason=f"{why} → no confirmed swing yet")
     pad = v.stops_level + v.spread
     target = to_tick(swing - pad if buy else swing + pad, v.tick_size, "down" if buy else "up", v.digits)
     return _stop_plan(base, leg, v, target, f"structure trail {target} (swing {swing})", running, ctx, why)
@@ -518,6 +518,34 @@ class ActionLog:
             q, args = q + " AND source=?", args + (source,)
         with self._lock:
             return int(self._con.execute(q, args).fetchone()[0])
+
+    def action_rows(self, source: str, source_decision: str, seq: int, target: str) -> dict[str, tuple]:
+        """Every row of one action (all its legs): leg → (status, detail, ts)."""
+        with self._lock:
+            rows = self._con.execute("SELECT leg, status, detail, ts FROM position_actions WHERE source=? AND "
+                                     "source_decision=? AND seq=? AND target_decision=?",
+                                     (source, source_decision, int(seq), target)).fetchall()
+        out = {}
+        for leg, st, det, ts in rows:
+            try:
+                d = json.loads(det) if det else {}
+            except ValueError:
+                d = {}
+            out[leg] = (st, d, int(ts or 0))
+        return out
+
+    def supersede_deferred(self, leg_key: str, by_decision: str, decision_ts: int, *, now_ms: int | None = None) -> int:
+        """A newer decision moved (or asked to move) this leg's stop: older decisions' deferred stop moves of the
+        leg are finished ('skipped') — a stale waiting stop never overrides the model's current plan."""
+        ts = _now_ms() if now_ms is None else int(now_ms)
+        with self._lock:
+            cur = self._con.execute(
+                "UPDATE position_actions SET status='skipped', ts=?, detail=json_set(COALESCE(detail,'{}'), "
+                "'$.reason', ?) WHERE source='model' AND leg=? AND status='deferred' AND action='modify_sl' AND "
+                "source_decision<>? AND source_decision IN (SELECT id FROM ai_decisions WHERE ts<?)",
+                (ts, f"superseded by the stop of decision {by_decision[:8]}", str(leg_key), by_decision,
+                 int(decision_ts)))
+            return cur.rowcount
 
     def last_sl_change_ms(self, leg_key: str) -> int | None:
         """When a stop of this leg was last moved by us (rule or model)."""
@@ -771,7 +799,7 @@ def _took_effect(pend: dict, leg: Leg) -> bool:
     if op == "close":
         return leg.volume <= float(pend.get("leg_volume_before") or 0) - float(pend.get("volume") or 0) + EPS
     if op == "cancel":
-        return leg.kind != "order"
+        return leg.kind == "closed"            # a cancelled order; one that filled meanwhile is a position to close
     return False
 
 
@@ -932,7 +960,7 @@ class PositionManager:
         det = dict((st or {}).get("detail") or {})
         last_bar = (st or {}).get("last_bar_ms")
         pend = det.get("pending")
-        if (st or {}).get("status") in ("pending", "failed") and pend and _took_effect(pend, lg):
+        if (st or {}).get("status") == "pending" and pend and _took_effect(pend, lg):
             # sent before an interruption (crash / exception) and the venue shows it: done — never sent twice
             self.log.record("rule", did, int(det.get("seq", p.rule_idx)), did, key, pend.get("op") or p.action,
                             {**pend, "rule": p.rule}, "applied",

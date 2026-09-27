@@ -173,7 +173,7 @@ def test_trail_structure_uses_the_swing_and_defers_when_too_close():
     [p] = plans(r, [pos(sl=98.0)], venue(101.8, 102.0, stops=0.3), ctx(lo=102.0, states=armed))   # 0.3 < 0.5 away
     assert (p.status, p.value) == ("deferred", 101.5)
     [p] = plans(r, [pos(sl=98.0)], v, ctx(lo=None))
-    assert p.status == "bar_done"
+    assert p.status == "noop"                     # not known yet (bar not stored / no basis): asked again next loop
     s = pos(side="SELL", fill=110.0, sl=112.0)
     [p] = plans(r, [s], venue(107.0, 107.2, stops=0.3), ctx(hi=108.0, sl0=112.0))
     assert (p.status, p.value) == ("apply", 108.5)
@@ -502,14 +502,29 @@ def test_manager_unknown_close_outcome_is_re_read_never_resent(tmp_path, setting
     assert [c[0] for c in sim.calls] == ["close"] and sim.legs["d:2"].volume == pytest.approx(0.02)
     [r] = rows(db)
     assert r["status"] == "applied" and "interruption" in json.loads(r["detail"])["reconciled"]
-    # the same when the backend reported 'failed' although the close went through: re-read before a retry
-    db2 = tmp_path / "app2.db"
-    sim2 = SimLegs([pos(vol=0.04, opened=0)], 103.0, 103.2)
-    sim2.close_status = "failed_but_done"
-    pm2 = PositionManager(settings, ActionLog(db2), sim2, FixedMarket(), lambda k, p: None)
-    for t in (0, 70_000, 140_000):
-        pm2.manage([decision(rules)], 20 * MIN + t)
-    assert len(sim2.calls) == 1 and sim2.legs["d:2"].volume == pytest.approx(0.02)
+
+
+
+def test_a_cancel_refused_because_the_order_just_filled_closes_the_position(tmp_path, settings):
+    """close_all on a pending order that fills in the same second: the cancel finds no order (failed, no retcode);
+    the retry sees a position and closes it — the refused cancel is never taken for done (re-review money-fixes-3)."""
+    db = tmp_path / "app.db"
+    order = Leg(key="d:1", decision_id="d", pair="XAUUSD", symbol=XAU, side="BUY", kind="order", volume=0.01,
+                order_price=100.0, sl=98.0, tp=105.0, tp_index=1, opened_ms=0)
+    sim = SimLegs([order], 103.0, 103.2)
+
+    def cancel_after_fill(leg):
+        sim.calls.append(("cancel", leg.key, None))
+        lg = sim.legs[leg.key]
+        lg.kind, lg.fill, lg.opened_ms = "position", 100.0, 5 * MIN
+        return ActionResult(False, "failed", "order d:1 not found (filled, cancelled or expired)", None)
+    sim.cancel = cancel_after_fill
+    pm = PositionManager(settings, ActionLog(db), sim, FixedMarket(), lambda k, p: None)
+    rules = [rule("close_all", "price_reached", 102.0)]           # the bid 103 is past it: fires on the order
+    pm.manage([decision(rules)], 20 * MIN)
+    for t in (70_000, 140_000):
+        pm.manage([decision(rules)], 20 * MIN + t)
+    assert [c[0] for c in sim.calls] == ["cancel", "close"] and sim.legs["d:1"].kind == "closed"
 
 
 def test_two_closes_in_one_pass_record_the_leg_as_it_was_before_each(tmp_path, settings):
@@ -1041,3 +1056,18 @@ def test_mt5_legs_reads_the_history_only_when_a_leg_leaves():
     assert (lg.kind, lg.closed_reason) == ("closed", "tp") and calls["hist"] == 2
     v = legs.venue(lg)
     assert (v.stops_level, v.spread, v.volume_min, v.digits) == (0.25, pytest.approx(0.3), 0.01, 2)
+
+
+def test_a_structure_trail_waits_for_the_swing_of_the_bar_just_closed(tmp_path, settings):
+    """First loop of a bar: the closed bar is not stored yet (swing None) — the trail waits for it in the same bar
+    instead of skipping the bar (re-review money-fixes-1)."""
+    db = tmp_path / "app.db"
+    sim = SimLegs([pos(sl=98.0, opened=0)], 104.0, 104.2)
+    market = FixedMarket(bar=5 * MIN, lo=None)
+    pm = PositionManager(settings, ActionLog(db), sim, market, lambda k, p: None)
+    rules = [rule("trail_structure", "r_multiple", 1.0)]
+    pm.manage([decision(rules)], 10 * MIN)                          # r = 2.0 ≥ 1: armed, swing not known yet
+    assert sim.calls == []
+    market.lo = 102.0                                               # the bar is stored a second later
+    pm.manage([decision(rules)], 10 * MIN + 1_000)
+    assert [c[0] for c in sim.calls] == ["set_sl"] and sim.legs["d:2"].sl > 98.0

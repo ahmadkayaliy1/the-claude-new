@@ -390,3 +390,72 @@ def test_the_live_basis_needs_fresh_quotes_and_a_basis_in_line_with_its_history(
     assert ex._live_basis("BTCUSDT") is None
     ex._basis, quotes["binance_spot:BTCUSDT"] = {}, None          # no fresh analysis quote
     assert ex._live_basis("BTCUSDT") is None
+
+
+def test_a_newer_stop_supersedes_an_older_waiting_one(live):
+    ex, ticks = live
+    did, r = trade_decision(ex, ticks)
+    q = ticks[-1]
+    old = model_decision(ex, [{"target": {"decision": did[:8], "kind": "position"}, "action": "modify_sl",
+                               "value": round(q.bid - 0.01, 2), "reason": "lock in"}], did="b" * 32)
+    ex.process_actions()
+    assert [(a, st) for _, a, _, st, _ in rows(ex)] == [("modify_sl", "deferred")]
+    newer = model_decision(ex, [{"target": {"decision": did[:8], "kind": "position"}, "action": "modify_sl",
+                                 "value": round(r["stop_loss"] + 5, 2), "reason": "give it room"}], did="c" * 32)
+    con = sqlite3.connect(ex.app_db)                                  # the newer decision is newer
+    con.execute("UPDATE ai_decisions SET ts=ts+1000 WHERE id=?", (newer,))
+    con.commit()
+    con.close()
+    ex.process_actions()
+    got = {(json.loads(req or "{}").get("reason"), st) for src, a, _, st, req in
+           sqlite3.connect(ex.app_db).execute("SELECT source, action, leg, status, requested FROM position_actions")}
+    assert ("give it room", "applied") in got and ("lock in", "skipped") in got
+    assert ex.paper.decision_legs(did)[0]["sl"] == pytest.approx(round(r["stop_loss"] + 5, 2))
+
+
+def test_a_model_close_of_half_a_split_trade_is_carried_out_once(live, monkeypatch):
+    from tradingsystem.execution.management import ActionResult
+    ex, ticks = live
+    q = ticks[-1]
+    did = "f" * 32
+    r = {"decision": "BUY", "order_type": "MARKET", "stop_loss": round(q.bid - 20, 2),
+         "valid_until": iso(now_ms() + 3_600_000),
+         "take_profits": [{"price": round(q.ask + 10, 2), "close_fraction": 0.5},
+                          {"price": round(q.ask + 30, 2), "close_fraction": 0.5}],
+         "management": [], "entry": {"price": None}}
+    assert ex.paper.place(decision_id=did, pair="XAUUSD", instrument=XAU, rec=r, lots=0.02, entry=q.ask,
+                          contract_size=100, volume_step=0.01, volume_min=0.01, quote=q)["ok"]
+    ex.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation={**r, "pair": "XAUUSD"},
+                                 id=did, ts=now_ms() - 120_000))
+    ex.store.set_execution_state(did, "executed", {"mode": "paper"})
+    real, sent = ex.model_legs.close, []
+
+    def unconfirmed(lg, volume, reason=None):
+        sent.append((lg.key, volume))
+        real(lg, volume, reason=reason)
+        return ActionResult(False, "unknown", "10012 TIMEOUT: outcome unknown", 10012)
+    monkeypatch.setattr(ex.model_legs, "close", unconfirmed)
+    model_decision(ex, [{"target": {"decision": did[:8], "kind": "position"}, "action": "close", "fraction": 0.5,
+                         "reason": "take half"}])
+    for _ in range(3):
+        ex.process_actions()
+    assert sent == [(did + ":1", 0.01)]                               # half = the TP1 leg, once
+    legs = {lg["id"]: lg["status"] for lg in ex.paper.decision_legs(did)}
+    assert legs == {did + ":1": "closed", did + ":2": "open"}
+
+
+def test_close_and_cancel_need_no_basis_priced_actions_wait_for_it(live, monkeypatch):
+    from types import SimpleNamespace as NS
+    ex, ticks = live
+    did, r = trade_decision(ex, ticks)
+    real_primary = ex.reg.primary
+    monkeypatch.setattr(ex.reg, "primary", lambda pair: NS(key="binance_usdm:XAUUSDT"))   # analysis ≠ execution
+    monkeypatch.setattr(ex, "_live_basis", lambda pair: None)                           # … and no basis now
+    model_decision(ex, [{"target": {"decision": did[:8], "kind": "position"}, "action": "modify_sl",
+                         "value": round(r["stop_loss"] + 5, 2), "reason": "tighten"},
+                        {"target": {"decision": did[:8], "kind": "position"}, "action": "close", "fraction": 1.0,
+                         "reason": "out"}])
+    ex.process_actions()
+    assert [(a, st) for _, a, _, st, _ in rows(ex)] == [("close", "applied")]
+    assert len(ex.store.pending_actions("XAUUSD", 0)) == 1                              # the stop move waits
+    monkeypatch.setattr(ex.reg, "primary", real_primary)

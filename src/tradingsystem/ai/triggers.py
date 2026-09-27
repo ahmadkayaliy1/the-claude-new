@@ -31,8 +31,9 @@ class TriggerDecision:
     reasons: list[str]
     strength: str          # "strong" | "weak" | "none" | "review" | "idle" | "close" | "event"
     signature: frozenset[str] = frozenset()     # every current setup key — persisted by the engine at dispatch
-    setup: str | None = None   # "strong" | "weak" when a new setup would have fired by itself (also under a
-    #                            review/event label — the escalation of strong setups looks at it)
+    setup: str | None = None   # "strong" | "weak" when a new setup fired with it (also under a review/event
+    #                            label — the escalation of strong setups looks at it)
+    setup_alone: bool = False  # … and that setup was due by itself (its own spacing and back-off passed)
 
 
 @dataclass(frozen=True)
@@ -357,4 +358,5 @@ def decide(policy: str, payload: dict | None, *, last_call_ms: int | None, now: 
             reasons += [r for r in rs if r not in reasons]
     if block:
         return TriggerDecision(False, [f"{block}; waiting: {kind}"] + reasons, "none", sig)
-    return TriggerDecision(True, reasons, strength, sig, setup)
+    alone = setup is not None and _spacing_block(last_call_ms, now, max(backoff_ms, min_spacing_min * 60_000)) is None
+    return TriggerDecision(True, reasons, strength, sig, setup, alone)

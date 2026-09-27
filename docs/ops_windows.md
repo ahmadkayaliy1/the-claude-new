@@ -135,8 +135,11 @@ empty history): use `switch_to_pairs.bat` or `tools\migrate_instance.py <PAIR>` 
   Claude may tighten a stop, take profit, adjust a target or cancel a pending order. It can never widen or remove a
   stop or add size; every action is checked first and listed in the dashboard ("Actions applied").
 - **The kill switch blocks new orders only.** Protective actions (tightening a stop, closing, cancelling) keep running
-  while a kill switch is on — they reduce risk. While the market is closed (gold's daily break, weekends) or the
-  terminal refuses (Algo Trading off, no connection) they wait and go through when trading resumes — never dropped.
+  while a kill switch is on — they reduce risk. The system's own management rules (and a tighter stop of Claude's
+  that is already waiting) wait while the market is closed (gold's daily break, weekends) or the terminal refuses
+  (Algo Trading off, no connection) and go through when trading resumes. A NEW action of Claude's (close, cancel, stop
+  or target change) sent while the market is closed or refused by the terminal is refused — Claude is told on its next
+  call and decides again.
 - **Models per role** (`ai.models` in `config\config.yaml`; override in `config\config.local.yaml`): the decisions use
   the provider's model (Sonnet); `escalation.enabled: true` makes Opus (or `models.escalation.model: fable`) confirm or
   downgrade strong setups before they can be executed.
@@ -146,7 +149,7 @@ Rollback switches in `config\config.local.yaml` (then `scripts\restart_all.bat`)
 | Problem | Switch |
 |---|---|
 | Charts use too much RAM or time | `ai:` → `charts: {enabled: false}` (every pair) |
-| … only for one pair (e.g. keep charts for BTC only) | `instances:` → `XAUUSD: {overrides: {ai: {charts: {enabled: false}}}}` |
+| … only for some pairs (e.g. charts for BTC only) | `instances:` → `ETHUSDT: {overrides: {ai: {charts: {enabled: false}}}}` and `XAUUSD: {overrides: {ai: {charts: {enabled: false}}}}` (one line each under `instances:`) |
 | Trade management misbehaves | `execution:` → `management: {dry_run: true}` (records what it would do) or `enabled: false` |
 | Claude's own actions on live trades misbehave | `execution:` → `position_actions: {enabled: false}` |
 | Too many calls | `ai:` → `daily_calls_per_pair: 25` |
@@ -160,11 +163,15 @@ execution:
   position_actions: {enabled: false}
 ai:
   charts: {enabled: false}
-  escalation: {enabled: true}
+  daily_calls_per_pair: 25
 ```
 
-Check what is in force with `.venv\Scripts\python.exe -m tradingsystem config` (the "phase 3:" line) before
-`restart_all.bat`.
+(The optional Opus confirmation of strong setups, H17, is not a rollback: `ai:` → `escalation: {enabled: true}` goes
+into the same `ai:` block when you want it.)
+
+Check what is in force with `.venv\Scripts\python.exe -m tradingsystem config` (the "phase 3:" line; it also checks
+every pair's `overrides`) and for one pair with `.venv\Scripts\python.exe -m tradingsystem --instance XAUUSD config`,
+before `restart_all.bat`. A pair's `overrides` win over the same setting in `.env`.
 
 **Going back to the code before Phase 3** (a `git` checkout of an older commit): first remove every Phase 3 key from
 `config\config.local.yaml` (`ai.charts`, `ai.models`, `ai.escalation`, `ai.daily_calls_per_pair`,

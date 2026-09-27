@@ -58,6 +58,7 @@ class CycleRequest:
     strength: str | None = None          # the trigger strength (strong | weak | review | event | idle | close | manual)
     setup: str | None = None             # a setup that fired with it (strong | weak), also when the call is labelled
     #                                      review/event (escalation looks at both)
+    setup_alone: bool = False            # that setup was due by itself (then an event label costs no event call)
 
 
 class Orchestrator:
@@ -265,7 +266,7 @@ class Orchestrator:
         label = mode if why == "configured" else f"{mode} ({why})"
         reasons = {rq.pair: rq.reason for rq in requests}
         # per call, never shared state: cycles of different pairs overlap in the all-pairs layout
-        trig = {rq.pair: (rq.strength, rq.setup) for rq in requests}
+        trig = {rq.pair: (rq.strength, rq.setup, rq.setup_alone) for rq in requests}
         built: dict[str, dict] = {}
         out: list[DecisionRecord] = []
         for rq in requests:
@@ -323,7 +324,8 @@ class Orchestrator:
         if mode == "agent_per_pair_and_timeframe":
             job = lambda p: self._pair_and_tf(p, payloads[p], reasons[p], as_of, account)  # noqa: E731
         elif mode == "multi_provider_consensus":
-            job = lambda p: self._consensus(p, payloads[p], reasons[p], as_of, account)  # noqa: E731
+            job = lambda p: self._consensus(p, payloads[p], reasons[p], as_of, account,  # noqa: E731
+                                            trigger=(trig or {}).get(p))
         else:
             review = mode == "agent_per_pair_with_risk_reviewer"
             job = lambda p: self._per_pair(p, payloads[p], reasons[p], as_of, account, review=review,  # noqa: E731
@@ -339,7 +341,9 @@ class Orchestrator:
                 trig: dict | None = None) -> DecisionRecord:
         rec.mode = label
         rec.library_hash = rec.library_hash or self.library_hash
-        rec.trigger_strength = rec.trigger_strength or ((trig or {}).get(rec.pair) or (None, None))[0]
+        t = (trig or {}).get(rec.pair) or (None, None, False)
+        rec.trigger_strength = rec.trigger_strength or t[0]
+        rec.setup_strength = rec.setup_strength or (t[1] if t[2] else None)
         if rec.status == "valid" and rec.recommendation:
             try:
                 self._finalize(rec, as_of, payload)
@@ -377,7 +381,7 @@ class Orchestrator:
                     why = f"price_reference {ref!r} is the execution instrument — levels must be in {prim} prices"
                     if not keep:
                         return _reject(rec, why)
-                    r, trade = _as_no_trade(r), False
+                    r, trade = _as_no_trade(r, why), False
                     rec.errors.append(f"{why} — the trade is withheld; its position_actions stand")
             notes.append(f"price_reference {ref!r} -> {prim}")
             r["price_reference"] = prim
@@ -392,7 +396,7 @@ class Orchestrator:
                 why = f"valid_until {iso(vu)} is not after the cycle time {iso(as_of)}"
                 if not r.get("position_actions"):
                     return _reject(rec, why)
-                r, trade = _as_no_trade(r), False
+                r, trade = _as_no_trade(r, why), False
                 rec.errors.append(f"{why} — the trade is withheld; its position_actions stand")
             r["valid_until"] = iso(as_of + self.s.pairs[rec.pair].decision_timeframe.ms)
         r["next_review"] = self._review_plan(r.get("next_review") or {}, payload, notes)
@@ -487,7 +491,7 @@ class Orchestrator:
         pr = render("agent_per_pair", self._system_vars(pair, account), uv)
         gen = await self._gen(prov, Recommendation, pr.system, pr.user, "agent_per_pair", pair, images=images)
         rec = self._record(pair, "agent_per_pair", reason, payload, gen, prov, pr.prompt_hash)
-        rec.trigger_strength, setup = trigger or (None, None)
+        rec.trigger_strength, setup = (trigger or (None, None, False))[:2]
         if rec.status == "valid" and rec.recommendation["decision"] != Decision.NO_TRADE.value:
             await self._escalate(rec, pair, payload, reason, as_of, account, uv, images, setup=setup)
         if not review or rec.status != "valid" or rec.recommendation["decision"] == Decision.NO_TRADE.value:
@@ -647,7 +651,8 @@ class Orchestrator:
                 subs.append({"role": "timeframe_analyst", "label": tf, "provider": prov.name, "model": prov.model,
                              "prompt_hash": pr.prompt_hash, "ok": g.ok and bool(a),
                              "output": [json.loads(x.model_dump_json()) for x in a], "errors": g.errors,
-                             "cost_usd": g.cost_usd / len(pairs)})
+                             "cost_usd": g.cost_usd / len(pairs),
+                             "answered": not (g.provider_error or g.budget_blocked)})
             rec = await self._coordinate(pair, payloads[pair], reasons[pair], as_of, account, assessments, subs, prov,
                                          "agent_per_timeframe")
             out.append(rec)
@@ -666,7 +671,8 @@ class Orchestrator:
         subs = [{"role": "timeframe_analyst", "label": tf, "provider": prov.name, "model": prov.model,
                  "prompt_hash": pr.prompt_hash, "ok": g.ok,
                  "output": json.loads(g.value.model_dump_json()) if g.ok else None, "errors": g.errors,
-                 "cost_usd": g.cost_usd} for tf, pr, g in results]
+                 "cost_usd": g.cost_usd, "answered": not (g.provider_error or g.budget_blocked)}
+                for tf, pr, g in results]
         return await self._coordinate(pair, payload, reason, as_of, account, assessments, subs, prov,
                                       "agent_per_pair_and_timeframe")
 
@@ -678,8 +684,11 @@ class Orchestrator:
                     self._user_vars(pair, as_of, reason, _dump(compact), account=payload.get("account") or account,
                                     assessments=json.dumps(assessments)))
         if not assessments:
-            rec = DecisionRecord(pair, mode, reason, "invalid", provider=prov.name, model=prov.model,
-                                 payload_hash=payload["meta"]["payload_hash"],
+            # no model answered at all (usage limit, provider down, budget) is an error — the setup is not seen;
+            # 'invalid' only when an analyst answered but nothing usable came back
+            answered = any(s.get("answered", True) for s in subs)
+            rec = DecisionRecord(pair, mode, reason, "invalid" if answered else "error", provider=prov.name,
+                                 model=prov.model, payload_hash=payload["meta"]["payload_hash"],
                                  errors=["no valid timeframe assessments — coordinator not called"])
         else:
             g = await self._gen(prov, Recommendation, pr.system, pr.user, "coordinator", pair)
@@ -688,10 +697,11 @@ class Orchestrator:
         rec.cost_usd += sum(s.get("cost_usd", 0.0) for s in subs)
         return rec
 
-    async def _consensus(self, pair: str, payload: dict, reason: str, as_of: int, account: dict) -> DecisionRecord:
+    async def _consensus(self, pair: str, payload: dict, reason: str, as_of: int, account: dict,
+                         trigger: tuple | None = None) -> DecisionRecord:
         names = self.s.ai.consensus_providers or [self.s.ai.active_provider]
-        got = await asyncio.gather(*(self._per_pair(pair, payload, reason, as_of, account, provider_name=n)
-                                     for n in names), return_exceptions=True)
+        got = await asyncio.gather(*(self._per_pair(pair, payload, reason, as_of, account, provider_name=n,
+                                                    trigger=trigger) for n in names), return_exceptions=True)
         members = [m if isinstance(m, DecisionRecord) else
                    DecisionRecord(pair, "agent_per_pair", reason, "error", provider=n, errors=[repr(m)[:300]])
                    for n, m in zip(names, got)]
@@ -747,10 +757,15 @@ def _reject(rec: DecisionRecord, why: str) -> None:
     rec.errors.append(why)
 
 
-def _as_no_trade(r: dict) -> dict:
-    """The recommendation without its new trade (NO_TRADE carries no order, entry, stop or targets)."""
+def _as_no_trade(r: dict, why: str = "") -> dict:
+    """The recommendation without its new trade (NO_TRADE carries no order, entry, stop or targets). Its notes and
+    summary say that the trade was NOT placed — they feed the model's memory and history on the next cycle."""
+    tag = (f"[system: your {r.get('decision')} {r.get('order_type') or ''} was NOT placed"
+           f"{' — ' + why[:160] if why else ''}; only the position_actions were carried out] ")
     return {**r, "decision": Decision.NO_TRADE.value, "order_type": None, "entry": None, "stop_loss": None,
-            "take_profits": [], "risk_management": None, "management": []}
+            "take_profits": [], "risk_management": None, "management": [],
+            "operator_notes": (tag + str(r.get("operator_notes") or ""))[:600],
+            "market_summary": (tag + str(r.get("market_summary") or ""))[:1500]}
 
 
 def _withhold(rec: DecisionRecord, why: str) -> None:
@@ -762,7 +777,7 @@ def _withhold(rec: DecisionRecord, why: str) -> None:
         rec.status, rec.recommendation, rec.rr_computed = "invalid", None, None
         rec.errors.append(f"{why} — trade withheld")
         return
-    rec.status, rec.recommendation, rec.rr_computed = "valid", _as_no_trade(r), None
+    rec.status, rec.recommendation, rec.rr_computed = "valid", _as_no_trade(r, why), None
     rec.errors.append(f"{why} — trade withheld; its position_actions stand")
 
 

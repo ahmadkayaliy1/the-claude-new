@@ -44,7 +44,8 @@ _DDL = [
 ]
 
 # Phase 3 columns (added in place on existing databases; old code ignores them)
-EXTRA_COLUMNS = (("actions_state", "TEXT"), ("library_hash", "TEXT"), ("trigger_strength", "TEXT"))
+EXTRA_COLUMNS = (("actions_state", "TEXT"), ("library_hash", "TEXT"), ("trigger_strength", "TEXT"),
+                 ("setup_strength", "TEXT"))
 ACTION_STATES = ("pending", "done")
 
 EXECUTION_STATES = ("not_executed", "queued", "executing", "executed", "rejected", "expired", "cancelled")
@@ -82,6 +83,7 @@ class DecisionRecord:
     trigger_strength: str | None = None      # strong | weak | review | event | idle | close | manual
     library_hash: str | None = None          # the whole prompt library's hash (prompt versions in force)
     actions_state: str | None = None         # 'pending' while position_actions await the executor
+    setup_strength: str | None = None        # a setup that would have called by itself (also under an event label)
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     ts: int = field(default_factory=now_ms)
 
@@ -126,14 +128,14 @@ class DecisionStore:
                 """INSERT INTO ai_decisions(id, ts, pair, mode, trigger, provider, model, prompt_hash, payload_hash,
                    config_hash, git_sha, status, decision, order_type, confidence, rr_computed, valid_until,
                    recommendation, raw_text, errors, cost_usd, latency_ms, input_tokens, output_tokens,
-                   trigger_strength, library_hash, actions_state)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   trigger_strength, library_hash, actions_state, setup_strength)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (rec.id, rec.ts, rec.pair, rec.mode, rec.trigger, rec.provider, rec.model, rec.prompt_hash,
                  rec.payload_hash, self.config_hash, self.git_sha, rec.status, r.get("decision"), r.get("order_type"),
                  r.get("confidence"), rec.rr_computed, valid_until,
                  json.dumps(r, default=str) if r else None, rec.raw_text, json.dumps(rec.errors) if rec.errors else None,
                  rec.cost_usd, rec.latency_ms, rec.input_tokens, rec.output_tokens, rec.trigger_strength,
-                 rec.library_hash, rec.actions_state))
+                 rec.library_hash, rec.actions_state, rec.setup_strength))
             for s in rec.sub_outputs:
                 self._con.execute(
                     "INSERT INTO ai_sub_outputs(decision_id, role, label, provider, model, prompt_hash, ok, output, errors, cost_usd) "
@@ -183,10 +185,14 @@ class DecisionStore:
             return 0
         return int(r[0])
 
-    def count_strength_since(self, pair: str, strength: str, since_ms: int) -> int:
+    def count_strength_since(self, pair: str, strength: str, since_ms: int, *, without_setup: bool = False) -> int:
+        """Calls of ``pair`` with this trigger strength since ``since_ms``; ``without_setup``: only those no setup
+        would have made by itself (an event call that co-fired with a due setup is not an extra call)."""
+        q = "SELECT count(*) FROM ai_decisions WHERE pair=? AND trigger_strength=? AND ts>=?"
+        if without_setup:
+            q += " AND setup_strength IS NULL"
         with self._lock:
-            return int(self._con.execute("SELECT count(*) FROM ai_decisions WHERE pair=? AND trigger_strength=? AND ts>=?",
-                                         (pair, strength, since_ms)).fetchone()[0])
+            return int(self._con.execute(q, (pair, strength, since_ms)).fetchone()[0])
 
     def pending_actions(self, pair: str, since_ms: int) -> list[dict[str, Any]]:
         """Valid decisions of ``pair`` whose ``position_actions`` the executor has not handled yet."""

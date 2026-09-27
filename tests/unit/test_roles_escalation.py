@@ -216,3 +216,35 @@ def test_no_trade_in_execution_prices_drops_its_priced_actions(make):
     [r] = asyncio.run(o.run_cycle([CycleRequest("BTCUSDT", "test")], as_of=1790334600000))
     assert r.status == "valid" and [a["action"] for a in r.recommendation["position_actions"]] == ["close"]
     assert any("priced position action(s) dropped" in e for e in r.errors)
+
+
+def test_a_withheld_trade_says_so_in_the_notes_the_model_reads_next(make):
+    def resp(schema, user):
+        if schema == "EscalationReview":
+            return {"nonsense": True}
+        r = reversal(schema, user)
+        r["operator_notes"] = "BUY limit 4290-4296 live; SL to BE after TP1"
+        return r
+    o, _, store = make("agent_per_pair", resp)
+    escalate_on(with_live_sell(o))
+    [r] = run(o)
+    notes = store.memory("XAUUSD")["notes"]
+    assert notes.startswith("[system: your BUY BUY_LIMIT was NOT placed") and "position_actions were carried out" in notes
+    assert r.recommendation["market_summary"].startswith("[system:")
+
+
+def test_consensus_members_are_escalated_too(make):
+    o, prov, _ = make("multi_provider_consensus", responder(), consensus=["claude_code"])
+    escalate_on(o)
+    asyncio.run(o.run_cycle([CycleRequest("XAUUSD", "15m BOS", "strong", "strong")], as_of=1790334600000))
+    assert "EscalationReview" in [c[0] for c in prov.calls]
+
+
+def test_analysts_that_never_answered_make_an_error_not_an_answer(make):
+    from tradingsystem.ai.providers import ProviderError
+
+    def resp(schema, user):
+        raise ProviderError("claude_code: usage limit reached", retryable=False)
+    o, _, _ = make("agent_per_pair_and_timeframe", resp)
+    [r] = run(o)
+    assert r.status == "error" and any("coordinator not called" in e for e in r.errors)

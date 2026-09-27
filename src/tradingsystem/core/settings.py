@@ -536,6 +536,8 @@ class _UniqueKeyLoader(yaml.SafeLoader):
 def _construct_unique(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False) -> dict:
     seen: set = set()
     for key_node, _ in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":          # '<<: *anchor' — flattened by construct_mapping
+            continue
         key = loader.construct_object(key_node, deep=deep)
         if key in seen:
             raise yaml.constructor.ConstructorError(
@@ -638,10 +640,23 @@ def load_settings(
     if extra_env:
         env.update(extra_env)
     raw = _apply_env_overrides(raw, env)
-    raw = _apply_instance(raw, (env.get(INSTANCE_ENV) or "").strip().upper())
+    instance = (env.get(INSTANCE_ENV) or "").strip().upper()
+    base = raw
+    raw = _apply_instance(raw, instance)
     digest = hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()[:16]
     raw["config_hash"] = digest
-    return Settings.model_validate(raw)
+    settings = Settings.model_validate(raw)
+    if not instance:
+        # every system's own view must load too: a bad per-pair override is caught by `tradingsystem config` and by
+        # the *_all.bat pre-check, not half-way through restart_all (one pair failing after others were stopped)
+        for name, icfg in (base.get("instances") or {}).items():
+            if not (icfg or {}).get("overrides"):
+                continue
+            try:
+                Settings.model_validate({**_apply_instance(base, str(name)), "config_hash": "check"})
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(f"instances.{name}.overrides: {exc}") from exc
+    return settings
 
 
 @lru_cache(maxsize=1)

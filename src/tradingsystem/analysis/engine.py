@@ -79,7 +79,7 @@ class Engine:
         self._events: dict[str, list[dict]] = {}     # executor events waiting to wake the model, per pair
         self._event_id = 0                            # set in run() from engine_kv / the DB
         self._prev_call: dict[str, tuple] = {}        # pair → (signature, price, events) before the call in flight
-        self._setup: dict[str, str | None] = {}       # pair → setup strength of the last evaluation
+        self._setup: dict[str, tuple[str | None, bool]] = {}   # pair → (setup, due alone) of the last evaluation
         self._build_ms: deque[int] = deque(maxlen=20)   # snapshot build times (5-min screening cost on this PC)
         self.last_call: dict[str, int] = {}          # last dispatch per pair (the DB covers restarts)
         self.fails: dict[str, int] = {}              # consecutive failed cycles per pair → back-off
@@ -179,10 +179,6 @@ class Engine:
         rows = self.store.events_after(self._event_id, WAKE_EVENTS)
         if rows:
             self._event_id = rows[-1]["id"]
-            try:
-                self.store.kv_set(EVENT_CURSOR_KEY, self._event_id)
-            except Exception:  # noqa: BLE001 — the cursor is a restart aid; the events are handled anyway
-                log.warning("could not persist the executor event cursor", exc_info=True)
         cutoff = now_ms() - EVENT_MAX_AGE_MS
         for r in rows:
             if int(r["ts"] or 0) < cutoff:
@@ -196,7 +192,20 @@ class Engine:
                 owner = next((p for p in self.s.enabled_pairs() if f"{p} " in f" {r['detail'] or ''} "), None)
             if owner:
                 self._events.setdefault(owner, []).append(r)
+        if rows:
+            self._save_cursor()
         return self._events.get(pair, [])
+
+    def _save_cursor(self) -> None:
+        """Persist the event cursor BEHIND every event not handled yet (waiting to be coalesced, held by the review
+        floor, or given back after a call without an answer) — a restart replays them instead of losing them."""
+        waiting = [int(e["id"]) for v in self._events.values() for e in v]
+        waiting += [int(e["id"]) for (_, _, consumed) in self._prev_call.values() for e in consumed]
+        cursor = min(waiting) - 1 if waiting else self._event_id
+        try:
+            self.store.kv_set(EVENT_CURSOR_KEY, cursor)
+        except Exception:  # noqa: BLE001 — a restart aid; the events are handled anyway
+            log.warning("could not persist the executor event cursor", exc_info=True)
 
     @staticmethod
     def _event_text(r: dict) -> str:
@@ -270,7 +279,7 @@ class Engine:
         self._sig = getattr(self, "_sig", {})
         if d.signature or payload:
             self._sig[pair] = sorted(d.signature)
-        self._setup[pair] = d.setup
+        self._setup[pair] = (d.setup, d.setup_alone)
         return d.fire, d.reasons, d.strength
 
     async def tick(self) -> None:
@@ -311,6 +320,7 @@ class Engine:
             if wake and not self._event_budget(pair, now):
                 self._events[pair] = []                  # today's event calls are used up: the events stay in history
                 wake = []
+                self._save_cursor()
             fire, reasons, strength = self.evaluate(pair, now, at_close, payload, policy, at_decision_close=at_dec,
                                                     events=wake or None)
             if at_screen:
@@ -344,7 +354,8 @@ class Engine:
                 log.warning("%s: AI call skipped — %s", pair, "; ".join(problems)[:300])
                 continue
             payloads[pair] = p
-            queue.append(CycleRequest(pair, "; ".join(reasons)[:600], strength, self._setup.get(pair)))
+            setup, alone = self._setup.get(pair, (None, False))
+            queue.append(CycleRequest(pair, "; ".join(reasons)[:600], strength, setup, alone))
         if not queue:
             return
         task = asyncio.create_task(self._cycle(queue, payloads, now))
@@ -374,6 +385,7 @@ class Engine:
             self.store.kv_set(f"{pair}:last_call_price", mid)
         if strength == "event" or consumed:
             self._events[pair] = []
+        self._save_cursor()
 
     def _restore_call(self, pair: str) -> None:
         """The call for ``pair`` got no answer (error, budget block, deadline, crash): the setup it was called for
@@ -382,20 +394,25 @@ class Engine:
         if prev is None:
             return
         sig, px, consumed = prev
-        try:
-            if sig is not None:
-                self.store.kv_set(f"{pair}:signature", sig)
-            if px is not None:
-                self.store.kv_set(f"{pair}:last_call_price", px)
+        try:                                         # None too: "no call yet" (every setup counts as new again)
+            self.store.kv_set(f"{pair}:signature", sig)
+            self.store.kv_set(f"{pair}:last_call_price", px)
         except Exception:  # noqa: BLE001
             log.exception("%s: could not restore the setup signature", pair)
         if consumed:
             self._events[pair] = consumed + [e for e in self._events.get(pair, []) if e not in consumed]
 
+    def _answered_since(self, pair: str, as_of: int) -> bool:
+        try:
+            return (self.store.last_attempt_ts(pair, answered=True) or 0) >= as_of
+        except Exception:  # noqa: BLE001
+            return False
+
     def _event_budget(self, pair: str, now: int) -> bool:
-        """Event-woken calls per pair and UTC day (``ai.event_calls_per_day``)."""
+        """Event-woken calls per pair and UTC day (``ai.event_calls_per_day``); a call that a due setup would have
+        made anyway does not count."""
         day0 = now // MS_PER_DAY * MS_PER_DAY
-        return self.store.count_strength_since(pair, "event", day0) < self.s.ai.event_calls_per_day
+        return self.store.count_strength_since(pair, "event", day0, without_setup=True) < self.s.ai.event_calls_per_day
 
     def _ration(self, fired: list, now: int) -> list:
         """Quota pressure (F8): the fewer requests left in the provider's quota day, the stronger a trigger must be."""
@@ -428,10 +445,13 @@ class Engine:
                 self.fails[p] = self.fails.get(p, 0) + 1
         finally:
             for p in pairs:
-                if p in answered:
+                # answered = the stored record says so (a pair answered before a later pair's failure or a
+                # cancellation counts, even when run_cycle never returned)
+                if p in answered or (self._answered_since(p, as_of)):
                     self._prev_call.pop(p, None)
                 else:
                     self._restore_call(p)
+            self._save_cursor()
             me = asyncio.current_task()
             for p in pairs:
                 if self.inflight.get(p) is me:

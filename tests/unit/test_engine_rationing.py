@@ -267,7 +267,9 @@ def test_the_event_cursor_survives_a_restart(eng, tmp_path):
     eng._init_event_cursor()
     eng.appdb.add_event("executor", "order", json.dumps({"pair": "XAUUSD", "text": "placed"}))
     assert len(eng._pair_events("XAUUSD")) == 1
-    eng._events["XAUUSD"] = []                                       # handled by a call
+    eng._remember_call("XAUUSD", PAYLOAD, "event")                   # handled by a call that got its answer
+    eng._prev_call.pop("XAUUSD")
+    eng._save_cursor()
     eng.appdb.add_event("executor", "mgmt_position_closed", json.dumps({"pair": "XAUUSD", "text": "stop hit"}))
     eng.appdb.add_event("executor", "outcome", json.dumps({"pair": "XAUUSD", "text": "old"}))
     con = sqlite3.connect(eng.s.paths.data() / "app.db")
@@ -291,7 +293,7 @@ def test_the_setup_strength_travels_with_the_call(eng, monkeypatch):
     monkeypatch.setattr(eng, "_cycle", capture)
     monkeypatch.setattr(eng, "ai_ready", lambda: True)
     monkeypatch.setattr(eng_mod, "data_problems", lambda *a, **k: [])
-    eng._setup = {"XAUUSD": "strong"}
+    eng._setup = {"XAUUSD": ("strong", False)}
 
     async def go():
         eng._dispatch([("XAUUSD", ["review condition: price_above 4300"], "review", PAYLOAD)], T0)
@@ -299,3 +301,41 @@ def test_the_setup_strength_travels_with_the_call(eng, monkeypatch):
     asyncio.run(go())
     [q] = got["queue"]
     assert (q.strength, q.setup) == ("review", "strong") and "XAUUSD" in eng.inflight
+
+
+
+def test_an_event_still_waiting_at_a_restart_is_not_lost(eng):
+    eng._init_event_cursor()
+    eng.appdb.add_event("executor", "mgmt_position_closed", json.dumps({"pair": "XAUUSD", "text": "stop hit"}))
+    assert len(eng._pair_events("XAUUSD")) == 1                      # read, waiting for the 60 s coalescing
+    again = Engine(eng.s)                                            # … when the engine restarts
+    try:
+        again._init_event_cursor()
+        assert [e["event"] for e in again._pair_events("XAUUSD")] == ["mgmt_position_closed"]
+    finally:
+        again.close()
+
+
+def test_a_failed_first_call_leaves_every_setup_new(eng, monkeypatch):
+    from tradingsystem.ai.orchestrator import CycleRequest
+    assert eng.store.kv_get("XAUUSD:signature") is None               # no call yet on this pair
+    eng._sig = {"XAUUSD": ["1h:sweep:bearish:1:t"]}
+
+    async def failed(queue, **kw):
+        return [DecisionRecord("XAUUSD", "agent_per_pair", "t", "error", errors=["usage limit"])]
+    monkeypatch.setattr(eng.orch, "run_cycle", failed)
+
+    async def go():
+        eng._remember_call("XAUUSD", PAYLOAD, "strong")
+        await eng._cycle([CycleRequest("XAUUSD", "t", "strong")], {"XAUUSD": PAYLOAD}, T0)
+    asyncio.run(go())
+    assert eng.store.kv_get("XAUUSD:signature") is None and eng.store.kv_get("XAUUSD:last_call_price") is None
+
+
+def test_an_event_call_a_due_setup_would_have_made_costs_no_event_budget(eng):
+    now = T0 + 10 * MIN
+    for i in range(eng.s.ai.event_calls_per_day):
+        r = DecisionRecord("XAUUSD", "agent_per_pair", "event: x", "valid", ts=now - i)
+        r.trigger_strength, r.setup_strength = "event", "strong"
+        eng.store.save(r)
+    assert eng._event_budget("XAUUSD", now)

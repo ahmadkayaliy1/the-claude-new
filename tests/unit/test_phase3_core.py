@@ -195,3 +195,15 @@ def test_the_action_limits_in_rule_13_are_the_configured_ones():
     pa = s.execution.position_actions
     assert f"every {pa.min_minutes_between_sl_changes} minutes and {pa.max_per_pair_per_day} applied actions" in pr.system
     assert "turns it into `price_reached`" in pr.system and "re-enter on a later cycle" in pr.system
+
+
+def test_merge_keys_still_load_and_a_bad_pair_override_is_caught_by_the_all_pairs_check(tmp_path):
+    from tradingsystem.core.settings import DEFAULT_CONFIG
+    local = tmp_path / "config.local.yaml"
+    local.write_text("instances:\n  ETHUSDT: &e {api_port: 8767, magic_offset: 2, overrides: {ai: {charts: {enabled: false}}}}\n"
+                     "  XAUUSD: {<<: *e, api_port: 8768, magic_offset: 3}\n", encoding="utf-8")
+    xau = load_settings(DEFAULT_CONFIG, local_path=local, env_path=Path("nope.env"), extra_env={"TS_INSTANCE": "XAUUSD"})
+    assert not xau.ai.charts.enabled and xau.api.port == 8768
+    local.write_text("instances:\n  XAUUSD: {overrides: {ai: {chart: {enabled: false}}}}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="instances.XAUUSD.overrides"):
+        load_settings(DEFAULT_CONFIG, local_path=local, env_path=Path("nope.env"))   # `tradingsystem config`
