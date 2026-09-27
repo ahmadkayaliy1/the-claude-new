@@ -55,3 +55,15 @@ def test_no_key_stays_no_key_and_the_key_rules_apply_before_the_prefix(sent):
     assert t.main(["--level", "info", "--title", "t", "--text", "x", "--key", "k" * (t.KEY_MAX + 1)],
                   settings=s) == 3
     assert len(calls) == 3
+
+
+def test_the_demo_order_test_refuses_to_run_in_an_operator_session():
+    """The only tool that sends MT5 orders stops before it loads settings or touches the terminal when a session's
+    marker is set (a second layer behind the allow-list, which never names it)."""
+    import os
+    import subprocess
+    import sys
+    env = {**os.environ, "TS_OPERATOR_SESSION": "1", "PYTHONPATH": str(ROOT / "src")}
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "demo_order_test.py")], env=env, capture_output=True,
+                       text=True, timeout=60)
+    assert r.returncode == 2 and "refused" in r.stderr and not r.stdout

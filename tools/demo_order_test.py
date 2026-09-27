@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import sys
 import time
 import uuid
@@ -90,4 +91,7 @@ def main(symbol: str = "ETHUSD@") -> int:
 
 
 if __name__ == "__main__":
+    if os.environ.get("TS_OPERATOR_SESSION") == "1":     # a Claude operator session never sends orders (§3.8)
+        print("refused: an operator session never runs the order test", file=sys.stderr)
+        sys.exit(2)
     sys.exit(main(*sys.argv[1:]))
