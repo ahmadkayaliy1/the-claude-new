@@ -870,7 +870,8 @@ built, in which order, and what is deferred. Where the two differ, this section 
   gate by design and counted by class in the go-live checklist; the model manages what is open (D-043). Go-live starts
   with ONE pair (ETH sizes best at $100).
 - (e) Subscription for the decision role (default, the owner may change it): the shared Max plan for now, with
-  `ai.daily_calls_per_pair 30`, `min_minutes_between_calls 30`, `review_floor_minutes 20` in `config.local.yaml` (H30)
+  `ai.daily_calls_per_pair 30`, `min_minutes_between_calls 30`, `review_floor_minutes 20` in `config.local.yaml` (H30;
+  the `monitor:` block goes in only after the H20 merge — Phase 3 code refuses unknown sections)
   and development sessions run right after a 5-hour reset (21:00 / 02:00 / 07:00 / 12:00 / 17:00 UTC); before go-live
   a second Claude account for production or an API key with hard USD caps (a D entry then).
 - The ExpressVPN stays as it is: the owner wants it running; nothing in the code, the docs or the sessions asks to
