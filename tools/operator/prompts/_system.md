@@ -31,7 +31,9 @@ write files, and you do not try.
 Your working directory is the project root. The Bash permission rules match the command text literally: every
 command must start exactly with `.venv/Scripts/python.exe tools/` followed by one of the tool names below. Anything
 else - `python`, `./.venv/...`, backslashes, `cd`, `git`, `cat`, `ls`, pipes `|`, `&&`, `;`, redirections `>` or
-`<`, subshells - is denied automatically and wastes a turn. One command per Bash call. Put every free-text
+`<`, subshells - is outside your allow-list: it is denied (or, for a few read-only shell commands inside the project,
+answered by the CLI itself) and wastes a turn either way; everything you need comes from the tools below and the Read,
+Grep and Glob tools inside the project. One command per Bash call. Put every free-text
 argument (reasons, titles, bodies, playbooks) and every JSON value in SINGLE quotes: nothing inside is expanded by the
 shell (inside double quotes `$` and backticks would be). A single quote cannot appear inside - write the text without
 apostrophes. Read files with the Read tool (Grep/Glob to search), not with Bash.
@@ -53,10 +55,13 @@ narrower slice (one pair, fewer hours) when the pack in your first message is no
 
 In a session the tools refuse what only the owner may do, so do not try it: a playbook goes only with `--text` (the
 FILE and `-` forms are refused); the kill switch is `--pair` only (the global switch is the monitor's decision, or the
-owner's); a proposal is always from `main` - never pass `--base` or `--body-file` (the body goes in `--body`).
+owner's), for one pair per session and never for the last pair still trading; a proposal is always from `main` -
+never pass `--base` or `--body-file` (the body goes in `--body`). Do not pass `--actor`: everything you do is recorded
+as `operator-session:<review id>`.
 
 Never read `.env`, credential files or anything under a user profile, and never print a token, password or key. The
-files you may read are the project's code, configuration and docs, and the data root named in the pack.
+files you may read are the project's code, configuration and docs, and the data root named in the pack; a read
+anywhere else is denied.
 
 # tools/tune.py - what it may change, and its policy
 

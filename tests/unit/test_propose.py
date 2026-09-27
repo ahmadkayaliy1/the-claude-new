@@ -268,6 +268,33 @@ def test_a_session_never_reads_a_body_file(env, monkeypatch, tmp_path, capsys):
     assert not any(a[:2] == ("worktree", "add") for a, _ in git.calls) and not sent
 
 
+def test_a_session_proposal_is_recorded_as_the_session_whatever_actor_it_names(env, monkeypatch):
+    """The document header, the commit message and proposals.jsonl name operator-session:<review id> (exported by the
+    session runner) — never an actor the session chose, such as 'owner' or 'monitor'."""
+    pp, s, main, git, sent = env
+    monkeypatch.setenv("TS_OPERATOR_SESSION", "1")
+    monkeypatch.setenv("TS_OPERATOR_REVIEW_ID", "20260927T043000Z_daily")
+    assert pp.main(["--slug", "who-did-it", "--title", "t", "--body", BODY, "--actor", "owner"], settings=s,
+                   root=main) == 0
+    line = json.loads((s.paths.shared() / "proposals.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert line["actor"] == "operator-session:20260927T043000Z_daily"
+    doc = (Path(line["worktree"]) / line["doc"]).read_text(encoding="utf-8")
+    assert " by operator-session:20260927T043000Z_daily" in doc and " by owner" not in doc
+    commit = next(a for a, _ in git.calls if a[0] == "commit")
+    assert "By operator-session:20260927T043000Z_daily." in commit[-1]
+    monkeypatch.delenv("TS_OPERATOR_REVIEW_ID")                    # none exported: the plain session actor
+    assert pp.propose(s, slug="no-review-id", title="t", body=BODY, actor="monitor", root=main,
+                      dry_run=True)["actor"] == "operator-session"
+    monkeypatch.setenv("TS_OPERATOR_REVIEW_ID", "not a review id")
+    assert pp.propose(s, slug="bad-review-id", title="t", body=BODY, root=main, dry_run=True)["actor"] == \
+        "operator-session"
+    monkeypatch.delenv("TS_OPERATOR_SESSION")                      # a human's actor is kept, and still checked
+    assert pp.propose(s, slug="by-hand", title="t", body=BODY, actor="owner", root=main,
+                      dry_run=True)["actor"] == "owner"
+    assert pp.main(["--slug", "by-hand", "--title", "t", "--body", BODY, "--actor", "bad actor!"], settings=s,
+                   root=main) == 3
+
+
 @pytest.mark.parametrize("name", [".env", ".env.local", ".ENV", "claude-credentials.md", "Credentials.json"])
 def test_a_body_file_named_like_a_secret_is_refused_unread(env, tmp_path, capsys, name):
     pp, s, main, git, sent = env

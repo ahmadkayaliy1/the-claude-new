@@ -676,6 +676,12 @@ def _funnel(decs: list[dict[str, Any]], metrics: dict[str, dict[str, Any]]) -> d
     ms_ideas = [m for m in ms if m.get("mae_r") is not None]            # a fill-bar stop-out has mae_r, mfe_r 0
     exit_reasons = collections.Counter(m.get("exit_reason") for m in ms if m.get("exit_reason"))
     nt = [m.get("no_trade_counterfactual_atr") for m in ms if m.get("no_trade_counterfactual_atr") is not None]
+    # slippage is stored as fill - requested (+ = worse for a BUY, better for a SELL): signed by the side so that + is
+    # always against the trade (as detail.slippage_adverse), else a BUY and a SELL filled equally worse cancel out
+    adverse = [float(metrics[d["id"]]["slippage"]) * (1.0 if d["decision"] == "BUY" else -1.0) for d in ideas
+               if d["id"] in metrics and metrics[d["id"]].get("slippage") is not None]
+    # commission / swap NULL = unknown (an MT5 trade settled before Phase 4, a venue that gave none), never 0
+    cost = {k: [float(m[k]) for m in ms if m.get(k) is not None] for k in ("commission", "swap")}
     return {
         "calls_stored": len(decs),
         "by_trigger_strength": dict(collections.Counter(d.get("trigger_strength") or "-" for d in decs)),
@@ -699,10 +705,11 @@ def _funnel(decs: list[dict[str, Any]], metrics: dict[str, dict[str, Any]]) -> d
             "tp3_hit_share": _round(_mean(m.get("tp3_hit") for m in ms_ideas if m.get("tp3_hit") is not None)),
             "mean_minutes_to_resolve": _round(_mean(m.get("minutes_to_resolve") for m in ms), 0),
             "exit_reasons": dict(exit_reasons),
-            "mean_slippage": _round(_mean(m.get("slippage") for m in ms), 6),
+            "mean_slippage_adverse": _round(_mean(adverse), 6), "slippage_n": len(adverse),
             "mean_spread_at_gate": _round(_mean(m.get("spread_at_gate") for m in ms), 6),
-            "commission": _round(sum(float(m.get("commission") or 0) for m in ms)),
-            "swap": _round(sum(float(m.get("swap") or 0) for m in ms)),
+            "commission": _round(sum(cost["commission"])) if cost["commission"] else None,
+            "commission_n": len(cost["commission"]),
+            "swap": _round(sum(cost["swap"])) if cost["swap"] else None, "swap_n": len(cost["swap"]),
             "rejected_but_virtual_win": sum(1 for m in ms if m.get("rejected_but_virtual_win")),
             "no_trade_n": len(nt), "no_trade_mean_counterfactual_atr": _round(_mean(nt)),
         },
@@ -1083,8 +1090,9 @@ def _render(d: dict[str, Any], n_ideas: int, n_health: int, n_rows: int) -> str:
               f"{_num(m['tp1_hit_share'])}/{_num(m['tp2_hit_share'])}/{_num(m['tp3_hit_share'])}, minutes to resolve "
               f"{_num(m['mean_minutes_to_resolve'], 0)}, exits {_counts(C(m['exit_reasons']))}, "
               f"rejected-but-virtual-win {m['rejected_but_virtual_win']}, spread@gate "
-              f"{_num(m['mean_spread_at_gate'], 5)}, slippage {_num(m['mean_slippage'], 5)}, commission "
-              f"{_num(m['commission'])}, swap {_num(m['swap'])}, "
+              f"{_num(m['mean_spread_at_gate'], 5)}, adverse slippage {_num(m['mean_slippage_adverse'], 5)} (n "
+              f"{m['slippage_n']}), commission {_num(m['commission'])} (n {m['commission_n']}), swap "
+              f"{_num(m['swap'])} (n {m['swap_n']}), "
               f"NO_TRADE counterfactual {_num(m['no_trade_mean_counterfactual_atr'])} ATR (n {m['no_trade_n']})")
             p(f"  tokens (stored calls) in {f['tokens']['input']:,} out {f['tokens']['output']:,} · mean latency "
               f"{_num(f['mean_latency_s'], 0)} s")

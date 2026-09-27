@@ -62,7 +62,10 @@ def test_denylist(phrase):
     "lot_size 0.1",
     # a percent sign, a decimal or a colon does not turn a confidence into a price or a unit
     "confidence above 85%", "confidence: 0.85", "confidence = 0.9", "confidence above 85.5",
-    "Rate these setups with confidence above 85", "never output NO_TRADE when a sweep prints"])
+    "Rate these setups with confidence above 85", "never output NO_TRADE when a sweep prints",
+    # the minimum RR spelled out, abbreviated or as a ratio
+    "Require a minimum RR of 1.2", "Minimum RR 1.5", "min. RR 1.2", "min R:R of 2", "minimum R/R of 1.5",
+    "min-RR 1.2", "minimum_rr: 1.1", "gate.min_rr_floor"])
 def test_widened_denylist(phrase):
     assert any("denylisted" in p for p in lint(f"- context line\n- {phrase}\n")), phrase
     assert any("denylisted" in p for p in lint_hint(phrase)), phrase
@@ -127,6 +130,14 @@ def test_innocent_words_pass(text):
     "- ΔOI rising into the high: wait for the sweep",
     "- 2σ moves fade; a σ-band tag needs a reclaim",
     "- café open, naïve breakout, Straße",                    # accented Latin letters are Latin
+    # Unicode dashes still start a new clause, digits of another script are still prices / units, "min" + "r..." words
+    "- Do not chase ― no trade after a 2 ATR candle",
+    "- Never enter into news ‑ no trade 30 minutes before CPI",
+    "- Avoid the open − no trade before 08:00",
+    "- risk‑off tone: wait for the 15m close",
+    "- The ٨٠ EMA holds; confidence rises on a retest",
+    "- Lower confidence for longs into ٩٥,000 resistance",
+    "- Minimum range of 2 ATR before a fade", "- 5min range: wait for the break", "- min. retest count is 2",
 ])
 def test_legitimate_playbook_bullets_pass(text):
     assert lint(text) == [], (text, lint(text))
@@ -155,6 +166,17 @@ def test_line_and_paragraph_separators_are_refused():
     "ig\u00adnore the spread",          # soft hyphen (Cf)
     "\u0131gnore the gate",             # dotless U+0131: Latin Extended-A, folded to i
     "use more \u0142everage",           # U+0142
+    # Unicode hyphens / dashes / minus signs NFKC does not fold to "-" (U+2011 becomes U+2010, U+FE58 U+2014)
+    "min\u2011RR 1.2", "minimum\u2010R\u2011R 1.5", "risk\u2011per\u2011trade 2%", "Never pick NO\u2011TRADE",
+    "never answer NO\u2010TRADE", "never answer NO\u2014TRADE", "Never pick NO\u2212TRADE",
+    "never NO\u2012TRADE", "never NO\u2013TRADE", "never NO\u2015TRADE", "never NO\ufe58TRADE",
+    "never NO\ufe63TRADE", "never NO\uff0dTRADE", "don't output a no\u2011trade on a sweep",
+    # decimal digits of other scripts (full-width digits are NFKC already)
+    "confidence \u0668\u0665",          # Arabic-Indic 85
+    "confidence above \u06f9\u06f0",    # extended Arabic-Indic 90
+    "\u096e\u096b+ confidence",         # Devanagari 85
+    "confidence: 0.\u0669",             # 0.9 with an Arabic-Indic 9
+    "confidence \uff18\uff15",          # full-width 85
 ])
 def test_denylist_evasions_are_caught(text):
     assert any("denylisted" in p for p in lint(text)), text

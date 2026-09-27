@@ -16,7 +16,8 @@ Suspend-aware: after a sleep, a reboot or a clock jump every wall-clock heartbea
 The age of a beat older than the supervisor's last suspend is corrected by the time asleep, and while a system is
 "settling" (booted, resumed or clock-jumped within the stale window, or the machine slept since the last run) a
 staleness finding must be seen on two consecutive runs at least 5 min apart before it is reported; a "no supervisor
-runs" note always must (after any logon the keep-alive tasks start the supervisors 90-150 s late).
+runs" note always must (after any logon the keep-alive tasks start the supervisors 90-150 s late), and while it waits
+so do that pair's own staleness findings.
 
 An event is handled once whatever the notification did (a burst counted, the equity baseline moved on). A notification
 that reached no sink (the last flush timed out, every sink failed) is kept in ``pending_notify`` and re-sent by the
@@ -319,6 +320,7 @@ class Monitor:
         self.awake, self.boot_ms = 0.0, 0
         self.slept_s = 0.0                                # machine sleep since the previous run (0 = none/unknown)
         self.machine_settle: str | None = None
+        self.logon_wait: dict[str, str] = {}              # pair → why its "no supervisor runs" note waits (_notes)
         # (finding key, its pending_notify entry, the notifier's result, the finding — None for a re-send)
         self._sent: list[tuple[str, dict, dict | None, Finding | None]] = []
 
@@ -400,7 +402,9 @@ class Monitor:
         """health_report's notes become warnings. "No supervisor runs" always waits for the two-run rule: after any
         logon (a prompt one after a boot, one hours after an overnight update restart, a logoff/logon) the keep-alive
         tasks start the supervisors 90-150 s late, and the monitor cannot tell when the user logged on — a system that
-        is really down is reported one run (15 min) later. Other notes go at once."""
+        is really down is reported one run (15 min) later. A pair whose note waits settles for this run
+        (``logon_wait``): its stale heartbeats, quotes, outages and MT5 IPC errors wait with it, and the next run
+        reports a system that is really down with them. Other notes go at once."""
         notes = {hashlib.sha1(t.encode("utf-8")).hexdigest()[:12]: t
                  for t in (n[3:] if n.startswith("!! ") else n for n in self.notes)}
         down: dict[str, str] = {}                               # hold id (the pair when it names one) → note id
@@ -408,10 +412,11 @@ class Monitor:
             if "no supervisor runs" in text:
                 who = text.split(":", 1)[0].strip()
                 down[who if PAIR_RE.fullmatch(who) else i] = i
-        kept = self._hold("system", "not running", {h: notes[i] for h, i in down.items()},
-                          self.machine_settle or "first seen on this run (the keep-alive starts a supervisor 90-150 s "
-                                                 "after a logon)")
+        why = self.machine_settle or ("first seen on this run (the keep-alive starts a supervisor 90-150 s after "
+                                      "a logon)")
+        kept = self._hold("system", "not running", {h: notes[i] for h, i in down.items()}, why)
         waiting = {i for h, i in down.items() if h not in kept}
+        self.logon_wait = {h: why for h, i in down.items() if h not in kept and h != i}    # h == i: no pair named
         for i, text in notes.items():
             if i not in waiting:
                 self.add(Finding("warn", "note:" + i,
@@ -501,6 +506,7 @@ class Monitor:
                 settle = self._settling(s, name, con)
             except Exception:  # noqa: BLE001 — unknown = not settling (report rather than stay silent)
                 log.warning("settle check failed for %s", name, exc_info=True)
+            settle = settle or self.logon_wait.get(name)     # its "no supervisor runs" note waits (a late logon)
             for fn in (self._heartbeats, self._ipc, self._executor, self._engine, self._bursts, self._restarts,
                        self._outages, self._quotes):
                 self._guard(name, fn.__name__.lstrip("_"), fn, s, name, con, status, settle)
@@ -532,6 +538,8 @@ class Monitor:
                              pair=s.paths.instance))
 
     def _ipc(self, s: Settings, name: str, con, status: dict[str, _Row], settle: str | None) -> None:
+        if name in self.logon_wait:         # no supervisor runs (yet): the rows are from before the logon, and the
+            return                          # next run reports a system that is really down (the two-run rule)
         prev = self.prev.get("ipc") or {}
         for c in ("executor", "mt5"):
             r = status.get(c)
@@ -564,11 +572,13 @@ class Monitor:
                                  + " at the broker — set one in MetaTrader 5 now", system=name, pair=p,
                                  remind_ms=MS_PER_HOUR))
         pnl = _num(d.get("today_pnl_pct"))
+        day = time.strftime("%Y-%m-%d", time.gmtime(self.now / 1000))
+        if time.strftime("%Y-%m-%d", time.gmtime(r.updated_ms / 1000)) != day:
+            pnl = None           # a stopped executor's row still holds an earlier UTC day's result: not today's loss
         if pnl is not None:
             mx = s.risk.max_daily_loss_pct
             band = mx - s.monitor.daily_loss_warn_margin_pct
             warn_at = -band if band > 0 else -0.8 * mx          # no band (margin ≥ limit): at 80 % of the limit
-            day = time.strftime("%Y-%m-%d", time.gmtime(self.now / 1000))
             who = mine or "every pair (all-pairs system)"
             if pnl <= -mx:
                 key = f"dayloss:{name}:{day}"
@@ -698,11 +708,13 @@ class Monitor:
     def _gap_ms(self, v: dict) -> int:
         """The time the machine slept or was off since equity baseline ``v`` was sampled, as of this run: the sleep
         the runs that carried it counted (``slept_ms``) plus the sleep since the previous run; after a reboot since
-        the run that last carried it (``boot_ms``), everything from the sample to this boot."""
+        the run that last took or carried it (``boot_ms``), plus the time from that run (``seen_ms``: it saw the
+        machine up) to this boot — the hours those runs were awake without a sample are not downtime."""
         gap = int(_num(v.get("slept_ms")) or 0)
         boot = int(_num(v.get("boot_ms")) or 0)
         if boot and self.boot_ms and abs(boot - self.boot_ms) >= SAME_BOOT_MS:
-            return max(gap, self.boot_ms - int(_num(v.get("ts")) or 0), 0)
+            seen = int(_num(v.get("seen_ms")) or _num(v.get("ts")) or 0)
+            return gap + max(self.boot_ms - seen, 0)
         return gap + round(max(self.slept_s, 0.0) * 1000)
 
     def _equity(self) -> None:
@@ -717,12 +729,12 @@ class Monitor:
         keep = self.state.setdefault("equity", {})
         for acct, v in prev.items():                            # a baseline survives a run without a newer sample
             if isinstance(v, dict) and self.now - int(v.get("ts") or 0) < 7 * MS_PER_DAY:
-                keep[acct] = {**v, "slept_ms": self._gap_ms(v), "boot_ms": self.boot_ms}
+                keep[acct] = {**v, "slept_ms": self._gap_ms(v), "boot_ms": self.boot_ms, "seen_ms": self.now}
         for acct, (eq, ts, name) in sorted(self.samples.items()):
             p = prev.get(acct) if isinstance(prev.get(acct), dict) else None
             if p is not None and ts <= int(p.get("ts") or 0):
                 continue                                        # the same (or an older) row: carried, not a sample
-            keep[acct] = {"equity": eq, "ts": ts, "boot_ms": self.boot_ms}
+            keep[acct] = {"equity": eq, "ts": ts, "boot_ms": self.boot_ms, "seen_ms": self.now}
             old = _num((p or {}).get("equity"))
             if not old:
                 continue

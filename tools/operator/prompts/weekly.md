@@ -8,7 +8,8 @@ The daily reviews handle incidents; this review looks at the week as a whole. Ch
 1. Health over the week: recurring problems (restarts, outages, stale data, log errors) and whether they are getting
    better or worse. One line per recurring problem, with counts.
 2. Per pair: the funnel of the week and where it loses most; results (virtual and broker, TP1-first share, mean R,
-   MFE/MAE, exits, `rejected_but_virtual_win`, costs: spread, slippage, commission, swap) with sample sizes.
+   MFE/MAE, exits, `rejected_but_virtual_win`, costs: spread, adverse slippage (+ = against the trade), commission,
+   swap — `-` means unknown, not zero) with sample sizes.
 3. Attribution: the breakdowns by session, regime and setup kind. Which contexts win and which lose, with enough
    resolved outcomes to mean something (at least 10 per group; say "too few" otherwise).
 4. The playbook of each pair: does it match what the week showed? The weekly review is the place to rewrite a

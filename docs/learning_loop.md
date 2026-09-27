@@ -6,7 +6,7 @@ else — risk, sizing, stops, the gate, code, prompts, `config.yaml` — can onl
 docs/operator_sessions.md); you decide.
 
 This page covers the overlay: what it may change, how the services read it, the tool that writes it, the policy that
-tool enforces, and how you stop or undo it.
+tool enforces, and how you stop or undo it. §9 explains the decision metrics the reviews read.
 
 ---
 
@@ -115,7 +115,8 @@ The two hashes are stored with every decision, so the review can tell which over
 ```
 
 - `--dry-run` checks everything and prints `dry-run: would apply: …`; nothing is written.
-- `--actor NAME` (default `operator`) is recorded with the change; it grants nothing.
+- `--actor NAME` (default `operator`) is recorded with the change; it grants nothing. An operator session is
+  always recorded as `operator-session:<review id>` (its `--actor` is ignored).
 - `--pair`, `--dry-run` and `--actor` may stand before or after the command.
 - `--reason` (3–500 chars) and `--evidence-json` (any JSON value, ≤ 4000 chars) are required for `set` and
   `playbook`. `--window-hours` (24–720, default `adaptive.default_window_hours` = 168) is the window for the sample
@@ -217,10 +218,13 @@ original set still counts for both (a set, revert and set again on the same key 
   "confidence (85-90)", "85+ confidence", "85% confidence", "confidence: 0.85" are refused; "confidence 70, target
   1.85", "Win rate 85%: keep confidence moderate" pass. A price is not a confidence (95,000 / 90,500 / 95k / 85.5k),
   nor is a number with a unit (the 80 EMA, 0.8 ATR, 0.8R, 85 pips / points, 2x) or a share ("85% of the sweeps").
-  Also `daily loss`, `kill switch`, `min_rr`. Matched case-insensitively on a normalised copy of the text: NFKD,
+  Also `daily loss`, `kill switch`, `min_rr` / min RR / min. RR / minimum RR / min R:R / minimum R/R. Matched
+  case-insensitively on a normalised copy of the text: NFKD,
   every combining mark and format character removed (accents, the combining grapheme joiner, variation selectors,
   zero-width space / joiner, BOM, soft hyphen), NFKC (full-width and mathematical letters), a few Latin letters that
-  look like ASCII ones folded ("ı" → i, "ł" → l, "ø" → o, …), markdown emphasis inside words removed, and across
+  look like ASCII ones folded ("ı" → i, "ł" → l, "ø" → o, …), Unicode hyphens, dashes and minus signs (U+2010–U+2015,
+  U+2212, U+FE58, U+FE63, U+FF0D) folded to `-`, decimal digits of other scripts ("٨٥") mapped to ASCII digits,
+  markdown emphasis inside words removed, and across
   line breaks for the adjacent forms.
 - No word that has ASCII letters and also a letter outside Latin-1 / Latin Extended-A (U+00C0–U+017F): look-alikes
   that NFKC does not fold — Cyrillic "іgnore", Greek "οverride", Armenian "cօnfidence", Coptic, Cherokee, an IPA "ɡ"
@@ -261,3 +265,59 @@ revert alone skips the tp_hint lint, §5). `--dry-run` shows what the lint refus
   back to the config values within 5 s).
 - The dashboard's Tuning tab shows the values in force, their expiry, `changes.jsonl`, the playbook and the freeze
   flag.
+
+## 9. Decision metrics (`decision_metrics`, `execution/metrics.py`)
+
+One row per valid decision of the system's pairs in the pair's `app.db`, written by the executor (every 60 s). The
+module docstring of `src\tradingsystem\execution\metrics.py` is the full reference; the review pack aggregates these
+rows per pair.
+
+### When a decision is scored
+
+| Kind | Basis (`detail.basis`) | Scored |
+|---|---|---|
+| Executed trade | `broker` | once the venue settled it (`outcome`) **and** the 1m bar the last leg closed in has closed and is stored (the exit is often at that bar's extreme; without it a TP reached there would read as missed). Scored again when a later settlement (`outcome_ts`) is newer than the row, e.g. an idea first scored virtually and executed afterwards from the manual queue. Window: the real fill (`outcome_detail.open_ms`) to the last leg's real close (`close_ms`). |
+| Trade idea not executed (gate-rejected, expired, not placed, manual mode) | `virtual` | once `virtual_outcome` is known, on the virtual trade: the same fill rules and entry, the **original** stop and every target, from the cycle time until the stop is touched, the farthest target is touched or valid_until + 24 h passes; on one bar the stop is checked before the targets. |
+| `NO_TRADE` | `no_trade` | only the counterfactual, once 4 decision-timeframe bars have closed after the cycle and the window's last 1m bar is stored (a window whose stored bars end at most 10 min early counts once 10 min have passed after its end). |
+
+- **Backfill:** at most 20 decisions per pass, oldest first, within a 5 s budget; so the first start after the merge
+  scores the history at 20 a minute per system. A decision whose bars are not stored yet (or whose virtual trade is
+  still running) is asked again after 5 min without holding up the others; a failing one backs off from 5 min to 6 h.
+- Bars still missing 6 h after the window's end: the row is written on the bars stored and flagged `detail.partial`.
+- `computed_ms` is the wall-clock time of the scoring.
+
+### Columns
+
+Excursions, targets and the counterfactual are measured on the **analysis** instrument's closed 1m bars, in the
+recommendation's own price space. Slippage and spread are in **execution-instrument** price units.
+
+| Column | Unit and sign | NULL when |
+|---|---|---|
+| `mfe_r` / `mae_r` | R = \|worst entry edge − original stop\|; the worst edge is the top of a BUY's entry zone, the bottom of a SELL's (as `rr_computed`). Both are signed excursions from that edge: `mae_r` ≥ 1 = the stop was reached, `mfe_r` < 0 = the price never came back to the worst edge after the fill. On the bar that stopped a virtual trade only its adverse extreme counts; stopped on its fill bar, the fill price (within that bar's range) is the favourable extreme. | the trade never filled, no bars between fill and close, the levels are not scorable (`detail.error`), NO_TRADE |
+| `tp1_hit` … `tp3_hit` | 1 / 0: the target was reached inside the window (a 4th target: `detail.tp4_hit`) | never filled, no bars in the window, fewer targets, levels not scorable, NO_TRADE |
+| `minutes_to_resolve` | whole minutes from the cycle time (`recommendation.timestamp`) to the last leg's real close, or to the open of the bar that decided the virtual outcome | no close time (e.g. an MT5 trade settled before Phase 4), a virtual outcome the bars never decided, NO_TRADE |
+| `exit_reason` | `tp`, `sl`, `rule_close`, `model_close`, `expired`, `not_triggered`, `open`. Executed: how the last leg to close ended (an MT5 `other` / `cancelled` leg is `rule_close` / `model_close` when `position_actions` holds our close / cancel; orders never filled → `not_triggered`). Virtual: tp1_first → `tp`, sl_first → `sl`, not_triggered → `not_triggered`, unresolved_24h → `expired`. `open` only for a leg a venue still reports live. | a venue reason that does not map (a **manual close or a stop-out**, MT5 `other`, kept in `detail.legs`), an MT5 trade settled before Phase 4, NO_TRADE |
+| `slippage` | mean over the trade's fills of fill − requested, **as MT5 records it: + = worse for a BUY, better for a SELL**. `detail.slippage_adverse` is the same value signed so that **+ is always against the trade**. MT5 pending orders 0.0; paper STOP fills fill − order price, MARKET / LIMIT fills 0.0. | not executed, NO_TRADE, no fill recorded one |
+| `spread_at_gate` | ask − bid of the execution quote the risk gate judged. Older rows: parsed from the `spread_vs_sl` check text, 2 decimals (`detail.spread_source` = `gate_text`, else `gate`). | the gate recorded neither |
+| `commission` / `swap` | the settlement's split in the account currency, as the venue reports it (`commission` = commission + fee); paper 0.0 | **unknown**: an MT5 trade settled before Phase 4 (`detail.no_outcome_detail`) or a venue that gave none; not executed; NO_TRADE |
+| `rejected_but_virtual_win` | 1 when the risk gate refused the idea and its virtual outcome is `tp1_first`, else 0 | NO_TRADE |
+| `no_trade_counterfactual_atr` | the largest move from the price at the cycle (the close of the minute before the window) to any high / low of the next 4 decision bars, in decision-TF ATR14 (the ATR the model was shown, else computed as of the cycle); `detail` has `move_up` / `move_down` and `up_atr` / `down_atr` | not NO_TRADE, no ATR, no bars |
+
+### `detail` flags
+
+- `partial` — bars missing (scored on the bars stored), no bars between the fill and the close, no bars for the
+  NO_TRADE window, or no decision-timeframe ATR: read that row's numbers as incomplete.
+- `no_outcome_detail` — an MT5 trade settled before Phase 4: no venue split, exit reason or close time.
+- `window_start` / `window_end` — the venue gave no fill / close time: the virtual fill / the settlement time was used.
+- `virtual_mismatch` — the walk on today's bars ends differently from the stored `virtual_outcome` (a gap filled
+  since).
+- `error` — the recommendation's levels are not scorable: no excursions, target hits or `slippage_adverse` (an
+  executed trade keeps its exit reason and costs, an idea only its virtual exit reason).
+- Also `legs` (each leg's venue reason, `exit`, `closed_by`), `single_leg`, `slippage_units`, `entry`, `risk`, `bars`.
+
+### In the review pack
+
+Per pair: means of `mfe_r` / `mae_r` and the TP hit shares over the rows with an excursion; **adverse slippage** =
+the mean of the side-signed slippage (+ = against the trade) over the executed ideas that have one, with its count;
+commission and swap summed over the rows where they are **known**, each with its count (`-` = none known, which is
+not zero).

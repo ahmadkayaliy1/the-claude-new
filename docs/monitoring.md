@@ -37,10 +37,12 @@ runs plus every pair that should run (its own `data\instances\<PAIR>\app.db`, no
 run but has no supervisor is a warning (`System not running`) only when two runs at least 5 min apart see it —
 always, not only while the machine settles (§4): after any logon (right after a boot, hours after an overnight update
 restart, a logoff/logon) the keep-alive tasks start the supervisors 90-150 s late, and the monitor cannot tell when you
-logged on. A system that is really down is therefore reported one run (15 min) later. Every other health-report note
-is a warning at once (`System check`). A system stopped by you (`run\manual_stop`, no live supervisor) is skipped. A
-pair whose supervisor runs but whose `app.db` this monitor cannot find is a warning (`monitor cannot see this system`):
-the task runs from another checkout or data root.
+logged on. On a run where that note waits, the pair's stale heartbeats, stale quotes, outages and MT5 IPC errors (its
+rows are from before the restart) wait with it. A system that is really down is therefore reported one run (15 min)
+later, with its stale heartbeats and quotes. Every other health-report note is a warning at once (`System check`). A
+system stopped by you (`run\manual_stop`, no live supervisor) is skipped. A pair whose supervisor runs but whose
+`app.db` this monitor cannot find is a warning (`monitor cannot see this system`): the task runs from another checkout
+or data root.
 
 Everything is read **read-only**: each system's `app.db` (heartbeats, events, quotes), its `run\supervisor.json`,
 `data\shared\account_peak.json` and `data\reviews\`.
@@ -58,7 +60,7 @@ Thresholds are in the `monitor:` block of `config/config.yaml` (defaults shown).
 | Daily loss near the limit | today ≤ −(`risk.max_daily_loss_pct` − `daily_loss_warn_margin_pct`) % (−8 % with 10/2); with no band (margin ≥ limit, e.g. the code defaults 2/2) at 80 % of the limit | warn | — |
 | Daily loss limit | today ≤ −`risk.max_daily_loss_pct` % | critical | the pair's switch (all-pairs system: the global one), **once per UTC day** |
 | Equity drop | equity fell > `equity_drop_warn_pct` (5) % since the account's previous sample (the baseline, carried up to 7 days) | warn | — |
-| Equity drop, large | … > `equity_drop_kill_pct` (10) % of an identified MT5 account (`mt5:…`) against a baseline at most 1 h old, not counting the time the machine slept or was off since that sample (a reboot: everything from the sample to the boot) | critical | the **global** `data\KILL_SWITCH` |
+| Equity drop, large | … > `equity_drop_kill_pct` (10) % of an identified MT5 account (`mt5:…`) against a baseline at most 1 h old, not counting the time the machine slept or was off since that sample (a reboot: the time from the last monitor run that saw the machine up to the boot) | critical | the **global** `data\KILL_SWITCH` |
 | Equity drop, large, not comparable | the same drop of a **paper** account, of an unidentified one (`mt5:<mode>:?`, the executor row had no `account_drawdown`) or against an older baseline: more than 1 h **awake** without a sample — the monitor did not run, or its runs found no equity in the executor row (an MT5 outage, the executor loop failing, a logon long after a reboot) | warn | none: the global switch stops every system |
 | Drawdown stop tripped | `account_peak.json` (or the executor row) shows the account's stop tripped | critical, **once** per trip | — (the executors already refuse) |
 | Stale quote | `latest_quote` older than `quote_stale_min` (10) while the instrument's market was open through that whole window | warn | — |
@@ -66,7 +68,7 @@ Thresholds are in the `monitor:` block of `config/config.yaml` (defaults shown).
 | Restart loop | more than `restart_loop_per_hour` (3) `exited`/`killed` events of one service in the last hour | warn | — |
 | Outage | a `disconnect` without a later `resumed` (MT5) / `connect` (Binance) for > `outage_warn_min` (10) | warn | — |
 | VPN | an adapter in `vpn_adapter_names` went up or down since the last run (a missing adapter is down) | info | — |
-| Daily review overdue | no `data\reviews\*_daily.md` newer than `review_overdue_hours` (30); before the first one, counted from the monitor's first run; skipped with `operator.enabled: false` | warn | — |
+| Daily review overdue | no finished daily session (`data\reviews\*_daily.session.json` with status `ok` or `max_turns`) newer than `review_overdue_hours` (30) — a pack alone (`*_daily.md` from a `--dry-run`, a failed start or `review_pack.py` by hand) does not count; before the first one, counted from the monitor's first run; skipped with `operator.enabled: false` | warn | — |
 | Slow snapshot build | the engine's `snapshot_build_ms` (the median of its recent builds, else the last) above `snapshot_build_warn_ms` (3000) on **two runs in a row** | warn | — |
 | A broken check | an exception inside one check (the others still run) | warn | — |
 
@@ -84,9 +86,12 @@ monitor task right after the resume. So:
   machine slept since the previous monitor run (wall time minus awake time > 60 s), or the machine slept since the
   supervisor's last beat and that beat is recent on the awake clock. While settling, a stale heartbeat, stale quote
   or outage must be seen on **two consecutive runs at least 5 min apart**; until then it is listed as `waiting`. A
-  pair with no supervisor (§2) always must;
+  pair with no supervisor (§2) always must, and while its note waits so do its own stale heartbeats, quotes, outages
+  and MT5 IPC errors;
 * the equity baseline (§3) does not age while the machine sleeps or is off: every run that carries it without a newer
-  sample adds the time slept since the previous run, and after a reboot everything from the sample to the boot counts.
+  sample adds the time slept since the previous run, and after a reboot the time from the last run that took or
+  carried it (`seen_ms`: that run saw the machine up) to the boot counts — hours awake without a sample before the
+  reboot (the executor loop failing) still age it.
 
 Without any of that, a stale heartbeat is reported on the first run that sees it.
 
@@ -121,7 +126,8 @@ rate-limited counts as handled.
 
 ## 6. Kill switches
 
-The monitor only **engages** switches (`core/killswitch.py`, content `{ts, actor: "monitor", reason, scope}`); an
+The monitor only **engages** switches (`core/killswitch.py`, content `{ts, actor: "monitor", reason, scope}`; a
+diagnosis session's switch says `operator-session:<review id>`, the dashboard's `dashboard`); an
 existing switch is left as it is. To go on after reviewing, run `scripts\kill_switch_off.bat [PAIR]` as usual.
 
 * An order burst engages the pair's switch once per burst: after you turn it off, the orders already counted never
@@ -168,7 +174,7 @@ so the notifier's dedupe sends it at most every 30 min): until it is fixed, ever
 | `alerts` | per finding key: level, first/last seen, last notified; `cleared_ms` = gone, kept for its cool-down (§5) |
 | `pending_notify` | per finding key: a notification that reached no sink — level, title, text, pair, when it was first detected, attempts so far — re-sent by the next runs (§5) |
 | `once`, `acted` | one-shot findings sent; daily-loss switches already engaged (by key) |
-| `equity` | per account: the baseline (`equity`, `ts` of the sample), the boot of the run that last took or carried it (`boot_ms`) and, once carried, the time slept or off since the sample (`slept_ms`) |
+| `equity` | per account: the baseline (`equity`, `ts` of the sample), the run that last took or carried it (`seen_ms`) and its boot (`boot_ms`) and, once carried, the time slept or off since the sample (`slept_ms`) |
 | `burst_seen` | per system and pair: the newest order already counted in a burst |
 | `ipc` | per system and collector: since when the IPC error is seen |
 | `seen` | per system and kind: first sighting of each stale item (the two-run rule) |

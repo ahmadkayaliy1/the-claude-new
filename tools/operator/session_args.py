@@ -10,7 +10,8 @@ The session is a read-only reviewer with a narrow Bash allow-list:
   (``--setting-sources=`` — the equals form: PowerShell 5.1 drops an empty ``""`` argument), no MCP servers;
 * ``--permission-mode dontAsk --permission-prompts none``: whatever the allow-list does not name is denied, never
   asked (nobody is there to answer) — the denials come back in the result's ``permission_denials``;
-* tools Read, Grep, Glob and Bash; editors and the web disallowed, ``.env`` unreadable; Bash only for the exact
+* tools Read, Grep, Glob and Bash; editors and the web disallowed; reads confined to the working directories (see
+  "Reads" below), ``.env``, credential files and the CLI's own files unreadable; Bash only for the exact
   commands ``.venv/Scripts/python.exe tools/<tool>.py`` of health_report, review_pack, tune, propose and notify, bare or
   followed by a space and arguments (the diagnosis adds ``tools/kill_switch.py --pair``: one pair's switch only — the
   global switch is the monitor's). Every rule is ``Bash(<command> *)`` with a SPACE before the ``*``: Claude Code
@@ -24,6 +25,22 @@ The session is a read-only reviewer with a narrow Bash allow-list:
 * model and effort per kind from ``ai.models.review`` (daily, weekly) or ``ai.models.monitor`` (diagnose), resolved
   like the orchestrator's roles; turns and time limits from ``operator.*``.
 
+Reads (Claude Code 2.1.282, read from its bundled JS): Read, Grep and Glob share one path check (``fk``): the Read deny
+rules first (``Wa(path, ctx, "read", "deny")`` → deny), then ``if (Py(path, ctx)) return {behavior: "allow", …}`` —
+the path lies in a working directory, ``KS(ctx) = new Set([cwd, ...additionalWorkingDirectories])`` (the checkout
+and every ``--add-dir``) — then the path allow rules, else ``ask``. A tool-wide allow rule is applied afterwards to
+any ``ask`` (``let Pe = EZ(ctx, tool); if (Pe && …) return {behavior: "allow", …}``), so the former bare ``Read`` /
+``Grep`` / ``Glob`` rules allowed every file on the machine outside the deny list (``~/.claude.json`` included);
+under ``dontAsk`` an ``ask`` becomes ``deny`` (``if (mode === "dontAsk" && …) return {behavior: "deny", …}``). So
+the allow-list names no read tool: reads inside the checkout and the ``--add-dir`` data root need no rule, anything
+else is denied. Grep and Glob obey the Read deny rules for their path (the same ``fk``) and for every file they
+search (``iit`` turns the Read deny patterns into ripgrep ``--iglob !<pattern>``). Rule roots (``ait``): ``~/`` =
+the home directory, ``C:/…`` or ``//c/…`` = that drive, a leading ``/`` or none = the working directory (so
+``**/.env`` covers only files under it); deny rules match case-insensitively on Windows. ``Read(~/**)`` (every file
+of the user profile) is added when neither the checkout nor the data root lies under the home directory
+(production: ``C:\\the_claude_new``) — deny rules win over the working-directory allow, so a scratch root under
+``%TEMP%`` would otherwise become unreadable.
+
 Environment of the CLI (and so of every tool the model runs): the provider's allow-list (``claude_code.ENV_KEEP``:
 what Windows and the CLI need) — so the MT5 password, API keys, the dashboard token and the Telegram secrets that
 ``load_settings`` put into ``os.environ`` never reach the session — plus ``TRADINGSYSTEM_CONFIG`` / ``TS_INSTANCE`` (the
@@ -32,9 +49,11 @@ tools must see the same data root as this runner: a scratch live run depends on 
 is configured (exactly as the provider passes it); never ``CLAUDECODE``, other ``CLAUDE_CODE_*``, ``CLAUDE_EFFORT`` or
 ``ANTHROPIC_*`` (an inherited API key would bill per token, D-030). Added: ``PYTHONIOENCODING=utf-8``, ``PYTHONUTF8=1``
 (tool output carries "≥"/"→", which a cp1252 pipe cannot encode), ``MSYS_NO_PATHCONV=1`` (Git Bash would rewrite
-``/nopause``-style arguments into paths) and the session marker ``TS_OPERATOR_SESSION=1``: every command the session
-runs inherits it, and the allow-listed tools refuse what only a human may do (tune.py: a playbook FILE or ``-``;
-propose.py: ``--body-file`` and a ``--base`` other than main; kill_switch.py: ``--all``).
+``/nopause``-style arguments into paths), the session marker ``TS_OPERATOR_SESSION=1`` and the session's review id
+``TS_OPERATOR_REVIEW_ID`` (run_session.py): every command the session runs inherits them, and the allow-listed tools
+refuse what only a human may do (tune.py: a playbook FILE or ``-``; propose.py: ``--body-file`` and a ``--base`` other
+than main; kill_switch.py: ``--all``, a second pair in the same review, the last pair still trading) and record the
+actor ``operator-session:<review id>`` whatever ``--actor`` says (kill_switch.py, tune.py, propose.py).
 """
 from __future__ import annotations
 
@@ -60,25 +79,31 @@ DIAGNOSE_TOOLS = ("kill_switch",)
 # switch only — ``--all`` (the global switch) is the monitor's decision (§3.8), and kill_switch.py refuses it in a
 # session too
 RULE_TAIL = {"kill_switch": " --pair *"}         # every other tool: " *" (never a glued "*", see the docstring)
-READ_TOOLS = ("Read", "Grep", "Glob")
-TOOLS = "Read,Grep,Glob,Bash"
+TOOLS = "Read,Grep,Glob,Bash"                    # available; NO allow rule for Read/Grep/Glob (docstring, "Reads")
 DISALLOWED = ("Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Read(**/.env)", "Read(.env)",
               "Read(**/.env.*)",
-              # the CLI's own sign-in and settings, SSH/cloud credentials: never part of a review
-              "Read(~/.claude/**)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.config/**)",
-              "Read(**/.credentials.json)")
+              # the CLI's own sign-in, settings and state, SSH/cloud credentials: never part of a review
+              "Read(~/.claude/**)", "Read(~/.claude.json)", "Read(~/.ssh/**)", "Read(~/.aws/**)",
+              "Read(~/.config/**)", "Read(**/.credentials.json)")
+HOME_DENY = "Read(~/**)"                         # added when neither the checkout nor the data root is under home
 PROMPTS = Path(__file__).resolve().parent / "prompts"
 SYSTEM_PROMPT = PROMPTS / "_system.md"
 LEDGER_ROLE = {"daily": "review", "weekly": "review", "diagnose": "diagnose"}     # ai_usage.role of the session row
 MODEL_ROLE = {"daily": "review", "weekly": "review", "diagnose": "monitor"}       # ai.models.<role>
 DIAGNOSE_PACK_HOURS = 6                          # the monitor's findings are recent: the last hours are the evidence
-PACK_MAX_CHARS = {"daily": 40_000, "weekly": 40_000, "diagnose": 16_000}   # diagnosis ≤ ~8 k tokens in all
+# characters of the pack markdown. A diagnosis' FIRST request = _system.md (8.4 k chars) + the prompt on stdin
+# (diagnose.md ~2.1 k + the pack ≤ 16 k; measured by a dry run on a copy of production data, 3 pairs, 6 h: 12.5 k with
+# a 10.2 k pack) ≈ 21-27 k characters ≈ 6-7 k tokens of text, plus the CLI's tool definitions. So "≤ 8 k tokens" can
+# at best describe that first request, never a session: every turn re-sends the whole context and the ledger row
+# sums input + cache reads + cache writes over all turns (docs/operator_sessions.md, "Cost")
+PACK_MAX_CHARS = {"daily": 40_000, "weekly": 40_000, "diagnose": 16_000}
 
 # environment
 PASS_THROUGH = ("TRADINGSYSTEM_CONFIG", "TS_INSTANCE", "TS_NOTIFY_DISABLE", "CLAUDE_CODE_GIT_BASH_PATH")
 DROP_PREFIXES = ("CLAUDE_CODE_", "ANTHROPIC_")
 DROP_NAMES = ("CLAUDECODE", "CLAUDE_EFFORT")
 SESSION_ENV = "TS_OPERATOR_SESSION"        # the session marker the tools check (tune, propose, kill_switch, …)
+REVIEW_ENV = "TS_OPERATOR_REVIEW_ID"       # the session's review id: the tools record 'operator-session:<id>'
 ADDED_ENV = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "MSYS_NO_PATHCONV": "1", SESSION_ENV: "1"}
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
@@ -131,11 +156,12 @@ def model_effort(s: Settings, kind: str) -> tuple[str, str | None, str]:
 
 
 def allowed_tools(kind: str) -> list[str]:
-    """The allow-list: Read/Grep/Glob, and Bash only for the exact tool commands, bare or with arguments after a
-    space (the diagnosis adds the kill switch, ``--pair`` only). The rules match the command text literally —
-    ``./.venv/…``, backslashes, ``python tools/…`` or ``tools/tune.py/../x`` are denied."""
+    """The allow-list: Bash only for the exact tool commands, bare or with arguments after a space (the diagnosis adds
+    the kill switch, ``--pair`` only). The rules match the command text literally — ``./.venv/…``, backslashes,
+    ``python tools/…`` or ``tools/tune.py/../x`` are denied. No Read/Grep/Glob rule: reads inside the working
+    directories need none, and a tool-wide rule would allow every file outside them (module docstring, "Reads")."""
     tools = BASE_TOOLS + (DIAGNOSE_TOOLS if check_kind(kind) == "diagnose" else ())
-    return [*READ_TOOLS, *(f"Bash({PY} tools/{t}.py{RULE_TAIL.get(t, ' *')})" for t in tools)]
+    return [f"Bash({PY} tools/{t}.py{RULE_TAIL.get(t, ' *')})" for t in tools]
 
 
 def outside(path: Path, root: Path) -> bool:
@@ -143,7 +169,15 @@ def outside(path: Path, root: Path) -> bool:
     return p != r and r not in p.parents
 
 
-def spec_for(s: Settings, kind: str, *, root: Path = ROOT, exe: str | None = None) -> SessionSpec:
+def disallowed_tools(root: Path, data: Path, home: Path | None = None) -> tuple[str, ...]:
+    """The deny list; ``Read(~/**)`` only when neither the checkout nor the data root lies under the home directory
+    (a deny rule wins over the working-directory allow — a scratch root under ``%TEMP%`` must stay readable)."""
+    home = Path.home() if home is None else home
+    return DISALLOWED + ((HOME_DENY,) if outside(root, home) and outside(data, home) else ())
+
+
+def spec_for(s: Settings, kind: str, *, root: Path = ROOT, exe: str | None = None,
+             home: Path | None = None) -> SessionSpec:
     model, effort, name = model_effort(s, kind)
     op = s.operator
     data = s.paths.data()
@@ -154,7 +188,8 @@ def spec_for(s: Settings, kind: str, *, root: Path = ROOT, exe: str | None = Non
         timeout_min=int(getattr(op, f"{kind}_timeout_min")), pack_hours=float(hours),
         pack_max_chars=PACK_MAX_CHARS[kind], ledger_role=LEDGER_ROLE[kind], root=root, data_root=data,
         system_prompt=SYSTEM_PROMPT, kind_prompt=PROMPTS / f"{kind}.md",
-        add_dirs=(data,) if outside(data, root) else (), allowed=tuple(allowed_tools(kind)))
+        add_dirs=(data,) if outside(data, root) else (), allowed=tuple(allowed_tools(kind)),
+        disallowed=disallowed_tools(root, data, home))
 
 
 def build_args(spec: SessionSpec) -> list[str]:
@@ -184,11 +219,13 @@ def dropped(name: str) -> bool:
 
 
 def child_env(s: Settings | None = None, environ: dict[str, str] | None = None,
-              oauth_token: str | None = None) -> dict[str, str]:
+              oauth_token: str | None = None, review_id: str | None = None) -> dict[str, str]:
     """The session's environment (see the module docstring). ``oauth_token``: default = the provider's configured
-    long-lived token (``secret(api_key_env)``), passed exactly as the provider passes it; None/"" = none."""
+    long-lived token (``secret(api_key_env)``), passed exactly as the provider passes it; None/"" = none.
+    ``review_id``: exported as ``TS_OPERATOR_REVIEW_ID`` (never inherited from this process's environment)."""
     src = dict(os.environ if environ is None else environ)
     env = {k: v for k, v in cc.child_env(None, src).items() if not dropped(k)}
+    env.pop(REVIEW_ENV, None)
     upper = {k.upper(): k for k in src}
     for name in PASS_THROUGH:
         if name in upper and src[upper[name]] != "":
@@ -201,6 +238,8 @@ def child_env(s: Settings | None = None, environ: dict[str, str] | None = None,
     if oauth_token:
         env[TOKEN_ENV] = oauth_token
     env.update(ADDED_ENV)
+    if review_id:
+        env[REVIEW_ENV] = review_id
     return env
 
 

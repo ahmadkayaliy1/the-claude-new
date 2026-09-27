@@ -450,8 +450,11 @@ Four parts, each with its own page:
 | Notifications | a log line, a Windows toast and (optional, H18) a Telegram message for orders, fills, closes, outcomes, Claude's actions, kill switches, drawdown trips, monitor findings, reviews and proposals | inside every system and tool | `docs\notifications.md` |
 | Monitor | pure Python, no Claude: stale heartbeats, hung MT5 IPC, positions without SL, order bursts, daily loss, equity drops, restart loops, RAM/disk, overdue reviews, slow snapshots; engages kill switches on the hard rules | task `TradingSystemOps-Monitor`, every 15 min | `docs\monitoring.md` |
 | Operator sessions | Claude (Opus) reads a review pack of the last 24 h (daily) or 7 days (weekly) with read-only tools, may tune the bounded per-pair overlay through `tools\tune.py`, and writes proposals for anything else; a diagnosis session when the monitor finds something new | tasks `TradingSystemOps-ReviewDaily` (04:30 UTC) and `-ReviewWeekly` (Sunday 06:00 UTC) | `docs\operator_sessions.md` |
-| Learning loop | decision metrics (MFE/MAE, targets hit, exit reason, costs) for every resolved decision; a per-pair overlay (`data\adaptive\<PAIR>\`) that can only make the system more careful, expires after 14 days and can be reverted; a playbook of desk notes in the trader's prompt | executor every 60 s; `tune.py` only from a session or by hand | `docs\learning_loop.md` |
+| Learning loop | decision metrics (MFE/MAE, targets hit, exit reason, costs) for every resolved decision; a per-pair overlay (`data\adaptive\<PAIR>\`) that can only make the system more careful, expires after 14 days and can be reverted; a playbook of desk notes in the trader's prompt | executor every 60 s; `tune.py` only from a session or by hand | `docs\learning_loop.md` (metrics: §9) |
 
+- **Apply Phase 4 with the systems stopped (H20):** `scripts\stop_all.bat`, then `git merge --ff-only
+  feat/phase4-watches-learns`, then `scripts\start_all.bat` — a system still running the older code re-reads the new
+  trader template from disk and would fail its cycles until it restarts.
 - **Install the tasks after the merge (H19),** from `C:\the_claude_new`: `scripts\install_operator_tasks.bat -DryRun`,
   then `scripts\install_operator_tasks.bat`. Then retire the desktop app's 3-hourly monitor task.
 - **The first start after the merge** computes the metrics of every older resolved decision, 20 per minute per
@@ -467,7 +470,9 @@ Four parts, each with its own page:
   trades keep their SL/TP and protective management either way.
 - **The usage gauge** (dashboard status, health report, review pack) compares the last 7 days and 5 hours of Claude
   tokens in the shared ledger (rows of the `claude_code` providers only — a fallback provider does not count) with
-  `ai.usage.weekly_token_budget` / `five_hour_token_budget`. Only a running engine's gauge (dashboard status, engine
+  `ai.usage.weekly_token_budget` / `five_hour_token_budget`, counting a cache-read token as 0.1
+  (`ai.usage.cache_read_weight`) — calibrate the budgets (H21) from the gauge's own `7 d` / `5 h` numbers in the health
+  report or the review pack, not from the ledger's raw sums. Only a running engine's gauge (dashboard status, engine
   rationing) steps a level down 5 points below its threshold; the health report, the review pack and the session gate
   use the thresholds as they are, so after a peak they can show one level lower than the dashboard. A timed-out or
   crashed operator session has unknown usage (0 tokens recorded): the gauge's reason adds "+ N session(s) with unknown

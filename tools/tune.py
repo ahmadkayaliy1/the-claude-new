@@ -5,7 +5,8 @@
     python tools/tune.py --pair BTCUSDT playbook --text "..." | FILE | - --reason "..." --evidence-json "{...}"
     python tools/tune.py --pair BTCUSDT revert KEY [--reason "..."]
     python tools/tune.py [--pair BTCUSDT] list [--json]
-    --dry-run: check everything and print what would be done; nothing is written.   --actor NAME (default operator)
+    --dry-run: check everything and print what would be done; nothing is written.   --actor NAME (default operator;
+    an operator session is always recorded as operator-session:<review id> - TS_OPERATOR_REVIEW_ID - whatever it says)
 
 Keys, bounds and directions: ``tradingsystem.core.adaptive.KEYS`` (docs/learning_loop.md). The policy is enforced here,
 under the pair's lock, against the pair's own app.db: ``data/TUNING_FREEZE`` or ``adaptive.enabled: false`` refuse
@@ -67,6 +68,9 @@ PAIR_RE = re.compile(r"^[A-Z0-9]{2,20}$")
 ACTOR_RE = re.compile(r"^[\w.@:+-]{1,40}$")
 MAX_SOURCE_BYTES = 64 * 1024
 SESSION_ENV = "TS_OPERATOR_SESSION"             # "1" in every operator session's environment (the session runner)
+REVIEW_ENV = "TS_OPERATOR_REVIEW_ID"            # the session's review id (exported by the session runner)
+SESSION_ACTOR = "operator-session"              # a session's actor: operator-session:<review id>
+SESSION_REVIEW_RE = re.compile(r"^[\w.:+-]{1,80}$")
 MIN_SECRET_CHARS = 8                            # shorter secret values would match ordinary words and numbers
 EFFECTIVE_FIELD = {"min_confidence_floor": "min_confidence", "min_minutes_between_calls": "min_minutes_between_calls",
                    "max_idle_minutes": "max_idle_minutes", "review_floor_minutes": "review_floor_minutes",
@@ -390,6 +394,12 @@ def _change_args(a: argparse.Namespace, s: Settings) -> dict[str, Any]:
 
 
 def _actor(a: argparse.Namespace, s: Settings) -> str:
+    """Who the change is recorded under. An operator session is always ``operator-session:<review id>`` (the id the
+    session runner exported; ``operator-session`` without a valid one) whatever ``--actor`` says: the audit trail
+    (tuning_changes, changes.jsonl, the notification) must show where a change came from."""
+    if os.environ.get(SESSION_ENV) == "1":
+        rid = (os.environ.get(REVIEW_ENV) or "").strip()
+        return f"{SESSION_ACTOR}:{rid}" if SESSION_REVIEW_RE.fullmatch(rid) else SESSION_ACTOR
     actor = (a.actor or "").strip()
     if not ACTOR_RE.fullmatch(actor):
         raise Invalid(f"--actor {a.actor!r}: 1..40 characters of letters, digits and . @ : + - _")

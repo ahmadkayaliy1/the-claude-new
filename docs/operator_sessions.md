@@ -11,7 +11,15 @@ short diagnosis session when it finds a warning.
 | `weekly` | Sunday 06:00 UTC | `ai.models.review` | `weekly_max_turns` 40 / `weekly_timeout_min` 40 | `weekly_pack_hours` 168 h |
 | `diagnose` | started by `tools/monitor.py` (at most every `monitor.diagnose_every_hours`) | `ai.models.monitor` (sonnet / low) | `diagnose_max_turns` 12 / `diagnose_timeout_min` 15 | 6 h, pack ≤ 16 k characters |
 
-Target cost: a daily review ≤ 30 k tokens (the pack is ≈ 10 k of it), a diagnosis ≤ 8 k.
+**Cost.** The spec's targets (a daily review ≤ 30 k tokens, a diagnosis ≤ 8 k) are single-call sizes; they cannot
+hold for a session under the ledger convention (§2 step 7: input + cache reads + cache writes, summed over every turn
+— each turn re-sends the whole context plus the tool output so far). A diagnosis' first request is `_system.md`
+(8.4 k characters) + the prompt on stdin (`diagnose.md` ≈ 2.1 k + the pack, capped at 16 k; a dry run on a copy of
+production data, 3 pairs, 6 h: 12.5 k characters with a 10.2 k pack) ≈ 21-27 k characters ≈ 6-7 k tokens of text,
+plus the CLI's own tool definitions — so 8 k is at best that first request. An n-turn diagnosis records at least n
+times it (an estimate for 4 turns: 30-50 k). The live daily review (10 turns) recorded 204 k input for a 27.3 k-token
+context (`docs/measurements/phase4_live.md`, D-045). The levers are `operator.*_max_turns` and the pack caps
+(`PACK_MAX_CHARS` in `session_args.py`).
 
 ## 1. Install the scheduled tasks (H19)
 
@@ -113,8 +121,9 @@ claude -p --model <m> --effort <e> --output-format json --no-session-persistence
   --system-prompt-file <checkout>\tools\operator\prompts\_system.md [--add-dir <data root>]
   --tools Read,Grep,Glob,Bash
   --disallowedTools Edit Write NotebookEdit WebFetch WebSearch "Read(**/.env)" "Read(.env)" "Read(**/.env.*)"
-    "Read(~/.claude/**)" "Read(~/.ssh/**)" "Read(~/.aws/**)" "Read(~/.config/**)" "Read(**/.credentials.json)"
-  --allowedTools Read Grep Glob
+    "Read(~/.claude/**)" "Read(~/.claude.json)" "Read(~/.ssh/**)" "Read(~/.aws/**)" "Read(~/.config/**)"
+    "Read(**/.credentials.json)"   [neither checkout nor data root under the home directory] "Read(~/**)"
+  --allowedTools
     "Bash(.venv/Scripts/python.exe tools/health_report.py *)" "Bash(.venv/Scripts/python.exe tools/review_pack.py *)"
     "Bash(.venv/Scripts/python.exe tools/tune.py *)" "Bash(.venv/Scripts/python.exe tools/propose.py *)"
     "Bash(.venv/Scripts/python.exe tools/notify.py *)"
@@ -125,6 +134,16 @@ claude -p --model <m> --effort <e> --output-format json --no-session-persistence
   session file (`result.permission_denials`) — a denied command costs a turn, which is why `_system.md` spells out
   the exact command forms.
 * `--setting-sources=` (equals form, one argument): no settings, hooks or CLAUDE.md; `--strict-mcp-config`: no MCP.
+* **Reads: no allow rule for Read, Grep or Glob.** In Claude Code 2.1.282 the three share one path check: the Read
+  deny rules first, then a path inside a working directory (the checkout and every `--add-dir`) is allowed by itself,
+  then the path allow rules, else "ask" — which `dontAsk` turns into a denial. A tool-wide allow rule (the former bare
+  `Read` / `Grep` / `Glob`) is applied to that "ask" and allowed every file on the machine outside the deny list
+  (`~/.claude.json`, the CLI's state, included). Grep and Glob obey the Read deny rules for their path and skip every
+  denied file they search. Rule roots: `~/` = the home directory, `C:/…` = that drive, anything else = the working
+  directory (so `**/.env` covers only the checkout). `Read(~/**)` — the whole user profile — is added when neither the
+  checkout nor the data root lies under the home directory (production, `C:\the_claude_new`); a deny rule wins over
+  the working-directory allow, so a scratch data root under `%TEMP%` must not get it. The evidence (quoted from the
+  CLI) is in `session_args.py`'s docstring, "Reads".
 * **A space before every `*`.** Claude Code (2.1.282) compiles a rule whose only `*` is a trailing ` *` to
   `<command>( .*)?` — the bare command or the command, a space and arguments. A glued `tools/tune.py*` would be
   `tools/tune[.]py.*`, which also matches `tools/tune.py/../<any file>`: Windows collapses the `..`, so the session
@@ -148,11 +167,15 @@ root), `CLAUDE_CODE_GIT_BASH_PATH` when you set it, the subscription token when 
 `/nopause`-style arguments into paths). Never `CLAUDECODE`, other `CLAUDE_CODE_*`, `CLAUDE_EFFORT`, `ANTHROPIC_*`
 (an inherited API key would bill per token) or any secret from `.env`.
 
-**The session marker `TS_OPERATOR_SESSION=1`** is added too, so every command the session runs inherits it. The
-allow-listed tools refuse what only the owner may do while it is set: `tune.py … playbook` takes `--text` only (a
-FILE or `-` is refused — a file the tool opened would get around the session's Read denials); `propose.py` refuses
-`--body-file` and any `--base` other than `main`; `kill_switch.py` refuses `--all`. The prompts say so
-(`_system.md`, `diagnose.md`), so a session does not waste a turn on them.
+**The session marker `TS_OPERATOR_SESSION=1`** is added too, with the session's review id as
+`TS_OPERATOR_REVIEW_ID` (never inherited from the runner's own environment), so every command the session runs
+inherits both. The allow-listed tools refuse what only the owner may do while the marker is set: `tune.py … playbook`
+takes `--text` only (a FILE or `-` is refused — a file the tool opened would get around the session's Read denials);
+`propose.py` refuses `--body-file` and any `--base` other than `main`; `kill_switch.py` refuses `--all`, a second
+pair and the last pair still trading (§6). `kill_switch.py`, `tune.py` and `propose.py` record the actor
+`operator-session:<review id>` (`operator-session` without a valid id) whatever `--actor` says, so the switch file,
+`tuning_changes` / `changes.jsonl`, the proposal and the notifications always show that a session did it. The prompts
+say so (`_system.md`, `diagnose.md`), so a session does not waste a turn on them.
 
 ## 4. The review pack (`tools/review_pack.py`)
 
@@ -234,9 +257,14 @@ never reaches production) with who and why; an existing switch is kept as it is;
 into a path.
 
 A diagnosis may engage **one pair's** switch only: its allow-list rule is `kill_switch.py --pair *`, and with
-`TS_OPERATOR_SESSION=1` the tool refuses `--all` (exit 2, "a session may engage one pair's switch only"). The global
-switch is the monitor's decision (the equity drop) or the owner's (`--all` by hand, or `kill_switch_on.bat`). Exit
-codes: 0 engaged (or already on; `--status`), 1 not written, 2 refused, 3 invalid.
+`TS_OPERATOR_SESSION=1` the tool refuses `--all` (exit 2, "a session may engage one pair's switch only"). The rule
+alone would let a session engage every pair one by one (or in one `&&` chain), so the tool also bounds it, writing
+nothing when it refuses (exit 2): the switch records the actor `operator-session:<review id>`, and a second pair is
+refused once another pair's switch carries this review's actor; a switch that would leave no pair trading — the
+global switch on, or every other pair's switch on (the configured `instances:`, else the enabled pairs) — is refused
+too. A pair that is already on stays "already on" (exit 0, nothing written). The global switch is the monitor's
+decision (the equity drop) or the owner's (`--all` by hand, or `kill_switch_on.bat`). Exit codes: 0 engaged (or
+already on; `--status`), 1 not written, 2 refused, 3 invalid.
 
 ## 7. By hand
 

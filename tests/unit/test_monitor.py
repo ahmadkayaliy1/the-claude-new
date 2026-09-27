@@ -279,7 +279,8 @@ def test_the_sleep_since_the_baseline_counts_when_the_first_run_after_the_resume
     seed(s, status=fresh(resumed + 15 * MIN, equity=85.0, account_drawdown=acct, mode="mt5"))
     (f,) = run(mon, world, ["BTCUSDT"], at=resumed + 15 * MIN).problems            # 3.3 h old, 3 h of it asleep
     assert (f.level, f.switch) == ("critical", "*") and switches(world["data"]) == {"KILL_SWITCH"}
-    assert state(world)["equity"]["mt5:Demo:8"] == {"equity": 85.0, "ts": resumed + 15 * MIN - 1_000, "boot_ms": 0}
+    assert state(world)["equity"]["mt5:Demo:8"] == {"equity": 85.0, "ts": resumed + 15 * MIN - 1_000, "boot_ms": 0,
+                                                    "seen_ms": resumed + 15 * MIN}
 
 
 def test_an_awake_hour_without_an_equity_sample_only_warns(mon, world):
@@ -315,6 +316,26 @@ def test_a_reboot_since_the_baseline_counts_as_downtime_until_the_boot(mon, worl
     (f,) = run(mon, world, ["BTCUSDT"], at=later).problems           # up 4 h without a sample: only a warning
     assert (f.level, f.switch) == ("warn", None) and switches(data) == set()
     assert "the previous sample is 4.8 h old (0.8 h of it asleep or off)" in f.text
+
+
+def test_awake_hours_without_an_equity_sample_before_a_reboot_are_not_downtime(mon, world, monkeypatch):
+    boot = {"ms": T0 - 5 * MS_PER_HOUR}
+    monkeypatch.setattr(mon, "_clock", lambda: ((mon.clock["now"] - boot["ms"]) / 1000, boot["ms"]))
+    acct = {"account": "mt5:Demo:4", "peak": 100.0, "drawdown_pct": 0.0, "tripped": None}
+    s, data = world["BTCUSDT"], world["data"]
+    seed(s, status=fresh(equity=100.0, account_drawdown=acct, mode="mt5"))
+    run(mon, world, ["BTCUSDT"])
+    for i in range(1, 6):                                            # the executor loop fails: rows without equity
+        seed(s, status=fresh(T0 + i * 15 * MIN, equity=None, account_drawdown=acct, mode="mt5"))
+        run(mon, world, ["BTCUSDT"], at=T0 + i * 15 * MIN)
+    base = state(world)["equity"]["mt5:Demo:4"]
+    assert (base["slept_ms"], base["seen_ms"]) == (0, T0 + 75 * MIN)   # carried by runs that saw the machine up
+    boot["ms"] = T0 + 80 * MIN                                       # the user reboots to fix MT5
+    at = T0 + 90 * MIN
+    seed(s, status=fresh(at, equity=85.0, account_drawdown=acct, mode="mt5"))
+    (f,) = run(mon, world, ["BTCUSDT"], at=at).problems              # off only from the last run to the boot
+    assert (f.level, f.switch) == ("warn", None) and switches(data) == set()
+    assert "the previous sample is 1.5 h old (0.1 h of it asleep or off) — not a drop between two runs" in f.text
 
 
 # ------------------------------------------------------------------ dedupe across runs
@@ -762,6 +783,19 @@ def test_a_second_leg_without_sl_is_a_position_without_sl(mon, world):
     assert f.key == "nosl:BTCUSDT:BTCUSDT:aaaaaaaa" and f.level == "critical" and "a leg without a stop-loss" in f.text
 
 
+def test_a_stopped_executors_row_from_an_earlier_day_never_engages_the_daily_loss_switch(mon, world):
+    """A pair whose executor stopped yesterday keeps yesterday's today_pnl_pct in its status row: at a later UTC day
+    that is not today's loss (the stale heartbeat is reported instead)."""
+    yesterday = T0 - 13 * 60 * MIN                                   # 2026-09-22 23:00 UTC
+    seed(world["BTCUSDT"], status=fresh(yesterday, today_pnl_pct=-10.4))
+    res = run(mon, world, ["BTCUSDT"])
+    assert not [f for f in res.findings if f.key.startswith("dayloss")]
+    assert switches(world["data"]) == set()
+    seed(world["BTCUSDT"], status=fresh(T0, today_pnl_pct=-10.4))    # the same result written today: engaged
+    assert switches(world["data"]) == set() and "dayloss:BTCUSDT:2026-09-23" in {
+        f.key for f in run(mon, world, ["BTCUSDT"], at=T0 + MIN).findings}
+
+
 def test_the_daily_loss_warning_needs_a_band_below_the_limit(mon, world):
     s = world["ETHUSDT"]
     s = s.model_copy(update={"risk": s.risk.model_copy(update={"max_daily_loss_pct": 2.0}),
@@ -880,22 +914,44 @@ def test_a_no_supervisor_note_waits_for_the_second_run_after_a_logon_long_after_
     monkeypatch.setattr(mon, "RUN_SESSION", script)                  # _spawn refuses: no diagnosis may start
     boot = {"ms": T0 - 20 * MS_PER_HOUR}
     monkeypatch.setattr(mon, "_clock", lambda: ((mon.clock["now"] - boot["ms"]) / 1000, boot["ms"]))
-    seed(world["BTCUSDT"], status=fresh(T0 - 8 * MS_PER_HOUR))
-    assert run(mon, world, ["BTCUSDT"], at=T0 - 8 * MS_PER_HOUR).findings == []
+    both = ["BTCUSDT", "ETHUSDT"]
+
+    def up(p, at):                                                   # healthy rows and quotes at ``at``
+        seed(world[p], status=fresh(at), quotes=[(f"binance_spot:{p}", at), (f"mt5:{p[:3]}USD@", at)])
+
+    before = T0 - 5 * MS_PER_HOUR - 10 * MIN                         # the last run before the restart: both healthy
+    for p in both:
+        up(p, before)
+    assert run(mon, world, both, at=before).findings == []
     boot["ms"] = T0 - 5 * MS_PER_HOUR                                # an update restart at night, logon at T0
-    seed(world["BTCUSDT"], status=fresh())
+    up("BTCUSDT", T0)
+    # production shape: ETHUSDT (own app.db) is chosen with its rows, quotes and an outage from before the restart —
+    # its executor last saw the MT5 terminal close first (an IPC error since then)
+    gone = T0 - 5 * MS_PER_HOUR - MIN
+    rows = [r if r[0] != "executor" else ("executor", "error", gone, "(-10004, 'No IPC connection')",
+                                          {"mode": "paper", "failing_since": iso(gone - 2 * MIN)})
+            for r in fresh(gone)]
+    seed(world["ETHUSDT"], status=rows, events=[(gone - MIN, "mt5", "disconnect", "terminal closed")],
+         quotes=[("binance_spot:ETHUSDT", gone), ("mt5:ETHUSD@", gone)])
     down = "!! ETHUSDT: its system should run (own app.db, not stopped by the user) but no supervisor runs"
-    res = run(mon, world, ["BTCUSDT"], at=T0, notes=[down], diagnose=True)
+    res = run(mon, world, both, at=T0, notes=[down], diagnose=True)
     assert res.problems == [] and mon.sent == [] and res.diagnose["why"] == "no new warning"
-    assert len(res.held) == 1 and res.held[0].startswith("system not running ETHUSDT: first seen on this run")
-    seed(world["BTCUSDT"], status=fresh(T0 + 2 * MIN))
-    assert run(mon, world, ["BTCUSDT"], at=T0 + 2 * MIN).findings == []          # started 90-150 s after the logon
-    seed(world["BTCUSDT"], status=fresh(T0 + 15 * MIN))
-    res = run(mon, world, ["BTCUSDT"], at=T0 + 15 * MIN, notes=[down])     # down again: first seen again
-    assert res.problems == [] and res.held
-    seed(world["BTCUSDT"], status=fresh(T0 + 30 * MIN))
-    res = run(mon, world, ["BTCUSDT"], at=T0 + 30 * MIN, notes=[down])     # really down: reported 15 min later
-    assert [f.title for f in res.problems] == ["System not running"] and res.problems[0].new
+    assert res.held[0].startswith("system not running ETHUSDT: first seen on this run")
+    assert {h.split(" ")[1] for h in res.held[1:]} == {"stale", "outage", "quote"}      # the same logon: they wait too
+    assert all(h.startswith("ETHUSDT ") and "first seen on this run" in h for h in res.held[1:])
+    up("BTCUSDT", T0 + 2 * MIN)
+    up("ETHUSDT", T0 + 2 * MIN)                                      # started 90-150 s after the logon
+    seed(world["ETHUSDT"], events=[(T0 + 2 * MIN, "mt5", "resumed", "connected")])
+    assert run(mon, world, both, at=T0 + 2 * MIN).findings == []
+    up("ETHUSDT", T0 + 3 * MIN)                                      # … and dies a minute later
+    up("BTCUSDT", T0 + 15 * MIN)
+    res = run(mon, world, both, at=T0 + 15 * MIN, notes=[down])      # down again: first seen again
+    assert res.problems == [] and {h.split(" ")[1] for h in res.held} == {"not", "quote"}
+    up("BTCUSDT", T0 + 30 * MIN)
+    res = run(mon, world, both, at=T0 + 30 * MIN, notes=[down])      # really down: reported 15 min later, with its
+    assert sorted(f.title for f in res.problems) == ["ETHUSDT: stale heartbeat", "ETHUSDT: stale quotes",
+                                                     "System not running"]              # stale heartbeats and quotes
+    assert all(f.new for f in res.problems) and not res.held
 
 
 def test_a_no_supervisor_note_waits_for_the_second_run_while_the_machine_settles(mon, world, monkeypatch, tmp_path):

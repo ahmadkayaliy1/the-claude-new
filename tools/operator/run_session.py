@@ -12,7 +12,8 @@ OEM code page):
 2. the review pack (``tools/review_pack.py``, imported) → ``data/reviews/<ts>_<kind>.md|.json``; with the usage gauge
    enforcing and at level 2 a daily/weekly review is skipped (a diagnosis still runs: it is event-like);
 3. the prompt = the kind's checklist (``prompts/<kind>.md``) + the pack, written to ``<ts>_<kind>.prompt.md`` and fed
-   to the CLI's stdin from that file; the command line and environment come from ``session_args.py``;
+   to the CLI's stdin from that file; the command line and environment come from ``session_args.py`` (the review id
+   goes into the environment as ``TS_OPERATOR_REVIEW_ID``: the tools record ``operator-session:<review id>``);
 4. the machine-wide CLI start stagger (``claude_code.claim_start``: the engines' OAuth refresh race) before
    ``claude auth status`` (only a subscription sign-in is accepted, D-030) and again before ``claude -p``;
 5. ``claude -p`` with the working directory = this checkout, stdout/stderr to files under ``data/reviews/`` (never a
@@ -456,7 +457,7 @@ def _run_locked(kind: str, *, s: Settings, spec: Any, rp: types.ModuleType, rec:
                             now=now, reason=reason)
     files["prompt"].parent.mkdir(parents=True, exist_ok=True)
     _write(files["prompt"], prompt)
-    env = sa.child_env(s)
+    env = sa.child_env(s, review_id=review_id)      # the tools record 'operator-session:<review id>' as the actor
     problems = []
     if not spec.exe:
         problems.append("Claude Code CLI not found (install it or set ai.providers.<claude_code>.cli_path)")

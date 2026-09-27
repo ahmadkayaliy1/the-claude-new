@@ -34,7 +34,7 @@ It also printed the environment changes (names only). Removed: `CLAUDECODE`, eve
 | session end | finished | **`success`**, `end_turn` — status `ok` |
 | turns | ≤ 30 | **10** |
 | time | ≤ 20 min | **119 s** wall (CLI 98 s, API 78 s) |
-| tokens | ≤ 30 k | **27.3 k unique context** (cache creation 27 314 + fresh 18) and 7 415 output (5 237 of it thinking). Over the 10 turns the CLI re-read that context 176 610 times from the cache, so 204 k input tokens were processed in total. API-equivalent $0.40 (Opus list price). |
+| tokens | ≤ 30 k | **missed.** 27.3 k unique context (cache creation 27 314 + fresh 18) and 7 415 output (5 237 of it thinking) = 34.7 k (+16 %). Over the 10 turns the CLI re-read that context 176 610 times from the cache, so the ledger records 204 k input + 7.4 k output; the usage gauge (cache reads at 0.1) counts ≈ 52 k. API-equivalent $0.40 (Opus list price). Accepted in D-045: a multi-turn session re-sends its context every turn, so the spec's single-call budget cannot hold; the levers are `operator.daily_max_turns` and the pack size. |
 | permission denials | 0 | **0**: every command the model ran matched the allow-list |
 | diff guard | clean | **clean** (git status of the worktree identical before and after) |
 | tune.py | within policy | **no change**: "no pair has enough resolved outcomes (BTCUSDT 4, ETHUSDT 1, XAUUSD 0, against 20 needed)". No `tuning_changes` row and no `data/adaptive` file on the scratch root. |

@@ -222,6 +222,43 @@ def test_seeded_pair_gives_a_bounded_pack_with_every_section(rp, tmp_path):
     assert _digest(watched) == before                                                # read-only
 
 
+def test_unknown_costs_stay_unknown_and_slippage_is_signed_against_the_trade(rp, tmp_path):
+    """commission / swap NULL (an MT5 trade settled before Phase 4) is unknown, not 0.00; slippage as stored (fill -
+    requested) is signed by the side, so a BUY and a SELL each filled 3.0 worse average +3, not 0."""
+    s = settings_at(tmp_path)
+    now = now_ms()
+    seeded = seed(s, now, n_ideas=5)                    # ids[1] BUY and ids[4] SELL are executed; no cost columns set
+    pack = rp.build_pack(s, hours=24, kind="daily", systems=[s], notes=[], now=now, write=False)
+    m = pack.data["per_pair"][PAIR]["funnel"]["metrics"]
+    assert m["n"] == 5 and (m["commission"], m["commission_n"], m["swap"], m["swap_n"]) == (None, 0, None, 0)
+    assert (m["mean_slippage_adverse"], m["slippage_n"]) == (None, 0) and "mean_slippage" not in m
+    assert "adverse slippage - (n 0), commission - (n 0), swap - (n 0)," in pack.md
+    ids = seeded["ids"]
+    con = sqlite3.connect(seeded["db"])
+    con.execute("UPDATE decision_metrics SET slippage=3.0, commission=-0.12, swap=-0.05 WHERE decision_id=?", (ids[1],))
+    con.execute("UPDATE decision_metrics SET slippage=-3.0, commission=0.0 WHERE decision_id=?", (ids[4],))
+    con.commit()
+    con.close()
+    pack = rp.build_pack(s, hours=24, kind="daily", systems=[s], notes=[], now=now, write=False)
+    m = pack.data["per_pair"][PAIR]["funnel"]["metrics"]
+    assert (m["mean_slippage_adverse"], m["slippage_n"]) == (3.0, 2)                     # BUY +3, SELL -3 → +3
+    assert (m["commission"], m["commission_n"], m["swap"], m["swap_n"]) == (-0.12, 2, -0.05, 1)
+    assert "adverse slippage 3.00000 (n 2), commission -0.12 (n 2), swap -0.05 (n 1)," in pack.md
+    # a SELL filled better (+1.0 as stored) is favourable: negative adverse slippage
+    fav = rp._funnel([{"id": "s", "decision": "SELL"}], {"s": {"decision_id": "s", "slippage": 1.0}})["metrics"]
+    assert (fav["mean_slippage_adverse"], fav["slippage_n"]) == (-1.0, 1)
+    # no metrics rows at all: nothing is known, nothing reads as 0 (was the int 0)
+    con = sqlite3.connect(seeded["db"])
+    con.execute("DELETE FROM decision_metrics")
+    con.commit()
+    con.close()
+    pack = rp.build_pack(s, hours=24, kind="daily", systems=[s], notes=[], now=now, write=False)
+    none = pack.data["per_pair"][PAIR]["funnel"]["metrics"]
+    assert (none["n"], none["commission"], none["commission_n"], none["swap"], none["swap_n"],
+            none["mean_slippage_adverse"], none["slippage_n"]) == (0, None, 0, None, 0, None, 0)
+    assert "metrics n 0:" in pack.md and "adverse slippage - (n 0), commission - (n 0), swap - (n 0)," in pack.md
+
+
 def test_the_pack_is_cut_to_its_size_limit_and_says_so(rp, tmp_path):
     s = settings_at(tmp_path)
     now = now_ms()

@@ -5,13 +5,15 @@ Both are written autonomously by a review session through ``tools/tune.py`` and 
 they may shape *how* it reads the market, never *what the system risks*: sizing, leverage, stop distances, the gate's
 thresholds and the kill switch stay in the reviewed config. The denylist is the spec's regex (§3.8) widened to the
 usual phrasings (a confidence of 80-99 a few words before or after the word within one clause, "85+ confidence", any
-"never / don't / avoid … NO_TRADE" in one clause, "disregard", "0.05lots") — while not flagging innocent words that
-merely contain a fragment ("slot", "pilot", "plot") or a number that is a price or a unit ("95,000", "95k", "the 80
-EMA", "0.8 ATR"). It is matched on a normalised copy of the text: case folded; compatibility forms folded (NFKC:
-full-width and mathematical letters); accents and every other combining mark, variation selectors and invisible
+"never / don't / avoid … NO_TRADE" in one clause, "disregard", "0.05lots", "minimum R:R") — while not flagging innocent
+words that merely contain a fragment ("slot", "pilot", "plot") or a number that is a price or a unit ("95,000", "95k",
+"the 80 EMA", "0.8 ATR"). It is matched on a normalised copy of the text: case folded; compatibility forms folded
+(NFKC: full-width and mathematical letters); accents and every other combining mark, variation selectors and invisible
 format characters (zero-width space / joiner, BOM, soft hyphen: categories Mn, Me, Cf) removed; a few Latin letters
-without a decomposition that look like ASCII ones ("ı", "ł", "ø", …) folded; markdown emphasis inside a word removed;
-line breaks between the words of the adjacent forms allowed. NFKC does not fold look-alike letters of other scripts
+without a decomposition that look like ASCII ones ("ı", "ł", "ø", …) folded; the Unicode hyphens, dashes and minus
+signs (U+2010-U+2015, U+2212, U+FE58, U+FE63, U+FF0D) folded to "-" and the decimal digits of other scripts
+(Arabic-Indic "٨٥", ...) to ASCII digits; markdown emphasis inside a word removed; line breaks between the words of
+the adjacent forms allowed. NFKC does not fold look-alike letters of other scripts
 ("іgnore" with a Cyrillic "і", "cօnfidence" with an Armenian "օ", "iɡnore" with the IPA "ɡ"), so a word that has ASCII
 letters and also a letter outside Latin-1 / Latin Extended-A is refused as such — except a few Greek letters used as
 math symbols that look like no Latin letter ("ΔOI", "σ"). A word written wholly in another script passes, and so does
@@ -59,7 +61,7 @@ DENYLIST = re.compile(
     rf"|{_HIGH}{_CLAUSE_GAP}(?:\w+{_CLAUSE_SEP}){{0,2}}?confidence"     # "85+ confidence", "90 or higher confidence"
     r"|daily\s+loss"
     r"|kill.?switch"
-    r"|min[\s_-]?rr",
+    r"|min(?:imum)?\.?[\s_-]*r[:/-]?r",               # min_rr, min RR, min. RR, minimum RR, min R:R, minimum R/R
     re.IGNORECASE,
 )
 _BULLET = re.compile(r"^\s*(?:[-*+•]|\d{1,2}[.)])\s+")
@@ -67,18 +69,28 @@ _EMPHASIS = re.compile(r"[*`~]")                  # markdown inside a word ("ig*
 _CONTROL_OK = {"\n", "\t"}
 _WORD = re.compile(r"\w+")
 _INVISIBLE = {"Mn", "Me", "Cf"}                   # combining marks, variation selectors, zero-width / format characters
-# Latin letters without a decomposition that look like ASCII ones (NFKD leaves them whole)
-_FOLD = str.maketrans("ıĸłŁøØđĐðÐħĦŧŦ", "iklLoOdDdDhHtT")
+# Latin letters without a decomposition that look like ASCII ones (NFKD leaves them whole), and the Unicode hyphens,
+# dashes and minus signs that NFKC leaves alone or folds to U+2010 / U+2014 (a U+2011 in "min-RR", "NO-TRADE"): to "-"
+_DASHES = "".join(map(chr, (*range(0x2010, 0x2016), 0x2212, 0xFE58, 0xFE63, 0xFF0D)))
+_FOLD = str.maketrans("ıĸłŁøØđĐðÐħĦŧŦ" + _DASHES, "iklLoOdDdDhHtT" + "-" * len(_DASHES))
+_DIGIT = re.compile(r"(?![0-9])\d")              # a decimal digit of another script ("٨٥"): NFKC keeps it
 # Greek letters used as math symbols ("ΔOI", "2σ") that look like no Latin letter — allowed inside a Latin word
 _MATH_GREEK = frozenset("ΔδΣσΠπΩωΦφΨψΛλΘθβμξζΓΞ")
+
+
+def _ascii_digit(m: re.Match[str]) -> str:
+    d = unicodedata.decimal(m.group(0), None)
+    return m.group(0) if d is None else str(d)
 
 
 def _normal(text: str) -> str:
     """The copy the lint matches (never stored): NFKD, combining marks and format characters removed (accents,
     the combining grapheme joiner, variation selectors, zero-width space / joiner, BOM, soft hyphen), NFKC (full-width
-    and mathematical letters → ASCII), then look-alike Latin letters folded to ASCII."""
+    and mathematical letters → ASCII), then look-alike Latin letters and Unicode hyphens / dashes / minus signs folded
+    to ASCII, and every decimal digit of another script (Arabic-Indic "٨٥", Devanagari, ...) mapped to its ASCII
+    digit."""
     t = "".join(ch for ch in unicodedata.normalize("NFKD", text) if unicodedata.category(ch) not in _INVISIBLE)
-    return unicodedata.normalize("NFKC", t).translate(_FOLD)
+    return _DIGIT.sub(_ascii_digit, unicodedata.normalize("NFKC", t).translate(_FOLD))
 
 
 def _foreign(ch: str) -> bool:

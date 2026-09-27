@@ -739,8 +739,14 @@ conservative thresholds, dedupe, `kill_switch_off.bat`.
   `TS_OPERATOR_SESSION=1`: with it `tune.py` takes the playbook only as `--text`, `propose.py` refuses `--body-file` and
   any base but `main`, `kill_switch.py` refuses `--all`; `review_pack.py --out` accepts only `data/reviews`.
 - **Ledger and gauge:** sessions are ledger rows (role `review`/`diagnose`, pair NULL) outside the pairs' request quota;
-  `UsageStore.tokens_since(since, pair=None, providers=None)` — the gauge counts only `claude_code` providers, with a
-  5-point hysteresis; it observes only until H21 (`ai.usage.enforce: false`).
+  `UsageStore.tokens_since(since, pair=None, providers=None)` — the gauge counts only `claude_code` providers, a
+  cache-read token as `ai.usage.cache_read_weight` (0.1) of a token (the budgets are in these weighted tokens, not the
+  ledger's raw sums), with a 5-point step-down in the engines; it observes only until H21 (`ai.usage.enforce: false`).
+- **Session size:** the live daily review was 27.3 k unique context + 7.4 k output (34.7 k, the ≤ 30 k target missed
+  by 16 %; the ledger records 204 k input because every turn re-reads the context) — accepted (D-045); a diagnosis is
+  likewise more than 8 k in the ledger.
+- **Merge:** `instructions.md` v5 adds `$tp_hint`, which a running Phase 3 engine cannot fill (it re-reads the template
+  from disk): apply Phase 4 with `stop_all.bat` → `git merge --ff-only` → `start_all.bat`, not merge-then-restart.
 - **Notifier:** the Telegram values are read by `Notifier._telegram_creds` — `.env` first (re-read at most once a
   minute; an empty value = off), `os.environ` only when `.env` has no such line; the toast goes before Telegram; the rate
   limit is 20/hour per process for info and for warn each, critical exempt.

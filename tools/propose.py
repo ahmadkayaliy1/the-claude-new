@@ -22,8 +22,9 @@ main, so a base other than main is stated, never hidden.
 An operator session (``TS_OPERATOR_SESSION=1`` in its environment, set by the session runner) proposes from main
 only: another ``--base`` is invalid, ``--body-file`` is invalid (a file this tool opened would get around the
 session's Read denials — sessions pass ``--body``), and a branch that ends up with anything but its one proposal
-commit not in main is removed again and refused. A human's ``--body-file`` may not be named ``.env*`` or
-``*credential*``.
+commit not in main is removed again and refused. A session's proposal is recorded as ``operator-session:<review
+id>`` (the id the runner exports as ``TS_OPERATOR_REVIEW_ID``) whatever ``--actor`` says. A human's ``--body-file``
+may not be named ``.env*`` or ``*credential*``.
 
 The owner accepts by merging the branch (the document becomes a pending task in PROJECT_STATUS.md) or rejects by
 ``git worktree remove <dir>`` + ``git branch -D proposal/<date>-<slug>``. An existing worktree or branch of the same
@@ -62,6 +63,9 @@ ACTOR_RE = re.compile(r"^[\w.@:+-]{1,40}$")
 BRANCH_BASE_RE = re.compile(r"^[A-Za-z0-9._/-]{1,80}$")
 MAIN_BRANCH = "main"                            # what "not in main" is counted against; a session's only base
 SESSION_ENV = "TS_OPERATOR_SESSION"             # "1" in every operator session's environment (the session runner)
+REVIEW_ENV = "TS_OPERATOR_REVIEW_ID"            # the session's review id (exported by the session runner)
+SESSION_ACTOR = "operator-session"              # a session's actor: operator-session:<review id>
+SESSION_REVIEW_RE = re.compile(r"^[\w.:+-]{1,80}$")
 MAX_TITLE = 120
 MAX_BODY = 20_000
 MAX_BODY_FILE_BYTES = 64 * 1024
@@ -127,6 +131,13 @@ def not_in_main(rev: str, cwd: Path) -> int:
 def in_session() -> bool:
     """Run by an operator session (the session runner sets the marker in the session's environment)."""
     return os.environ.get(SESSION_ENV) == "1"
+
+
+def session_actor() -> str:
+    """The actor a session's proposal records: ``operator-session:<review id>`` (the id the session runner exported),
+    ``operator-session`` without a valid one — never what ``--actor`` says."""
+    rid = (os.environ.get(REVIEW_ENV) or "").strip()
+    return f"{SESSION_ACTOR}:{rid}" if SESSION_REVIEW_RE.fullmatch(rid) else SESSION_ACTOR
 
 
 def body_file_refusal(path: str) -> str | None:
@@ -276,11 +287,13 @@ def propose(s: Settings, *, slug: str, title: str, body: str, pair: str | None =
             raise Invalid(f"--pair {pair!r}: not a configured pair ({', '.join(sorted(s.pairs))})")
     if review_id is not None and not REVIEW_RE.fullmatch(review_id):
         raise Invalid(f"--review-id {review_id!r}: letters, digits and _ . : + - only")
-    if not ACTOR_RE.fullmatch(actor or ""):
+    session = in_session()
+    if session:
+        actor = session_actor()                        # whatever --actor says: the record shows where it came from
+    elif not ACTOR_RE.fullmatch(actor or ""):
         raise Invalid(f"--actor {actor!r}: letters, digits and . @ : + - only")
     if not BRANCH_BASE_RE.fullmatch(base or "") or base.startswith("-") or ".." in base:
         raise Invalid(f"--base {base!r}: not a branch name")
-    session = in_session()
     if session and base != MAIN_BRANCH:
         # accepting = merging: a proposal on another base would bring that branch's unreviewed commits into main
         raise Invalid(f"--base {base!r}: an operator session proposes from {MAIN_BRANCH} only (leave --base out)")

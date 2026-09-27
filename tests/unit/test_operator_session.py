@@ -88,7 +88,8 @@ def result_doc(**over) -> dict:
 # ------------------------------------------------------------------ arguments and allow-list
 def test_daily_args_are_the_read_only_allow_list(sa, tmp_path):
     s = settings_at(tmp_path)
-    spec = sa.spec_for(s, "daily", root=tmp_path / "data" / "..", exe=FAKE_EXE)     # data root inside the checkout
+    spec = sa.spec_for(s, "daily", root=tmp_path / "data" / "..", exe=FAKE_EXE,     # data root inside the checkout
+                       home=tmp_path.parent)                                          # … and under the home directory
     args = sa.build_args(spec)
     assert args[:4] == [FAKE_EXE, "-p", "--model", "opus"] and args[args.index("--effort") + 1] == "high"
     for pair in (["--output-format", "json"], ["--permission-mode", "dontAsk"], ["--permission-prompts", "none"],
@@ -100,11 +101,11 @@ def test_daily_args_are_the_read_only_allow_list(sa, tmp_path):
     assert "--no-session-persistence" in args and "--strict-mcp-config" in args and "--add-dir" not in args
     dis = args[args.index("--disallowedTools") + 1:args.index("--allowedTools")]
     assert dis == ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Read(**/.env)", "Read(.env)",
-                   "Read(**/.env.*)", "Read(~/.claude/**)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.config/**)",
-                   "Read(**/.credentials.json)"]
+                   "Read(**/.env.*)", "Read(~/.claude/**)", "Read(~/.claude.json)", "Read(~/.ssh/**)",
+                   "Read(~/.aws/**)", "Read(~/.config/**)", "Read(**/.credentials.json)"]   # no Read(~/**): under home
     allowed = args[args.index("--allowedTools") + 1:]
-    assert allowed == ["Read", "Grep", "Glob"] + [f"Bash(.venv/Scripts/python.exe tools/{t}.py *)" for t in
-                                                  ("health_report", "review_pack", "tune", "propose", "notify")]
+    assert allowed == [f"Bash(.venv/Scripts/python.exe tools/{t}.py *)" for t in
+                       ("health_report", "review_pack", "tune", "propose", "notify")]
     assert not any("git" in a.lower() for a in allowed) and not any(a.startswith("-") for a in allowed)
     assert Path(args[args.index("--system-prompt-file") + 1]).resolve().is_relative_to(ROOT.resolve())  # this checkout
 
@@ -159,7 +160,37 @@ def test_no_rule_lets_a_path_through_an_allowed_tool(sa, kind):
                 f"{py} tools/review_pack.py --hours 24 --print", f"{py} tools/notify.py --level info --title t --text x"):
         assert _allowed_by(rules, cmd), cmd
     assert _allowed_by(rules, f"{py} tools/kill_switch.py --pair BTCUSDT --reason x") == (kind == "diagnose")
-    assert all(r in ("Read", "Grep", "Glob") or r.endswith(" *)") for r in rules)       # never a glued "*"
+    assert all(r.startswith("Bash(") and r.endswith(" *)") for r in rules)       # never a glued "*"
+
+
+@pytest.mark.parametrize("kind", ["daily", "weekly", "diagnose"])
+def test_no_read_tool_is_allowed_by_a_rule_reads_stay_in_the_working_directories(sa, kind, tmp_path):
+    """Claude Code 2.1.282 allows Read/Grep/Glob inside the working directories (the checkout, every --add-dir) by
+    itself; a tool-wide 'Read' allow rule turned every read outside them into an allow (C:\\Users\\<me>\\.claude.json
+    included), so the allow-list names no read tool at all — anything outside is 'ask', i.e. denied under dontAsk."""
+    s = settings_at(tmp_path)
+    spec = sa.spec_for(s, kind, root=ROOT, exe=FAKE_EXE)
+    args = sa.build_args(spec)
+    assert args[args.index("--tools") + 1] == "Read,Grep,Glob,Bash"                  # the tools stay available
+    allowed = args[args.index("--allowedTools") + 1:]
+    assert allowed and all(r.startswith("Bash(") for r in allowed)
+    assert not any(r.split("(")[0] in ("Read", "Grep", "Glob") for r in allowed)
+    assert "Read(~/.claude.json)" in args[args.index("--disallowedTools") + 1:args.index("--allowedTools")]
+
+
+def test_the_whole_home_directory_is_denied_unless_the_checkout_or_the_data_root_lives_there(sa, tmp_path):
+    """A deny rule wins over the working-directory allow: 'Read(~/**)' only when neither the checkout nor the data
+    root lies under the home directory (production: C:\\the_claude_new) — a scratch root under %TEMP% stays readable."""
+    home, elsewhere = tmp_path / "home" / "me", tmp_path / "srv"
+    prod = sa.disallowed_tools(elsewhere / "the_claude_new", elsewhere / "the_claude_new" / "data", home)
+    assert prod[-1] == sa.HOME_DENY == "Read(~/**)" and "Read(~/.claude.json)" in prod and prod[:-1] == sa.DISALLOWED
+    for root, data in ((home / "repo", elsewhere / "data"),                   # the checkout under home
+                       (elsewhere / "repo", home / "AppData" / "Local" / "Temp" / "scratch"),   # a scratch data root
+                       (home, home / "data")):
+        assert sa.disallowed_tools(root, data, home) == sa.DISALLOWED, (root, data)
+    s = settings_at(tmp_path)                                                  # data root = tmp_path/data
+    assert sa.spec_for(s, "diagnose", root=elsewhere, exe=FAKE_EXE, home=home).disallowed[-1] == "Read(~/**)"
+    assert "Read(~/**)" not in sa.spec_for(s, "diagnose", root=elsewhere, exe=FAKE_EXE, home=tmp_path).disallowed
 
 
 def test_a_diagnosis_may_engage_one_pairs_switch_but_never_the_global_one(sa):
@@ -193,8 +224,12 @@ def test_the_prompts_state_what_a_session_may_not_do_with_the_tools(sa):
     assert "only with `--text`" in text and "FILE and `-` forms are refused" in text                # tune.py playbook
     assert "`--pair` only" in text and "global switch is the monitor's" in text                     # kill_switch.py
     assert "always from `main`" in text and "never pass `--base`" in text and "`--body-file`" in text  # propose.py
+    assert "one pair per session" in text and "last pair still trading" in text                     # kill_switch.py
+    assert "Do not pass `--actor`" in text and "`operator-session:<review id>`" in text     # every tool's actor
+    assert "a read\nanywhere else is denied" in text or "a read anywhere else is denied" in text      # no Read rule
     diag = (sa.PROMPTS / "diagnose.md").read_text(encoding="utf-8")
     assert "--pair PAIR" in diag and "global switch is the monitor's" in diag and "from `main`" in diag
+    assert "One pair per diagnosis" in diag and "last pair still trading" in diag
 
 
 # ------------------------------------------------------------------ environment
@@ -216,6 +251,11 @@ def test_child_env_scrubs_the_calling_session_and_secrets_but_keeps_the_data_roo
     # the session marker: every command the session runs inherits it (the tools refuse the human-only forms)
     assert env["TS_OPERATOR_SESSION"] == "1" and sa.SESSION_ENV == "TS_OPERATOR_SESSION"
     assert sa.child_env(None, {**parent, "TS_OPERATOR_SESSION": "0"}, oauth_token="")["TS_OPERATOR_SESSION"] == "1"
+    # the review id: exported when given (the tools record operator-session:<id>), never inherited from the runner
+    stale = {**parent, "TS_OPERATOR_REVIEW_ID": "stale"}
+    assert "TS_OPERATOR_REVIEW_ID" not in sa.child_env(None, stale, oauth_token="")
+    rid = sa.child_env(None, stale, oauth_token="", review_id="20260927T120000Z_diagnose")
+    assert rid["TS_OPERATOR_REVIEW_ID"] == "20260927T120000Z_diagnose" and sa.REVIEW_ENV == "TS_OPERATOR_REVIEW_ID"
     tok = sa.child_env(None, parent, oauth_token="sk-ant-oat-secret")
     assert tok["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-secret"                # exactly as the provider passes it
     diff = sa.env_diff(parent, tok)
@@ -330,6 +370,7 @@ def test_a_daily_run_records_usage_notifies_the_summary_and_keeps_a_clean_guard(
     assert "$review_id" not in call["stdin"] and call["timeout_s"] <= s.operator.daily_timeout_min * 60
     assert "CLAUDECODE" not in call["env"] and call["env"]["PYTHONUTF8"] == "1"
     rec = _session(tmp_path)
+    assert call["env"]["TS_OPERATOR_REVIEW_ID"] == rec["review_id"] and call["env"]["TS_OPERATOR_SESSION"] == "1"
     assert rec["status"] == "ok" and rec["summary_level"] == "warn" and rec["summary"].startswith("BTCUSDT: 3 ideas")
     assert rec["diff_guard"]["clean"] is True and rec["ledger"]["recorded"] is True
     assert rec["result"]["permission_denials"][0]["tool"] == "Bash"
@@ -548,6 +589,72 @@ def test_kill_switch_tool_refuses_the_global_switch_in_an_operator_session(tmp_p
     monkeypatch.setenv("TS_OPERATOR_SESSION", "0")                    # outside a session --all works as before
     assert ks.main(["--all", "--reason", "equity -12 %"], settings=s) == 0
     assert (tmp_path / "data" / "KILL_SWITCH").exists()
+
+
+def test_a_session_stops_one_pair_per_review_never_the_last_one_and_records_itself(tmp_path, monkeypatch, capsys):
+    """The '--pair *' rule alone let one diagnosis engage every pair one by one (the global stop a session must not
+    make), under any --actor it chose. In a session the switch records operator-session:<review id>; a second pair of
+    the same review is refused, and so is the last pair still trading — exit 2, nothing written."""
+    ks = load("test_ts_kill_switch", ROOT / "tools" / "kill_switch.py")
+    sent: list[tuple] = []
+    monkeypatch.setattr(ks, "notify", lambda s, level, title, text, key=None: sent.append((level, title, text)))
+    monkeypatch.setattr(ks, "setup_log", lambda s: None)
+    s = settings_at(tmp_path)
+    data = tmp_path / "data"
+
+    def switch(pair: str | None) -> Path:
+        return data / "KILL_SWITCH" if pair is None else data / "instances" / pair / "KILL_SWITCH"
+
+    def actor(pair: str) -> str:
+        return json.loads(switch(pair).read_text(encoding="utf-8"))["actor"]
+
+    monkeypatch.setenv("TS_OPERATOR_SESSION", "1")
+    monkeypatch.setenv("TS_OPERATOR_REVIEW_ID", "20260927T120000Z_diagnose")
+    assert ks.main(["--pair", "BTCUSDT", "--reason", "order burst", "--actor", "owner"], settings=s) == 0
+    assert actor("BTCUSDT") == "operator-session:20260927T120000Z_diagnose"          # never "owner"
+    assert "--actor is ignored" in capsys.readouterr().out
+    assert sent == [("critical", "kill switch ON: BTCUSDT",
+                     "by operator-session:20260927T120000Z_diagnose: order burst")]
+    # the same review: a second pair is refused (also as the second part of one '&&' chain) — nothing written
+    assert ks.main(["--pair", "ETHUSDT", "--reason", "x"], settings=s) == 2
+    assert "stops one pair at most" in capsys.readouterr().out and not switch("ETHUSDT").exists() and len(sent) == 1
+    assert ks.main(["--pair", "BTCUSDT", "--reason", "again"], settings=s) == 0        # its own pair: already on
+    # the next review may stop another pair, but never the last one still trading
+    monkeypatch.setenv("TS_OPERATOR_REVIEW_ID", "20260927T150000Z_diagnose")
+    assert ks.main(["--pair", "ETHUSDT", "--reason", "x"], settings=s) == 0
+    assert actor("ETHUSDT") == "operator-session:20260927T150000Z_diagnose"
+    monkeypatch.setenv("TS_OPERATOR_REVIEW_ID", "20260927T180000Z_diagnose")
+    capsys.readouterr()
+    assert ks.main(["--pair", "XAUUSD", "--reason", "x"], settings=s) == 2
+    assert "last pair still trading" in capsys.readouterr().out and not switch("XAUUSD").exists() and len(sent) == 2
+    # the global switch on: nothing trades — a session adds no pair switch to it
+    for p in ("BTCUSDT", "ETHUSDT"):
+        switch(p).unlink()
+    switch(None).write_text("", encoding="utf-8")
+    assert ks.main(["--pair", "XAUUSD", "--reason", "x"], settings=s) == 2 and not switch("XAUUSD").exists()
+    switch(None).unlink()
+    # no valid review id exported: plain operator-session (every such session counts as one review)
+    monkeypatch.delenv("TS_OPERATOR_REVIEW_ID")
+    assert ks.main(["--pair", "XAUUSD", "--reason", "x"], settings=s) == 0 and actor("XAUUSD") == "operator-session"
+    monkeypatch.setenv("TS_OPERATOR_REVIEW_ID", "not a review id")
+    assert ks.main(["--pair", "BTCUSDT", "--reason", "x"], settings=s) == 2 and not switch("BTCUSDT").exists()
+    # a human: any valid --actor (default operator), no per-review bound, the last pair too
+    monkeypatch.setenv("TS_OPERATOR_SESSION", "0")
+    assert ks.main(["--pair", "BTCUSDT", "--reason", "x", "--actor", "owner"], settings=s) == 0
+    assert ks.main(["--pair", "ETHUSDT", "--reason", "x"], settings=s) == 0
+    assert (actor("BTCUSDT"), actor("ETHUSDT")) == ("owner", "operator")
+    assert ks.main(["--pair", "BTCUSDT", "--reason", "x", "--actor", "bad actor!"], settings=s) == 3
+
+
+def test_the_pairs_still_trading_are_the_configured_instances(tmp_path):
+    """With TS_INSTANCE set only that instance's pair flag is on — the instances list still names every system."""
+    ks = load("test_ts_kill_switch", ROOT / "tools" / "kill_switch.py")
+    one = load_settings(env_path=tmp_path / "none.env", extra_env={"TS_INSTANCE": "BTCUSDT"})
+    assert list(one.enabled_pairs()) == ["BTCUSDT"] and ks.trading_pairs(one) == ["BTCUSDT", "ETHUSDT", "XAUUSD"]
+    base = load_settings(env_path=tmp_path / "none.env", extra_env={"TS_INSTANCE": ""})
+    xau_off = {**base.pairs, "XAUUSD": base.pairs["XAUUSD"].model_copy(update={"enabled": False})}
+    assert ks.trading_pairs(base.model_copy(update={"pairs": xau_off})) == ["BTCUSDT", "ETHUSDT"]
+    assert ks.trading_pairs(base.model_copy(update={"pairs": xau_off, "instances": {}})) == ["BTCUSDT", "ETHUSDT"]
 
 
 def test_the_prompt_fills_the_checklist_and_never_reparses_the_reason(rs, tmp_path):
