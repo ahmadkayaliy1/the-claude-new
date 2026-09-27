@@ -41,6 +41,28 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-09-28 — Phase 5 plan approved (D-046, §3.9.1); production still on Phase 3 (main `6e24353`) until H20;
+  Phase 4 finished on `feat/phase4-watches-learns` (`301f60c`).** A five-analyst read-only review (spec coverage,
+  tracker truth, Phase 5 readiness, operations, go-live readiness) found: ≈ 85–90 % of the master spec built, ≈ 15 %
+  proven in production (2 days of demo: BTC 75 decisions, 3 broker trades +4.07/−2.52 USD, equity 101.33, drawdown
+  2.45 %; ETH 70 decisions, 0 trades; XAU 0 cycles). Operational facts verified on the machine: the three sleeps of
+  09-26/09-27 were **critical-battery hibernates** (Kernel-Power 524 at 5 %, charger unplugged) and two outages were
+  **Start-menu shutdowns** (09-26 11:42, 09-27 09:10 local) — the power settings are correct; **no git remote and no
+  backup exist**; the P1.12 recorder died at 06:06 UTC (29 MB, 1,142 parquet files, ≈ 21 h of the 72 h needed);
+  free RAM 330–470 MB (Claude desktop + CLI ≈ 1 GB, Chrome ≈ 1.1 GB, EaseUS UPDATE SERVICE, `Ollama.lnk` in Startup);
+  the 40/day cap is used up by early afternoon (BTC 39, ETH 38) and the two "session limit" errors (09-26 20:45 UTC)
+  coincided with a development workflow on the same Max plan; `check_miner` CLEAN (offline scan, password rotation
+  and `C:\ProgramData\KMSAuto` remain for the owner); payload defects (OI/taker ratio null, depth absent though
+  "real"); ≈ 20 stale tracker rows. The owner's decisions: no MQL5 (feed-based news blackout), defer the persistent
+  session and MCP, drop the 1m view to pay for the new blocks, capital stays $100 with unchanged risk limits, the
+  shared Max plan for now with the cap at 30, ExpressVPN untouched. Plan: Phase 5 in two checkpoints (A "ready and
+  safe": tracker reconciliation, backup + restore runbook, recorder task, monitor battery/RAM/recorder rules,
+  interrupted cycles and transient retries, OI fix, demo report + go-live checklist; B "goes deeper": §3.9 items
+  1, 3, 6, 12, 5, 4, 7 + the one live call, then 10, 11, 13), then a declared 28-day demo window and the go-live
+  checklist (§3.9.1). New owner rows H27–H31 (charger/never shut down, recorder restart, git remote + backup
+  off-machine, the `ai:`/`monitor:` block in config.local.yaml, branch/worktree cleanup). Next: the owner's H20 →
+  H19 → H18 → H27–H30, merge this docs branch (`docs/phase5-plan`, ff, no restart), then the kickoff in §3.9.1.
+
 * **2026-09-27 — Phase 4 (P12.4, D-045) is DONE on branch `feat/phase4-watches-learns` (worktree
   `C:\the_claude_new_wt\phase4`); production still runs Phase 3 on `main` until the user's H20.** 1208 unit tests.
   Built in the order of §3.8 4.1: decision metrics + attribution + prompt registry; the per-pair adaptive overlay +
@@ -816,6 +838,157 @@ User actions: H22 `pip install mcp` (only for 9) · H23 attach `CalendarExport.m
 `session_mode: persistent` for 24 h (optional) · H25 `flow_proxy_approved: true` only after the study · H26 merge + restart.
 Risks: persistent-mode RAM on this laptop (opt-in only); MCP extra turns (+25–30 k tokens each, capped 2/day/pair); the news
 file depends on the terminal (fail-open with a warning; never a silent trade during a known event when the file is fresh).
+
+### 3.9.1 Phase 5 as approved (2026-09-28) — two checkpoints, the owner's decisions, the fold-ins
+
+Approved by the user on 2026-09-28 after a five-analyst read-only review of production and the finished Phase 4 branch
+(the review's verified facts are in §0b's 2026-09-28 entry). §3.9 stays the component spec; this section says what is
+built, in which order, and what is deferred. Where the two differ, this section wins.
+
+**The owner's decisions (D-046):**
+- (a) No MetaEditor: the owner does not compile MQL5. Item 10 (news blackout for XAU) is built WITHOUT the MQL5 export:
+  `analysis/news.py` reads a public weekly economic-calendar JSON feed that needs no key (verify the feed first —
+  e.g. Forex Factory's "this week" JSON; if none is usable or its terms forbid it, item 10 becomes XAU-only prompt
+  text and says so in the D entry); the XAU engine fetches it at most once an hour into `data/shared/news_calendar.json`
+  (atomic write, redaction irrelevant — no secrets); the same semantics as §3.9: USD high impact, blackout ±15 min,
+  payload `market.news`, gate check `news_blackout` fail-closed only while the file is fresh (≤ 24 h), stale →
+  capability unavailable + one warning event, setup triggers suppressed inside the window; config
+  `pairs.XAUUSD.news_blackout {enabled, minutes_before, minutes_after, impact, source_url, refresh_minutes}`.
+  H23 is closed (nothing for the owner to compile).
+- (b) Items 8 (persistent session) and 9 (MCP tools) are deferred: 330–470 MB free RAM against 300–500 MB per pair, an
+  OAuth-refresh race on a long-lived process, no evidence of data-starved decisions, +25–30 k tokens per extra turn.
+  Reserve the config key `ai.providers.claude_code.session_mode: per_call` (the only accepted value) with a design
+  note (process lifecycle, one user line per event, per-turn result parsing, daily `--resume`, orphan kill, autocompact
+  losing the persona); no `tools/mcp_server.py`, no `needs_detail` contract field — only a counter in the daily review
+  pack of `data_quality_notes` that ask for more candles/depth/history, so the build decision can be made on evidence
+  (build when ≥ 10 % of decisions ask). H22 and H24 → "not now".
+- (c) Token budget: the new payload blocks are paid for by dropping the 1m timeframe from the model view (≈ 2.2 k
+  chars); the per-decision budget stays net-neutral, measured by replay before the live call.
+- (d) Capital: the account is and stays ≈ $100, on the live account too ("professional, normal trading — no craziness");
+  the risk limits (1 % target / 3 % max per trade / 10 % daily incl. worst case / 4 % correlated / 3 open) are NOT
+  raised; ideas whose 0.01-lot minimum risks more than 3 % (most BTC and XAU ideas at this equity) are refused by the
+  gate by design and counted by class in the go-live checklist; the model manages what is open (D-043). Go-live starts
+  with ONE pair (ETH sizes best at $100).
+- (e) Subscription for the decision role (default, the owner may change it): the shared Max plan for now, with
+  `ai.daily_calls_per_pair 30`, `min_minutes_between_calls 30`, `review_floor_minutes 20` in `config.local.yaml` (H30)
+  and development sessions run right after a 5-hour reset (21:00 / 02:00 / 07:00 / 12:00 / 17:00 UTC); before go-live
+  a second Claude account for production or an API key with hard USD caps (a D entry then).
+- The ExpressVPN stays as it is: the owner wants it running; nothing in the code, the docs or the sessions asks to
+  change, split or disable it. The monitor only learns its adapter name (`monitor.vpn_adapter_names`, H30) so the
+  up/down flips are visible; the DNS/connect bursts (≈ 56 disconnects a day on BTC, all healed) are accepted.
+
+**Delivery: one worktree `C:\the_claude_new_wt\phase5`, one branch `feat/phase5-goes-deeper` from `main` AFTER H20,
+two ff-merge checkpoints, each with its own adversarial review (lenses → skeptic verifiers → fix → re-review → final
+check), so the safety nets reach production while the demo runs.**
+
+#### Checkpoint A — "ready and safe" (≈ 3 days, NO live Claude call) — H26a
+
+| # | Item | Why |
+|---|---|---|
+| A1 | **PROJECT_STATUS.md reconciliation** (append, never delete). P1.13 ✅ (docs/data_availability.md exists; refresh its "P1.6 pending" line); P5.3 ✅ (remaining: charger + recorder task, H27/H28); P8.2 ✅ (adapters built; the Gemini live path untested until H4); P8.9 ✅ (production since 2026-09-26; the shared Max plan caused the two session-limit errors); P9.6 ✅ (delivered in P12.3, D-044); P9.7 ✅ (`settings.py` live guards + `mt5_backend.py` account check; live path unexercised by design until H9); P10.6 ✅ built, manual queue path never exercised (auto since D-036); P8.8 and P11.2 ⛔ obsolete (D-030/D-043); P11.1 ⛔ superseded by D-036 (virtual outcomes are the paper-equivalent measure); P1.12 🔄 with the facts (ran 2026-09-25 → 2026-09-27 06:06 UTC in 8 sessions, ≈ 21 h of MT5 ticks / 23 h of books, 1,142 parquet files, 29 MB, `data/research/price_matching/status.json`, dies on suspend, no autostart); P3.9/P4.6 ✅ superseded by production + one read-only `tools\check_integrity.py --since-hours 48` result pasted in; P5.2 next step rewritten (the four dead keys `duckdb_memory_mb`, `duckdb_threads`, `engine_cycle_in_subprocess`, `vision_download_concurrency`); P6.15 🔄 partial (call budget replayed in P12.3; trades/day and TF confirmation from Phase 4 `decision_metrics` after 2–4 weeks); P7.1 ⏳ after ≥ 72 h of recorder data, P7.2 ⏳👤 de-facto venue Windsor MT5, P7.4 ⏳ conditional; P9.9 → folded into P12.5 item 10; P1.11 → P12.5 item 11 (one output: docs/exploration/gold_flow.md; 290 days of XAUUSDT-perp × XAUUSD@ overlap already in cold parquet); P11.3 🔄 demo/auto since 2026-09-26 22:17 UTC with the numbers and the acceptance items; P11.4 ⏳👤 skeleton written in this checkpoint; P12.3 note (9) marked fixed in P12.4; H2 → settings ✅ + operational note (three critical-battery hibernates and two Start-menu shutdowns in 48 h, see §0b 2026-09-28); H4 with its consequence ("without it a Claude outage = skipped cycles, never a wrong trade"); H5 blocked by P7.1; H7 superseded by H13 except the recorder; H12 cleanup done 2026-09-26 with the remaining owner items (Defender offline scan, password rotation, `C:\ProgramData\KMSAuto`); H14 note (XAU running); H15 ✅; H17 cost note. | the "first ⏳ phase" rule must point at real work |
+| A2 | **`tools/backup_state.py`**: SQLite backup API (or `VACUUM INTO`) for `data/instances/*/app.db` and `data/shared/ai_usage.db` (WAL-consistent), plus `account_peak.json`, `config/config.local.yaml`, `data/adaptive`, `data/reviews`, monitor/notify state, the CLI capability file → `backups/<UTC ts>.zip`, keep 14, never `.env` or stderr logs, `--verify` opens every copied DB and counts `ai_decisions`; a daily 03:30 UTC task in `install_operator_tasks.ps1` and a call from `restart_all.bat` before the stop; `docs/ops_windows.md` §9 "Backup and restore" + "Rebuild from zero" (Python 3.12 + MT5, clone from the remote, `requirements.lock`, restore, `.env` from the password manager, `claude auth login`, `install_autostart -DryRun`, `start_all`, `check_ops`) with a restore rehearsed on a scratch root and its time recorded. | no backup exists, no git remote (H29) |
+| A3 | **Recorder**: a `TradingSystem-Recorder` keep-alive task (the pair tasks' 5-min pattern) in `install_autostart.ps1`, a recorder row in `tools/health_report.py`, a monitor rule "last flush > 30 min → warn". | P1.12 needs 72 h; it died at every suspend |
+| A4 | **Monitor rules**: on battery > 5 min or battery < 30 % → warn, < 15 % → critical (`Win32_Battery`); commit charge > 85 % → warn; the recorder rule; a budget for diagnosis sessions (≤ 2/day, none while the gauge is at level ≥ 1); the supervisor's `system_suspend` notifies on resume through `core/notify.py`; a test that the restart-loop rule fires on the 2026-09-26 XAU pattern (21 kills in an hour). `outage_warn_min` keeps its default; the owner sets 5 and the VPN adapter name in `config.local.yaml` (H30). | the 52-min hibernate was found by analysis, not by the monitor |
+| A5 | **Engine/provider**: a cycle interrupted by a suspend (awake-clock gap > 60 s inside the cycle) is stored as `interrupted`, not `error`, and does not raise the failure backoff; "Failed to refresh OAuth token" / "another Claude Code process is refreshing" / 403 "Request not allowed" are transient → one retry after 60 s without a failed cycle; a cancelled/deadline call writes a ledger row (tokens unknown) so daily counts match D-043; a session-aware quota reserve (≈ 40 % of `daily_calls_per_pair` kept for 12:00–21:00 UTC; config key, safe default); one prompt line (version bump) bounding `next_review.in_minutes` to ≥ 30 on NO_TRADE with no open position; optional if cheap: run two pairs' calls back-to-back when both trigger within 5 min so the second reads the cached prefix. | the cap binds by early afternoon; half the calls are short next_review reviews |
+| A6 | **§3.9 item 2 now** (a production defect): OI `change_pct_1h/4h/24h` from `metrics.sum_open_interest` (last row ≤ 10 min old, changes vs the rows nearest as_of − 1 h / 4 h / 24 h; the 60-s table only for `last`); `oi_pct_rank_30d`, `funding_pct_rank_30d` (causal); positioning ratios = last NON-null value per column with its own timestamp (19 % of ETH metrics rows have a null taker ratio; both payloads show `taker_buy_sell_vol_ratio: null`). Fixture = real metrics rows with seeded gaps. | visible nulls in today's payloads |
+| A7 | **Small fixes with tests**: "kill switch file present → a new BUY is refused with detail `kill switch engaged` AND a due breakeven rule / a model tighten-stop action is still applied"; Binance backfill workers exit when a pass is done and are respawned for the next; remove or wire the four dead resource knobs; apply `storage.min_free_disk_gb` to the MT5 backfill and let live writers skip the cold archive below 2 GB; check_ops/health_report hide the all-pairs block when per-pair systems run, print "n/a (no instrument)" for a venue row stopped by design, and show time-on-battery + last suspend; the engine logs one INFO line per hour while a market is closed; `PermissionError(13)` is its own disconnect reason in the health report; `cli_capabilities.json` moves to `data/shared`; `review_pack.py` caches the 10.8-s `running_supervisors` scan; `evaluate_virtual` reads are bounded and a decision executed-but-never-settled gets a metrics row; confirm the §0 `terminal_in_job` issue is fixed in main and record where. | S4, M4, S8, N5–N7 of the review |
+| A8 | **Readiness deliverables**: `tools/demo_report.py` (a `demo` kind of `tools/review_pack.py` over 672 h: per-pair funnel screens → calls by role → valid → ideas → gate by check → placed → outcomes broker/virtual; `decision_metrics` means; MT5 deals history for the family's magics → equity curve, realised PnL, commission/swap; availability = share of 15m cycles lost to data_not_ready / ai_quota / system_suspend / killed / session limit; incident table with first-detection time from the monitor state; cost per day from the ledger; prompt/config/adaptive hashes; tuning changes; the sample-size statement) writing `docs/runs/demo.md`; `docs/go_live_checklist.md` with the thresholds below; `tools/go_live_inputs.py` printing the measured table (= §3.9 item 13); the weekly review prompt appends one paragraph "go-live evidence so far". | P11.3/P11.4, the owner's end state |
+| A9 | One `tools\check_integrity.py --since-hours 48` run pasted into P3.9/P4.6. | closes two soak phases |
+
+Then: full unit suite green from the worktree (`PYTHONPATH=src C:/the_claude_new/.venv/Scripts/python.exe -m pytest
+tests/unit -q -p no:cacheprovider`; the 1208 Phase 4 tests stay green), the adversarial review, PROJECT_STATUS +
+handoff §0b, and the checkpoint-A merge steps in Arabic: **H26a** = `git merge --ff-only <checkpoint-A commit>` +
+`scripts\restart_all.bat` + the new tasks (`install_operator_tasks.bat` again for the backup task,
+`install_autostart.bat` for the recorder task — the session states the exact commands).
+
+#### Checkpoint B — "goes deeper" (≈ 6 days, exactly ONE billed live call) — H26b
+
+| # | §3.9 | Item | Effort | Note |
+|---|---|---|---|---|
+| B1 | 1 | Depth block: last depth snapshot ≤ 120 s old else `data_quality: stale` and the capability downgraded (today `capabilities.real` claims depth while the payload has none); bands present only where the book reaches (BTC ±1 % partial, never ±2/±5 % — say so in legend v5); BTC/ETH only; ≤ 250 tokens; fixture = real rows exported from the hot DB | 0.5 d | |
+| B2 | 3 | Prev W/M levels (`pwh/pwl/pmh/pml/month_open/year_open`) from the 1d frame with the pair's `day_roll`, completed periods only; the six names added to `charts.py`'s horizon filter (1d/4h charts) | 0.5 d | causal test |
+| B3 | 6 | Forming bar for 15m/5m only, from `Frame.forming`, never in `recent`, never a trigger input — prove with `tools/replay_triggers.py` that the call count is unchanged; hollow bar on the 5m chart only (the 15m/1h chart caches stay keyed by closed bars) | 0.5 d | |
+| B4 | 12 | Daily POC/VAH/VAL of the last 5 completed UTC days, computed once per day in a worker thread from aggTrades via footprint + value area, cached in `engine_kv`; XAU from the 1m tick-volume profile flagged approx; ≤ 200 tokens; never on the 5-min screen path | 1 d | |
+| B5 | 5 | Session statistics: 30-day per-session mean range in ATR and up-close share cached per UTC day in `engine_kv`; current session vs mean from closed bars; ≤ 150 tokens | 1 d | causal + DST tests |
+| B6 | 4 | `analysis/cross.py`: the sibling's hot DB opened `file:…?mode=ro` with a small cache, the Instrument built from `settings.pairs[sibling]` when a `correlated_groups` group names it and the file exists; 96-bar 15m log-return corr + beta + the sibling's trend; capability `cross_asset` real/unavailable; a missing sibling → unavailable without an exception; ≤ 100 ms | 0.75 d | last enrichment — decision value unproven |
+| B7 | 7 | `PAYLOAD_VERSION "4"`, `VIEW_VERSION "3"`, legend v5; the 1m timeframe leaves the model view (decision c); budget net-neutral per decision, measured on every screen of a stored day with `tools/replay_triggers.py` — then **the ONE live call** (below) | 0.5 d | |
+| B8 | 10 | News blackout for XAU per decision (a): feed-based `analysis/news.py`, `market.news`, gate `news_blackout`, trigger suppression, config `pairs.XAUUSD.news_blackout`; tests: fixture JSON, UTC/DST parsing, stale fails open, the gate refuses inside the window and the model is told why; if no feed is usable → XAU prompt text only, recorded | 1 d | |
+| B9 | 11 | Gold-proxy study `research/gold_flow/study.py` → `docs/exploration/gold_flow.md`: one day-file at a time with pyarrow (≤ 500 MB RAM), run only while the laptop is idle and never on the trading path; XAUUSDT taker delta vs XAUUSD@ mid returns per 1-min/5-min bucket, corr at k = −5…+5 min, per week over the 290 overlapping days, rolling 4-week sign stability, weekends and the 21:00–22:00 UTC daily break excluded, Monday-gap check; pass/fail against |corr| ≥ 0.5 and 4-week sign stability → H25 only if it passes. In the same idle run, P7.1 `research/price_matching/analyze.py` over the recorder parquet if ≥ 72 h exist by then (spread distribution per session, basis median/p95, lead/lag at 100 ms / 1 s, stale-quote share, weekend behaviour → `docs/price_matching.md` with a proposed `max_basis_deviation_pct` from the measured p95, for H5) | 1.5 d | |
+| B10 | 13 | Fill `tools/go_live_inputs.py` from the Phase 4 data now in production | 0.25 d | |
+
+**Not built (recorded as decisions):** items 8 and 9 (decision b); the hollow forming bar on the 15m chart (cache
+cost); P8.8/P11.2 mode comparisons (obsolete); P7.4 Binance backend (only if P7.2 = B).
+
+**The ONE live call (B7):** `engine --once --pairs BTCUSDT` from the worktree on a scratch data root (hot/cold as
+`mklink /J` junctions, a copy of BTC's app.db, own `shared\ai_usage.db`, stdout/stderr redirected to files, the engine
+waits for the sign-in check), started right after a 5-hour reset. Acceptance: valid first attempt, 6 images, input
+≤ 26.7 k and ≤ +1.5 k vs that day's production median, every new block present in the stored payload,
+`snapshot_build_ms` < 3 s; numbers to `docs/measurements/phase5_live.md`; XAU verified by a dry payload build (no call).
+
+**Tests (spec names):** `test_snapshot_enrichments.py` (depth from a seeded table of real rows incl. stale; OI from
+metrics with gaps and null ratios; PW/PM causal with the broker day roll; session stats causal + DST; forming excluded
+from triggers and `setup_signature` unchanged), `test_cross.py`, `test_news.py`, `test_model_view_v3.py`,
+`test_prompt_versions` (bump), `test_go_live_inputs.py`, plus the checkpoint-A tests (backup verify/restore, monitor
+battery/commit/recorder/diagnosis budget, interrupted cycle, transient retry, cancelled-call ledger row, quota
+reserve, kill-switch protective, backfill worker exit).
+
+**Review of checkpoint B** (lenses at least): payload/token budget, money path incl. the news gate, the research
+jobs' resource use, config/ops/rollback, prompts vs code. Then PROJECT_STATUS.md (P12.5 block with numbers,
+P1.11/P9.9/P11.4 cross-references, H22–H26 as they stand, D entries), handoff §0b + a "4.9 As built" note under §3.9
+(deviations, live-call numbers, deferrals), `docs/ops_windows.md` §1b/§8 rollback switches for every new key, and the
+merge/restart steps in Arabic (**H26b**) — stating whether the prompt/legend change requires `stop_all` → merge →
+`start_all` (as Phase 4 did for its template) or a plain `restart_all`, and what to verify afterwards (§3.10 #4).
+
+#### After Phase 5: the demo period and the go-live sequence
+
+| When | What |
+|---|---|
+| Week 0 | The owner's steps (H20, H19, H18, H27–H30); the demo evaluation window is declared from the H20 date (+28 days). |
+| Week 1 | Checkpoint A merged (H26a); the backup task live; the recorder reaches 72 h → P7.1 → H5 (`max_basis_deviation_pct` from the measured p95); first weekly review pack; H21 gauge calibration after the week. |
+| Week 2 | Checkpoint B merged (H26b); XAU cycles observed; the gold-study verdict → H25 or not. |
+| Weeks 2–4 | Demo continues on Phase 4+5 code; tuning only after ≥ 20 resolved outcomes per pair; no config changes except recorded ones; every incident goes into the demo report with its detection time. |
+| Week 5 | `tools/demo_report.py` → `docs/runs/demo.md`; the checklist filled by `go_live_inputs.py`; the owner's D entries (pairs, subscription route, hardware); a live-refusal rehearsal on a scratch root (`EXECUTION_MODE=live` + the phrase against the demo terminal must fail "account mismatch"; a separate live terminal); a backup restored once; tests green on the exact commit. |
+| Go-live (H9, the owner only) | ONE pair (ETH) at the minimum lot for two weeks, then add pairs; XAU excluded until item 10 and P1.11 pass. Production on a machine that is not the development laptop (a 16 GB upgrade or a small dedicated Windows box) removes sleep, battery, development RAM and shared-plan interference at once. |
+
+**Go-live checklist thresholds** (the session writes them into `docs/go_live_checklist.md`, the owner signs):
+≥ 28 demo days on Phase 4+ code; ≥ 30 resolved outcomes per live pair; availability ≥ 95 % of 15m cycles; 0 positions
+ever without SL; no daily-loss or drawdown trip; every gate rejection in an expected class; calls/day ≤ cap with ≤ 1
+subscription-limit error per week; monitor MTTD ≤ 15 min proven by one drill; median `snapshot_build_ms` ≤ 3 s; free
+RAM ≥ 1 GB; 0 sleep/shutdown events in the last 14 days; a backup restored once; P7.2 decided; tests green on the live
+commit; the sample-size statement acknowledged (four weeks show the absence of catastrophic behaviour and the execution
+quality, not a statistical edge).
+
+#### Kickoff text for the implementing session (Opus 5.5)
+
+Prerequisites the owner completes first: H20 verified (the "phase 4:" line, `logs\monitor.jsonl`, `decision_metrics`
+rows), H19, H18 (recommended), H27–H30, and this docs branch merged. Start right after a 5-hour reset.
+
+```
+Continue from docs/handoff_operator_v2.md: read §0b (newest entries: 2026-09-28 Phase 5 plan approved; 2026-09-27
+Phase 4 DONE and Phase 3 live), §1, §2, §3.6 (ground rules), §3.8 "4.8 As built", §3.9 (the Phase 5 component spec)
+and §3.9.1 (the approved plan: two checkpoints, the owner's decisions, the fold-ins, the tracker reconciliation list,
+the live-call acceptance), §3.10 and §5; then PROJECT_STATUS.md (overview, H1–H31, D-043–D-046, P12.3/P12.4 notes,
+P12.5), docs/measurements/phase3_live.md and phase4_live.md, docs/ops_windows.md §1b and §8, docs/monitoring.md,
+docs/learning_loop.md, docs/notifications.md.
+
+Verify first (read-only): `git log -1 main` descends from 301f60c (Phase 4 merged) and scripts\status_all.bat shows
+the three per-pair systems up on Phase 4 code; if not, stop and tell me — Phase 5 branches from main AFTER H20.
+
+Implement Phase 5 (P12.5) on worktree C:\the_claude_new_wt\phase5, branch feat/phase5-goes-deeper from main, exactly
+as §3.9.1 specifies: checkpoint A "ready and safe" first (A1–A9, no live Claude call) → full unit suite green →
+independent adversarial review (lenses → skeptic verifiers → fix → re-review → final check) → PROJECT_STATUS.md and
+handoff §0b → the checkpoint-A merge steps in Arabic (H26a). After I confirm that merge: checkpoint B "goes deeper"
+(B1–B10) with exactly ONE billed live call on a scratch data root as §3.9.1 defines → the same review cycle → the docs
+(P12.5, §0b, "4.9 As built", ops_windows rollback switches) → the merge/restart steps in Arabic (H26b: state whether
+stop_all → merge → start_all is required).
+
+Hard rules: never stop, restart or migrate production from the worktree; never edit .env, config.local.yaml or
+scheduled tasks (write the lines as H rows for me); never send MT5 orders; never call MetaTrader5 from the worktree
+except read-only and briefly; SQLite reads on production files with uri mode=ro only; additive DB changes only, new
+behaviour behind config keys with safe defaults; fail closed on money paths; exactly one billed live call for the
+whole phase; keep tool runs light (this laptop has < 0.5 GB free RAM and production runs on it — no parallel heavy
+subagents, research jobs one day-file at a time); do not touch the ExpressVPN configuration or ask me to.
+```
 
 ### 3.10 Verification per phase (end-to-end)
 
