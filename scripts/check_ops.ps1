@@ -113,6 +113,10 @@ foreach ($name in @($opsNames | Sort-Object -Unique)) {
         $field = { param($k) (($q | Select-String "^\s*$k\s*:" | Select-Object -First 1).Line -replace "^\s*$k\s*:\s*", "").Trim() }
         Write-Host ("info {0,-28} {1,-8} last run {2}  result {3}  next {4}" -f $name, (& $field "Status"),
                     (& $field "Last Run Time"), (& $field "Last Result"), (& $field "Next Run Time"))
+        if ((& $field "Last Result") -eq "3") {      # the tool could not read its config (config.local.yaml?)
+            $log = if ($name -like "*Monitor*") { "logs\monitor-config-error.log" } else { "logs\operator-session-config-error.log" }
+            Write-Host ("FIX  {0,-28} result 3 = config invalid - see {1}, then: .venv\Scripts\python.exe -m tradingsystem config" -f $name, $log)
+        }
     }
 }
 

@@ -160,7 +160,12 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
   (survives a process restart), `--autocompact <auto|100k–1M>` bounds context, `--replay-user-messages`,
   `--no-session-persistence` (current per-call mode). `--json-schema` costs a tool round-trip (D-035): keep the
   schema in the system prompt (`structured_output: prompt`). `--max-turns` exists in the binary but is hidden
-  from `--help` (verify with one live call; env `CLAUDE_CODE_MAX_TURNS` also exists).
+  from `--help` (verify with one live call; env `CLAUDE_CODE_MAX_TURNS` also exists). **Verified 2026-09-27 by the
+  Phase 4 live call** (docs/measurements/phase4_live.md): `claude -p --max-turns 30 --permission-mode dontAsk
+  --permission-prompts none --tools Read,Grep,Glob,Bash --allowedTools "Bash(<prefix>*)" … --disallowedTools …
+  --setting-sources= --add-dir <dir> --output-format json` ran 10 turns to `end_turn` (`subtype: success`), every
+  allowed command ran without a prompt and nothing was denied; the result JSON carries `num_turns`,
+  `permission_denials`, `usage` and `total_cost_usd` (fixture `tests/fixtures/real/claude_code_session_result.json`).
 * Tools from Python: `--mcp-config '<json>' --strict-mcp-config --tools "" --allowedTools "mcp__ts__*"
   --permission-mode dontAsk --permission-prompts none` (the Python `mcp` package is NOT installed yet). Each
   extra turn re-sends the context (+25–30 k raw input; measured 51.8 k in / 28.8 k cached on a 2-turn call):
@@ -720,6 +725,29 @@ H18 `.env`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (BotFather; chat id from `g
 A review session with Bash: exact allow-list prefixes, editors disallowed, diff guard, no order-sending tool. Tuning drift:
 bounds + direction + 14-day expiry + one change/day + `TUNING_FREEZE`. Monitor false positives writing a switch:
 conservative thresholds, dedupe, `kill_switch_off.bat`.
+
+##### 4.8 As built (2026-09-27, D-045) — where the implementation differs from the text above
+- **Tasks and runner:** `TradingSystemOps-Monitor` / `-ReviewDaily` / `-ReviewWeekly` (a `TradingSystem-*` name would be
+  deleted by `install_autostart.ps1`); the runner is Python (`tools/operator/run_session.py`, `run_session.ps1` only
+  launches it). The review tasks' `ExecutionTimeLimit` is 130/190 min, a backstop beyond every `operator.*_timeout_min`
+  value — the runner's own deadline governs.
+- **Session command line:** no `git` rules (`git diff/log --output=<file>` writes files); Read denials for `.env`,
+  `~/.claude`, `~/.ssh`, `~/.aws`, `~/.config`, `*.credentials.json`; the diagnosis may run only
+  `tools/kill_switch.py --pair <PAIR>` (the global switch is the monitor's). Every session exports
+  `TS_OPERATOR_SESSION=1`: with it `tune.py` takes the playbook only as `--text`, `propose.py` refuses `--body-file` and
+  any base but `main`, `kill_switch.py` refuses `--all`; `review_pack.py --out` accepts only `data/reviews`.
+- **Ledger and gauge:** sessions are ledger rows (role `review`/`diagnose`, pair NULL) outside the pairs' request quota;
+  `UsageStore.tokens_since(since, pair=None, providers=None)` — the gauge counts only `claude_code` providers, with a
+  5-point hysteresis; it observes only until H21 (`ai.usage.enforce: false`).
+- **Notifier:** the Telegram values are read by `Notifier._telegram_creds` — `.env` first (re-read at most once a
+  minute; an empty value = off), `os.environ` only when `.env` has no such line; the toast goes before Telegram; the rate
+  limit is 20/hour per process for info and for warn each, critical exempt.
+- **Playbook lint:** `$` is allowed (values are inserted verbatim; only templates need `$$`); the denylist is wider than
+  the regex above (confidence 80–99 near "confidence", avoid/never … NO_TRADE, disregard, mixed Latin/Cyrillic/Greek
+  words, line/paragraph separators).
+- **`prompt_versions`:** `PRIMARY KEY (prompt_hash, library_hash)`, so an instructions-only edit is a new row.
+- **Metrics:** an executed trade is scored only after the bar it closed in has closed and is stored; the backfill of
+  older decisions runs 20 per pass (every 60 s).
 
 ### 3.9 Phase 5 spec — "goes deeper"
 

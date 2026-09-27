@@ -5,9 +5,11 @@
 The same path as every notification of the system (``core/notify.py``): always the log line (``logs/notify.jsonl``,
 or ``logs/<PAIR>/notify.jsonl`` for an instance), then a Windows toast and — when ``TELEGRAM_BOT_TOKEN`` and
 ``TELEGRAM_CHAT_ID`` are in ``.env`` (H18) — a Telegram message, under the same rules (``notify.min_level``, the rate
-limit, dedupe by ``--key`` across every system, ``TS_NOTIFY_DISABLE``). It waits for the toast and Telegram (at most
-``--wait`` seconds) and prints what happened to each; never the token or the chat id. ``TRADINGSYSTEM_CONFIG`` is
-honoured like in every tool (a scratch run logs and dedupes under its own data root).
+limit, dedupe by ``--key`` across every system, ``TS_NOTIFY_DISABLE``). The key is namespaced: ``--key K`` is sent as
+``cli:K``, so a key chosen here (by a script or an operator session) can never match a system key such as
+``kill_switch_<PAIR>`` or ``monitor:<finding>`` and dedupe that system's notification away. It waits for the toast and
+Telegram (at most ``--wait`` seconds) and prints what happened to each; never the token or the chat id.
+``TRADINGSYSTEM_CONFIG`` is honoured like in every tool (a scratch run logs and dedupes under its own data root).
 
 Exit codes: 0 notified — also when a sink failed or was skipped (the log line is always written; a failed toast or
 Telegram message is in the printed line and the log), 1 the settings could not be loaded, 3 invalid request.
@@ -28,6 +30,7 @@ from tradingsystem.core.settings import Settings, load_settings  # noqa: E402
 EXIT_OK, EXIT_ERROR, EXIT_INVALID = 0, 1, 3
 PAIR_RE = re.compile(r"^[A-Z0-9]{2,20}$")
 KEY_MAX = 200
+KEY_PREFIX = "cli:"          # this tool's dedupe namespace: never one of the system keys (kill_switch_, monitor:, …)
 
 
 class Invalid(Exception):
@@ -79,7 +82,8 @@ def main(argv: list[str] | None = None, *, settings: Settings | None = None) -> 
     ap.add_argument("--level", required=True, help="info | warn | critical")
     ap.add_argument("--title", required=True)
     ap.add_argument("--text", required=True, help="the message (Telegram takes up to ~4000 characters)")
-    ap.add_argument("--key", help="dedupe key: the same key is sent once per notify.dedupe_minutes by all systems")
+    ap.add_argument("--key", help="dedupe key (sent as cli:KEY): the same key is sent once per "
+                                  "notify.dedupe_minutes by all systems")
     ap.add_argument("--pair", help="the pair it is about (shown when the title does not name it)")
     ap.add_argument("--wait", type=float, default=15.0, help="seconds to wait for the toast and Telegram (15)")
     try:
@@ -95,6 +99,8 @@ def main(argv: list[str] | None = None, *, settings: Settings | None = None) -> 
         key = (a.key or "").strip() or None
         if key is not None and (len(key) > KEY_MAX or any(c.isspace() for c in key)):
             raise Invalid(f"--key: at most {KEY_MAX} characters, no spaces")
+        if key is not None:
+            key = KEY_PREFIX + key
         pair = None
         if a.pair:
             pair = a.pair.strip().upper()

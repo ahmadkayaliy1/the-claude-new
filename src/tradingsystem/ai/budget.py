@@ -110,14 +110,21 @@ class UsageStore:
         with self._lock:
             return float(self._con.execute(sql, args).fetchone()[0])
 
-    def tokens_since(self, since_ms: int, pair: str | None = None) -> dict[str, int]:
+    def tokens_since(self, since_ms: int, pair: str | None = None,
+                     providers: list[str] | tuple[str, ...] | None = None) -> dict[str, int]:
         """Token sums of every ledger row since ``since_ms`` (failed calls too: they spent the subscription) — the
-        usage gauge (Phase 4). ``input`` already contains cache reads and writes, ``cached`` is the cache-read part."""
+        usage gauge (Phase 4). ``input`` already contains cache reads and writes, ``cached`` is the cache-read part.
+        ``providers``: only the rows of these provider names (the gauge counts the Claude subscription's providers,
+        never a fallback's); an empty list matches no row."""
         sql = ("SELECT COALESCE(sum(COALESCE(input_tokens,0)),0), COALESCE(sum(COALESCE(cached_tokens,0)),0), "
                "COALESCE(sum(COALESCE(output_tokens,0)),0), count(*) FROM ai_usage WHERE ts>=?")
         args: list = [since_ms]
         if pair:
             sql, args = sql + " AND pair=?", args + [pair]
+        if providers is not None:
+            if not providers:
+                return {"input": 0, "cached": 0, "output": 0, "calls": 0}
+            sql, args = sql + f" AND provider IN ({','.join('?' * len(providers))})", args + list(providers)
         with self._lock:
             inp, cached, out, calls = self._con.execute(sql, args).fetchone()
         return {"input": int(inp), "cached": int(cached), "output": int(out), "calls": int(calls)}

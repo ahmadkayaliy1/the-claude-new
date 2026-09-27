@@ -167,10 +167,12 @@ class Orchestrator:
         """Latest allowed ``valid_until`` after the cycle time: 4 decision bars."""
         return 4 * (self.s.pairs[pair].decision_timeframe.ms if pair else 900_000)
 
-    def _system_vars(self, pair: str | None, account: dict) -> dict:
+    def _system_vars(self, pair: str | None, account: dict, tn=None) -> dict:
         """Values of the SYSTEM prompt: they must not change from cycle to cycle, or the CLI's prompt cache and the
-        prompt hash break (the live equity lives in the user prompt — Phase 3 fix)."""
+        prompt hash break (the live equity lives in the user prompt — Phase 3 fix). ``tn``: the unit's tunables
+        snapshot (default: read now)."""
         r = self.s.risk
+        tn = tn if tn is not None else tunables_of(self, pair)
         pairs = list(self.s.enabled_pairs())
         return {
             "pair": pair or ", ".join(pairs), "pair_list": ", ".join(pairs),
@@ -179,7 +181,7 @@ class Orchestrator:
             "max_risk_pct": r.max_risk_per_trade_pct, "max_spread_pct": round(r.max_spread_to_sl_ratio * 100),
             # the confidence floor in force (a raised adaptive floor is the one the gate applies — rare changes, so
             # the system prompt stays cacheable)
-            "min_confidence": tunables_of(self, pair).min_confidence,
+            "min_confidence": tn.min_confidence,
             "max_rec_age_min": round(r.max_recommendation_age_s / 60),
             "price_reference": self.reg.primary(pair).key if pair else "each pair's meta.price_reference",
             "output_language": "English" if self.s.ai.output_language == "en" else self.s.ai.output_language,
@@ -188,10 +190,12 @@ class Orchestrator:
         }
 
     def _user_vars(self, pair: str | None, as_of: int, reason: str, payload_json: str, *,
-                   account: dict | None = None, **extra) -> dict:
+                   account: dict | None = None, tn=None, **extra) -> dict:
+        """Values of the user prompt; ``tn``: the unit's tunables snapshot (default: read now)."""
         account = account or self.default_account()
         eq = account.get("equity", self.s.execution.paper_equity)
-        tn = tunables_of(self, pair)                  # the pair's playbook and take-profit hint (adaptive overlay)
+        # the pair's playbook and take-profit hint (adaptive overlay)
+        tn = tn if tn is not None else tunables_of(self, pair)
         return {"now_utc": iso(as_of), "trigger_reason": reason, "payload": payload_json,
                 "max_valid_until": iso(as_of + self.horizon_ms(pair)),
                 "account_equity": f"{float(eq):.2f}" if eq is not None else "unknown",
@@ -381,10 +385,14 @@ class Orchestrator:
     def _attribute(self, rec: DecisionRecord, payload: dict | None) -> None:
         """Phase 4 attribution at record time (what the market looked like, what was in force): setup kinds on
         screen, session (killzone, else the active sessions), the decision-TF regime, the higher-timeframe bias,
-        the data warnings, and the pair's playbook / adaptive hashes."""
-        tn = tunables_of(self, rec.pair)
-        rec.playbook_hash = rec.playbook_hash or tn.playbook_hash
-        rec.adaptive_hash = rec.adaptive_hash or tn.adaptive_hash
+        the data warnings, and the pair's playbook / adaptive hashes. A record whose prompts were rendered carries
+        that unit's tunables snapshot (:meth:`_stamp`) — its hashes stand, even when the overlay changed during the
+        model call; only a record without one (no prompt rendered: snapshot failed, paused, cancelled) reads now."""
+        snap = rec.tunables
+        tn = snap if snap is not None else tunables_of(self, rec.pair)
+        if snap is None:
+            rec.playbook_hash = rec.playbook_hash or tn.playbook_hash
+            rec.adaptive_hash = rec.adaptive_hash or tn.adaptive_hash
         if not payload:
             return
         from .triggers import scan_setups
@@ -536,27 +544,37 @@ class Orchestrator:
         r.rr_computed = value.rr_computed()
         return r
 
+    @staticmethod
+    def _stamp(rec: DecisionRecord, tn) -> DecisionRecord:
+        """Attribute ``rec`` to the tunables snapshot its prompts were rendered with (the playbook / adaptive hashes,
+        None included — :meth:`_attribute` then keeps them and uses the snapshot's other values)."""
+        rec.tunables, rec.playbook_hash, rec.adaptive_hash = tn, tn.playbook_hash, tn.adaptive_hash
+        return rec
+
     # ------------------------------------------------------------------ modes
     async def _per_pair(self, pair: str, payload: dict, reason: str, as_of: int, account: dict, *,
                         review: bool = False, provider_name: str | None = None, charts: bool = False,
-                        trigger: tuple[str | None, str | None] | None = None) -> DecisionRecord:
+                        trigger: tuple[str | None, str | None] | None = None, tn=None) -> DecisionRecord:
+        # one tunables snapshot for the unit: every prompt and the record's attribution see the same overlay, even
+        # when tools/tune.py changes it (or an entry expires) during the model call
+        tn = tn if tn is not None else tunables_of(self, pair)
         prov = self.provider(provider_name)
         # a provider that cannot read images (e.g. the text-only fallback) gets no charts and is not told of any
         charts = charts and bool(getattr(prov, "supports_images", False))
         images, note = await self.charts_for(pair, as_of, payload) if charts else ([], NO_CHARTS)
         uv = self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account,
-                             charts_note=note)
-        pr = self._render("agent_per_pair", self._system_vars(pair, account), uv)
+                             tn=tn, charts_note=note)
+        pr = self._render("agent_per_pair", self._system_vars(pair, account, tn), uv)
         gen = await self._gen(prov, Recommendation, pr.system, pr.user, "agent_per_pair", pair, images=images)
-        rec = self._record(pair, "agent_per_pair", reason, payload, gen, prov, pr.prompt_hash)
+        rec = self._stamp(self._record(pair, "agent_per_pair", reason, payload, gen, prov, pr.prompt_hash), tn)
         rec.trigger_strength, setup = (trigger or (None, None, False))[:2]
         if rec.status == "valid" and rec.recommendation["decision"] != Decision.NO_TRADE.value:
-            await self._escalate(rec, pair, payload, reason, as_of, account, uv, images, setup=setup)
+            await self._escalate(rec, pair, payload, reason, as_of, account, uv, images, setup=setup, tn=tn)
         if not review or rec.status != "valid" or rec.recommendation["decision"] == Decision.NO_TRADE.value:
             return rec
-        rv = self._render("risk_reviewer", self._system_vars(pair, account),
+        rv = self._render("risk_reviewer", self._system_vars(pair, account, tn),
                     self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account,
-                                    proposal=json.dumps(rec.recommendation)))
+                                    tn=tn, proposal=json.dumps(rec.recommendation)))
         g2 = await self._gen(prov, RiskReview, rv.system, rv.user, "risk_reviewer", pair)
         rec.sub_outputs.append({"role": "trader", "label": pair, "provider": prov.name, "model": rec.model,
                                 "prompt_hash": pr.prompt_hash, "ok": True, "output": rec.recommendation,
@@ -611,9 +629,10 @@ class Orchestrator:
         return prov
 
     async def _escalate(self, rec: DecisionRecord, pair: str, payload: dict, reason: str, as_of: int, account: dict,
-                        uv: dict, images: list[ImageInput], *, setup: str | None = None) -> None:
+                        uv: dict, images: list[ImageInput], *, setup: str | None = None, tn=None) -> None:
         """D-043: a stronger model (``ai.models.escalation``) may confirm the trade unchanged or downgrade it to
-        NO_TRADE; it can never change levels, raise confidence or add risk."""
+        NO_TRADE; it can never change levels, raise confidence or add risk. ``uv`` and ``tn``: the trader's user
+        values and the unit's tunables snapshot (the same playbook and floor as the trader's prompt)."""
         why = self.escalation_due(rec, pair, setup)
         if why is None:
             return
@@ -623,7 +642,7 @@ class Orchestrator:
             prov = await self._escalation_provider(min(ESCALATION_SIGN_IN_WAIT_S, esc.timeout_s / 2))
             if not getattr(prov, "supports_images", False):
                 images, uv = [], {**uv, "charts_note": NO_CHARTS}
-            pr = self._render("escalation", self._system_vars(pair, account), {**uv, "proposal": json.dumps(first)})
+            pr = self._render("escalation", self._system_vars(pair, account, tn), {**uv, "proposal": json.dumps(first)})
             g = await asyncio.wait_for(self._gen(prov, EscalationReview, pr.system, pr.user, "escalation", pair,
                                                  images=images, role="escalation"), esc.timeout_s)
         except Exception as exc:  # noqa: BLE001 — timeout, provider or prompt error: the failure policy decides
@@ -677,6 +696,7 @@ class Orchestrator:
 
     async def _global(self, payloads: dict, reasons: dict, as_of: int, account: dict) -> list[DecisionRecord]:
         prov = self.provider()
+        snaps = {p: tunables_of(self, p) for p in payloads}     # what was in force when the prompt was built
         pr = self._render("single_agent_global", self._system_vars(None, account),
                     self._user_vars(None, as_of, "; ".join(f"{p}: {r}" for p, r in reasons.items()),
                                     _dump(list(payloads.values())), account=account))
@@ -685,8 +705,8 @@ class Orchestrator:
         by_pair = {r.pair: r for r in gen.value.recommendations} if gen.ok else {}
         for pair, payload in payloads.items():
             rec_v = by_pair.get(pair)
-            rec = self._record(pair, "single_agent_global", reasons[pair], payload, gen, prov, pr.prompt_hash, rec_v,
-                               use_gen_value=False)
+            rec = self._stamp(self._record(pair, "single_agent_global", reasons[pair], payload, gen, prov,
+                                           pr.prompt_hash, rec_v, use_gen_value=False), snaps[pair])
             if gen.ok and rec_v is None:
                 rec.status, rec.recommendation = "invalid", None
                 rec.errors.append(f"model returned no recommendation for {pair}")
@@ -706,6 +726,7 @@ class Orchestrator:
     async def _per_timeframe(self, payloads: dict, reasons: dict, as_of: int, account: dict) -> list[DecisionRecord]:
         prov = self.provider()
         pairs = list(payloads)
+        snaps = {p: tunables_of(self, p) for p in pairs}         # one snapshot per pair for its coordinator
 
         async def analyst(tf: str):
             sys_vars = {**self._system_vars(None, account), "timeframe": tf, "scope_text": f" across {', '.join(pairs)}"}
@@ -727,15 +748,16 @@ class Orchestrator:
                              "cost_usd": g.cost_usd / len(pairs),
                              "answered": not (g.provider_error or g.budget_blocked)})
             rec = await self._coordinate(pair, payloads[pair], reasons[pair], as_of, account, assessments, subs, prov,
-                                         "agent_per_timeframe")
+                                         "agent_per_timeframe", tn=snaps[pair])
             out.append(rec)
         return out
 
     async def _pair_and_tf(self, pair: str, payload: dict, reason: str, as_of: int, account: dict) -> DecisionRecord:
         prov = self.provider()
+        tn = tunables_of(self, pair)                              # one snapshot for the analysts and the coordinator
 
         async def analyst(tf: str):
-            sys_vars = {**self._system_vars(pair, account), "timeframe": tf, "scope_text": f" for {pair}"}
+            sys_vars = {**self._system_vars(pair, account, tn), "timeframe": tf, "scope_text": f" for {pair}"}
             pr = self._render("timeframe_analyst", sys_vars,
                               {"now_utc": iso(as_of), "payload": _dump(self._slice(payload, tf))})
             g = await self._gen(prov, TimeframeAssessment, pr.system, pr.user, f"analyst_{tf}", pair)
@@ -748,15 +770,17 @@ class Orchestrator:
                  "cost_usd": g.cost_usd, "answered": not (g.provider_error or g.budget_blocked)}
                 for tf, pr, g in results]
         return await self._coordinate(pair, payload, reason, as_of, account, assessments, subs, prov,
-                                      "agent_per_pair_and_timeframe")
+                                      "agent_per_pair_and_timeframe", tn=tn)
 
     async def _coordinate(self, pair: str, payload: dict, reason: str, as_of: int, account: dict,
-                          assessments: list[dict], subs: list[dict], prov: LLMProvider, mode: str) -> DecisionRecord:
+                          assessments: list[dict], subs: list[dict], prov: LLMProvider, mode: str,
+                          tn=None) -> DecisionRecord:
+        tn = tn if tn is not None else tunables_of(self, pair)
         compact = {k: payload[k] for k in ("meta", "account", "market", "capabilities", "levels", "confluence", "history",
                                            "memory", "performance") if k in payload}
-        pr = self._render("coordinator", self._system_vars(pair, account),
+        pr = self._render("coordinator", self._system_vars(pair, account, tn),
                     self._user_vars(pair, as_of, reason, _dump(compact), account=payload.get("account") or account,
-                                    assessments=json.dumps(assessments)))
+                                    tn=tn, assessments=json.dumps(assessments)))
         if not assessments:
             # no model answered at all (usage limit, provider down, budget) is an error — the setup is not seen;
             # 'invalid' only when an analyst answered but nothing usable came back
@@ -769,13 +793,14 @@ class Orchestrator:
             rec = self._record(pair, mode, reason, payload, g, prov, pr.prompt_hash)
         rec.sub_outputs = subs
         rec.cost_usd += sum(s.get("cost_usd", 0.0) for s in subs)
-        return rec
+        return self._stamp(rec, tn)
 
     async def _consensus(self, pair: str, payload: dict, reason: str, as_of: int, account: dict,
                          trigger: tuple | None = None) -> DecisionRecord:
         names = self.s.ai.consensus_providers or [self.s.ai.active_provider]
+        tn = tunables_of(self, pair)                              # every member sees the same overlay
         got = await asyncio.gather(*(self._per_pair(pair, payload, reason, as_of, account, provider_name=n,
-                                                    trigger=trigger) for n in names), return_exceptions=True)
+                                                    trigger=trigger, tn=tn) for n in names), return_exceptions=True)
         members = [m if isinstance(m, DecisionRecord) else
                    DecisionRecord(pair, "agent_per_pair", reason, "error", provider=n, errors=[repr(m)[:300]])
                    for n, m in zip(names, got)]
@@ -792,7 +817,7 @@ class Orchestrator:
         agg = aggregate_consensus([m.recommendation for m in valid], len(members), pair, as_of)
         rec.recommendation = agg
         rec.rr_computed = Recommendation.model_validate(agg).rr_computed()
-        return rec
+        return self._stamp(rec, tn)
 
 
 def aggregate_consensus(recs: list[dict], n_members: int, pair: str, as_of: int) -> dict:

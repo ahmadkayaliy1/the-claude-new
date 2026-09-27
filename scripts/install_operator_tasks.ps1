@@ -18,7 +18,11 @@
     (except TradingSystem-MT5) as a per-pair keep-alive and would delete them when the layout changes.
     The review times are set in UTC (StartBoundary ending in "Z" = synchronized across time zones), so they do not
     move with daylight saving time; the script reads the stored StartBoundary back to verify it.
-    Time limits: monitor 10 min, daily review 20 min, weekly review 40 min (the session ends itself before that).
+    Time limits: monitor 10 min; daily review 130 min, weekly review 190 min. The review limits are only a backstop
+    (a hung runner): a session ends itself at operator.daily_timeout_min / weekly_timeout_min (config, default 20 / 40),
+    and these limits lie 10 min beyond the largest value the config accepts (120 / 180), so the config's own deadline
+    always governs and raising *_timeout_min needs no re-install. -DailyLimitMinutes / -WeeklyLimitMinutes override
+    them (a lower value is reported: a session running longer would be cut off without a record or notification).
     Missed runs (PC asleep) start as soon as possible; a run still going is never started twice.
     Retire the desktop app's 3-hourly monitor task yourself once these run.
 
@@ -37,10 +41,17 @@ param(
     [ValidateSet("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")]
     [string]$WeeklyDay = "Sunday",
     [int]$MonitorLimitMinutes = 10,
-    [int]$DailyLimitMinutes = 20,
-    [int]$WeeklyLimitMinutes = 40
+    [int]$DailyLimitMinutes = 130,
+    [int]$WeeklyLimitMinutes = 190
 )
 $ErrorActionPreference = "Stop"
+
+# The review sessions end themselves at operator.<kind>_timeout_min (tools\operator\run_session.py), which the settings
+# accept up to these values (src\tradingsystem\core\settings.py, OperatorCfg le=). Task Scheduler's limit is a backstop
+# $MarginMinutes beyond them, so the config deadline always governs; the defaults above are max + margin (pinned by
+# test_review_task_limits_are_a_backstop_beyond_every_config_value).
+$ConfigMaxMinutes = @{ daily = 120; weekly = 180 }
+$MarginMinutes = 10
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $py = Join-Path $root ".venv\Scripts\python.exe"
@@ -100,6 +111,13 @@ foreach ($f in $py, $pyw, $sessionPs1) {
     if (-not (Test-Path $f)) { $problems += "missing: $f" }
 }
 if (-not (Test-Path $monitorPy)) { $problems += "missing: $monitorPy (the monitor task would fail until it exists)" }
+$limitNotes = @()
+foreach ($lim in @(@{ kind = "daily"; minutes = $DailyLimitMinutes }, @{ kind = "weekly"; minutes = $WeeklyLimitMinutes })) {
+    $floor = $ConfigMaxMinutes[$lim.kind] + $MarginMinutes
+    if ($lim.minutes -lt $floor) {
+        $limitNotes += ("{0} review limit {1} min is below {2}: keep operator.{0}_timeout_min at most {3}, or Task Scheduler cuts the session off (no session record, no notification)" -f $lim.kind, $lim.minutes, $floor, ($lim.minutes - $MarginMinutes))
+    }
+}
 if ($problems.Count -and -not $DryRun) {
     foreach ($p in $problems) { Write-Host $p }
     throw "cannot register the operator tasks (run from the checkout that has the venv: C:\the_claude_new)"
@@ -117,6 +135,7 @@ Write-Host ("task    : {0} -> powershell -File `"{1}`" -Kind daily (daily {2} UT
 Write-Host ("task    : {0} -> powershell -File `"{1}`" -Kind weekly ({2} {3} UTC, first {4}, limit {5} min)" -f $names[2], $sessionPs1, $WeeklyDay, $WeeklyUtc, $weeklyAt.ToString($fmt), $WeeklyLimitMinutes)
 foreach ($n in $legacyPresent) { Write-Host "remove  : $n (old name - collides with install_autostart.ps1)" }
 foreach ($p in $problems) { Write-Host "WARNING : $p" }
+foreach ($p in $limitNotes) { Write-Host "WARNING : $p" }
 if ($DryRun) { Write-Host "DryRun: nothing registered."; exit 0 }
 
 # ---------------------------------------------------------------- register

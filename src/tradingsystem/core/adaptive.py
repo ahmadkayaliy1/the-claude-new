@@ -49,6 +49,8 @@ HARD_MAX_EXPIRY_DAYS = 30                     # the settings bound of adaptive.m
 MAX_PAUSE_DAYS = 7                            # pair.ai_paused_until ≤ set time + 7 d
 MAX_REASON_CHARS = 500
 MAX_EVIDENCE_CHARS = 4000
+MAX_EVIDENCE_DEPTH = 8                        # nested lists/objects inside one entry's evidence
+MAX_YAML_DEPTH = 32                           # adaptive.yaml: root → group → entry → evidence (≤ 8) stays far below
 READ_LOCK_WAIT_S = 0.25                       # a reader never waits longer (engine loop, executor placement lock)
 REPLACE_RETRIES = 20                          # os.replace onto a file a reader holds open (Windows) — retry briefly
 REPLACE_RETRY_S = 0.05
@@ -138,7 +140,23 @@ class Entry(_Strict):
             raise ValueError(f"expires_ms more than {days} days after set_ms")
         if len(json.dumps(self.evidence, default=str)) > MAX_EVIDENCE_CHARS:
             raise ValueError(f"evidence longer than {MAX_EVIDENCE_CHARS} characters")
+        if json_depth(self.evidence) > MAX_EVIDENCE_DEPTH:
+            raise ValueError(f"evidence nested deeper than {MAX_EVIDENCE_DEPTH} levels")
         return self
+
+
+def json_depth(v: Any) -> int:
+    """Nesting depth of lists/dicts (a scalar is 0). Iterative: evidence text may nest deeper than the recursion limit
+    before it is refused."""
+    deepest, stack = 0, [(v, 1)]
+    while stack:
+        x, d = stack.pop()
+        if isinstance(x, dict):
+            x = list(x.values())
+        if isinstance(x, (list, tuple)):
+            deepest = max(deepest, d)
+            stack.extend((y, d + 1) for y in x)
+    return deepest
 
 
 class FloorEntry(Entry):
@@ -281,23 +299,39 @@ MAX_YAML_CHARS = 256 * 1024              # tune.py writes a few kB; anything lar
 
 def has_alias(text: str) -> bool:
     """Whether a YAML text uses an alias (``*name``), found on the event stream — nothing is constructed, so an
-    alias bomb ("billion laughs") costs nothing to detect."""
+    alias bomb ("billion laughs") costs nothing to detect. Raises ValueError for a document nested deeper than
+    ``MAX_YAML_DEPTH``: PyYAML's scanner slows down quadratically on deep flow nesting (one line of 256 K ``[`` would
+    stall the engine loop for minutes), so the walk stops at the first level beyond the limit."""
+    depth = 0
     try:
-        return any(isinstance(ev, yaml.AliasEvent) for ev in yaml.parse(text, Loader=yaml.SafeLoader))
+        for ev in yaml.parse(text, Loader=yaml.SafeLoader):
+            if isinstance(ev, yaml.AliasEvent):
+                return True
+            if isinstance(ev, (yaml.SequenceStartEvent, yaml.MappingStartEvent)):
+                depth += 1
+                if depth > MAX_YAML_DEPTH:
+                    raise ValueError("adaptive.yaml is nested too deeply")
+            elif isinstance(ev, (yaml.SequenceEndEvent, yaml.MappingEndEvent)):
+                depth -= 1
     except yaml.YAMLError:
         return False                           # not YAML at all: the loader refuses it quickly
+    return False
 
 
 def load_cfg_text(text: str | None, *, max_expiry_days: int) -> AdaptiveCfg:
     """Parse ``adaptive.yaml`` text (duplicate keys, aliases and oversized files refused — the engine reads it on
-    its loop: a hand-made alias bomb must never stall a tick). Raises ValueError or yaml.YAMLError."""
+    its loop: a hand-made alias bomb must never stall a tick). Raises ValueError or yaml.YAMLError — also for a
+    document nested so deeply that the (recursive) YAML composer hits the recursion limit."""
     if text is None or not text.strip():
         return AdaptiveCfg()
     if len(text) > MAX_YAML_CHARS:
         raise ValueError(f"adaptive.yaml is larger than {MAX_YAML_CHARS} characters")
     if has_alias(text):
         raise ValueError("adaptive.yaml must not use YAML aliases (*name)")
-    return parse_cfg(yaml.load(text, Loader=_UniqueKeyLoader), max_expiry_days=max_expiry_days)
+    try:
+        return parse_cfg(yaml.load(text, Loader=_UniqueKeyLoader), max_expiry_days=max_expiry_days)
+    except RecursionError:
+        raise ValueError("adaptive.yaml is nested too deeply") from None
 
 
 def dump_cfg(cfg: AdaptiveCfg) -> str:
@@ -352,9 +386,11 @@ def atomic_write(path: Path, text: str) -> None:
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    """Append one line; a torn last line (crash mid-write) is closed first so the new line stays readable."""
+    """Append one line; a torn last line (crash mid-write) is closed first so the new line stays readable. The line
+    is ASCII (non-ASCII characters escaped as ``\\uXXXX``): a raw U+2028 / U+2029 / U+0085 would be a line break to
+    ``str.splitlines()`` in some reader and split the record."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(record, ensure_ascii=False, default=str, separators=(",", ":")) + "\n"
+    line = json.dumps(record, ensure_ascii=True, default=str, separators=(",", ":")) + "\n"
     with open(path, "a+b") as fh:
         fh.seek(0, os.SEEK_END)
         if fh.tell() > 0:
@@ -368,13 +404,14 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
 
 
 def read_changes(s: Settings, pair: str, limit: int | None = None) -> list[dict[str, Any]]:
-    """The pair's ``changes.jsonl`` (oldest first, the last ``limit``); unreadable lines are skipped."""
+    """The pair's ``changes.jsonl`` (oldest first, the last ``limit``); unreadable lines are skipped. Records are
+    split on ``\\n`` only (not ``splitlines()``: a raw U+2028 in an older line must not cut it in two)."""
     try:
         text = (adaptive_dir(s, pair) / CHANGES_FILE).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
     out: list[dict[str, Any]] = []
-    for line in text.splitlines():
+    for line in text.split("\n"):
         try:
             rec = json.loads(line)
         except ValueError:
@@ -484,6 +521,7 @@ class AdaptiveStore:
         self._playbook = ""
         self._sig: tuple | None = None
         self._seen = False                   # _sig describes the files as last processed (valid or not)
+        self._loaded = False                 # _cfg came from a successful read (not the start-up placeholder)
         self._checked: float | None = None
         self._invalid_sig: tuple | None = None
         self._expired_done: set[tuple[str, int]] = set()
@@ -547,12 +585,13 @@ class AdaptiveStore:
             return
         if sig == (None, None):              # no overlay at all: nothing to read, no lock needed
             self._cfg, self._playbook, self._sig, self._checked = AdaptiveCfg(), "", sig, t
-            self._seen, self._invalid_sig = True, None
+            self._seen, self._loaded, self._invalid_sig = True, True, None
             return
         with FileLock(lock_path(self.s, self.pair)).hold(timeout=READ_LOCK_WAIT_S, poll=0.02) as got:
             if not got:                      # tune.py is writing: keep the last good values, look again at the
-                self._checked = t            # next check (the signature still differs, so it is re-read then)
-                return
+                if self._loaded:             # next check (the signature still differs, so it is re-read then)
+                    self._checked = t        # — but a store that has none yet (a service just started, config
+                return                       # values as placeholder) tries again on its next call
             sig = self._signature()
             try:
                 cfg, pb = self._read()
@@ -560,7 +599,7 @@ class AdaptiveStore:
                 log.debug("%s: adaptive files not readable yet: %s", self.pair, exc)
                 self._checked = t
                 return
-            except (ValueError, yaml.YAMLError) as exc:
+            except (ValueError, yaml.YAMLError, RecursionError) as exc:
                 self._sig, self._checked, self._seen = sig, t, True
                 if sig != self._invalid_sig:
                     self._invalid_sig = sig
@@ -570,7 +609,7 @@ class AdaptiveStore:
                     self._emit("adaptive_invalid", {"pair": self.pair, "text": text})
                 return
         self._cfg, self._playbook, self._sig, self._checked = cfg, pb, sig, t
-        self._seen, self._invalid_sig = True, None
+        self._seen, self._loaded, self._invalid_sig = True, True, None
 
     def _read(self) -> tuple[AdaptiveCfg, str]:
         return read_files(self.s, self.pair, self.dir)

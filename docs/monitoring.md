@@ -18,8 +18,13 @@ It replaces the Claude desktop-app 3-hourly check (retired with H19).
 | By hand, safe | `scripts\monitor.bat --dry-run` | the findings only: no switch, no notification, no state file, no diagnosis |
 
 Other flags: `--json` (the result as JSON), `--no-diagnose` (never start a Claude diagnosis from this run),
-`--instance PAIR`, `--all-pairs-system`. Exit code **0** = nothing at warning level or above, **1** = at least one
-warning or critical finding (also when it was already notified earlier), or the state file could not be written.
+`--instance PAIR`, `--all-pairs-system`.
+
+| Exit code | Meaning |
+|---|---|
+| **0** | nothing at warning level or above |
+| **1** | at least one warning or critical finding (also when it was already notified earlier), or the state file could not be written |
+| **3** | the config could not be read (e.g. a bad `config\config.local.yaml`): **nothing was checked**. One timestamped line goes to `logs\monitor-config-error.log` (a fixed path: without a config there is no logs setting; rotated once at 1 MB), a critical toast *Monitor cannot read its config* is shown (skipped under `TS_NOTIFY_DISABLE`), and the error is printed unless `--quiet`. Fix the config; the next run picks it up |
 
 The monitor logs to `logs\monitor.jsonl` (never to the console, so `pythonw` is fine). It honours
 `TRADINGSYSTEM_CONFIG` like every tool, so a scratch data root is monitored as a whole. `monitor.enabled: false`
@@ -29,7 +34,9 @@ turns it into a no-op (exit 0).
 
 The same choice as `tools\health_report.py`: the all-pairs system when it runs; otherwise every pair whose supervisor
 runs plus every pair that should run (its own `data\instances\<PAIR>\app.db`, not stopped by you). A pair that should
-run but has no supervisor is a warning (`System not running`). A system stopped by you (`run\manual_stop`, no live
+run but has no supervisor is a warning (`System not running`) — while the machine settles (§4) only when two runs at
+least 5 min apart see it: after a logon the keep-alive tasks start the supervisors 90-150 s late. Every other
+health-report note is a warning at once (`System check`). A system stopped by you (`run\manual_stop`, no live
 supervisor) is skipped. A pair whose supervisor runs but whose `app.db` this monitor cannot find is a warning (`monitor
 cannot see this system`): the task runs from another checkout or data root.
 
@@ -44,12 +51,13 @@ Thresholds are in the `monitor:` block of `config/config.yaml` (defaults shown).
 |---|---|---|---|
 | Stale heartbeat | a `collector_status` row not `stopped` without a beat for > `stale_heartbeat_min` (15) — sleep-corrected, see §4 | warn | — |
 | MT5 IPC hung | `executor` or `mt5` in `reconnecting`/`error` with a last error matching `IPC` / `-10004` / `-10005` for ≥ `ipc_hung_min` (5) — the start is the executor's `failing_since` or the first run that saw it | critical | none: restarting the MT5 terminal stays **your** decision |
-| Position without SL | an executor `exposure` row of kind `position` with no `sl` (the first leg's SL) | critical (re-sent hourly) | — |
+| Position without SL | an executor `exposure` row of kind `position` where **any** leg has no SL (`sl_missing`; `sl` is the first leg's, for display) | critical (re-sent hourly) | — |
 | Order burst | more than `order_burst_per_hour` (3) `order` events of one pair in the last hour | critical | **that pair's** `data\instances\<PAIR>\KILL_SWITCH` |
-| Daily loss near the limit | today ≤ −(`risk.max_daily_loss_pct` − `daily_loss_warn_margin_pct`) % (−8 % with 10/2) | warn | — |
+| Daily loss near the limit | today ≤ −(`risk.max_daily_loss_pct` − `daily_loss_warn_margin_pct`) % (−8 % with 10/2); with no band (margin ≥ limit, e.g. the code defaults 2/2) at 80 % of the limit | warn | — |
 | Daily loss limit | today ≤ −`risk.max_daily_loss_pct` % | critical | the pair's switch (all-pairs system: the global one), **once per UTC day** |
 | Equity drop | equity fell > `equity_drop_warn_pct` (5) % since the previous run | warn | — |
-| Equity drop, large | … > `equity_drop_kill_pct` (10) % | critical | the **global** `data\KILL_SWITCH` |
+| Equity drop, large | … > `equity_drop_kill_pct` (10) % of an identified MT5 account (`mt5:…`) against a baseline at most 1 h old plus the time the machine slept since the previous run | critical | the **global** `data\KILL_SWITCH` |
+| Equity drop, large, not comparable | the same drop of a **paper** account, of an unidentified one (`mt5:<mode>:?`, the executor row had no `account_drawdown`) or against an older baseline (no run in between) | warn | none: the global switch stops every system |
 | Drawdown stop tripped | `account_peak.json` (or the executor row) shows the account's stop tripped | critical, **once** per trip | — (the executors already refuse) |
 | Stale quote | `latest_quote` older than `quote_stale_min` (10) while the instrument's market was open through that whole window | warn | — |
 | Low RAM / disk | free RAM < `free_ram_warn_mb` (300), free disk of the data drive < `free_disk_warn_gb` (5) | warn | — |
@@ -73,7 +81,8 @@ monitor task right after the resume. So:
 * a system is **settling** while the machine booted, resumed or had a clock jump / stall within the stale window, the
   machine slept since the previous monitor run (wall time minus awake time > 60 s), or the machine slept since the
   supervisor's last beat and that beat is recent on the awake clock. While settling, a stale heartbeat, stale quote
-  or outage must be seen on **two consecutive runs at least 5 min apart**; until then it is listed as `waiting`.
+  or outage — and, while the machine itself settles, a pair with no supervisor (§2) — must be seen on **two
+  consecutive runs at least 5 min apart**; until then it is listed as `waiting`.
 
 Without any of that, a stale heartbeat is reported on the first run that sees it.
 
@@ -86,7 +95,19 @@ Each finding has a stable key (e.g. `stale:BTCUSDT:engine`, `burst:BTCUSDT:BTCUS
 * a new key, or a key whose level rose, is sent;
 * a finding that persists is re-sent after 6 h (warn) or 1 h (critical); info never repeats;
 * one-shot findings (a drawdown trip, a daily-loss limit after its switch) are sent once;
-* a finding that disappears is forgotten — if it comes back, it is sent again.
+* a finding that disappears is remembered for a **cool-down** — 6 h for a warning, 2 h for info and critical,
+  counted from when it was last seen. If it comes back within it, it persists: not re-sent (unless its level rose or
+  its reminder is due) and not new, so it starts no diagnosis — a condition flapping across its threshold (free RAM
+  near the line) is one alert, not one every 30 min. After the cool-down it is a new episode and sent again.
+
+Criticals are queued first. Before it exits, the run waits for the notifier: 15 s plus 12 s per queued
+notification, at most 240 s. A notification that reached **no** sink — every sink in use still pending when the wait
+ended, or failed — is **re-armed**: its alert keeps the previous `notified_ms` and is marked `unsent`, a one-shot key
+is not recorded, and an event's own bookkeeping (a burst counted, the equity baseline, the VPN state) is put back, so
+the next run detects it again and sends it. One sink delivering is enough (the toast shown, Telegram timed out); a
+sink that is off or not configured does not count, and a notification that is a log line only by configuration
+(`notify.enabled: false`, below `notify.min_level`, `TS_NOTIFY_DISABLE`), deduped or rate-limited counts as handled
+— except a re-armed alert that the dedupe skipped (the failed attempt claimed its key), which is tried again.
 
 ## 6. Kill switches
 
@@ -96,7 +117,9 @@ existing switch is left as it is. To go on after reviewing, run `scripts\kill_sw
 * An order burst engages the pair's switch once per burst: after you turn it off, the orders already counted never
   engage it again; only more new orders than the limit do.
 * The daily-loss limit engages the switch once per UTC day: turned off, it stays off for the rest of that day.
-* An equity drop compares two consecutive runs, so each drop engages the global switch once.
+* An equity drop compares two consecutive runs, so each drop engages the global switch once — only for an identified
+  MT5 account and a baseline from the previous run or so (at most 1 h plus the time slept since); a paper account, an
+  unidentified account or an older baseline only warns.
 * Open positions keep their SL/TP at the broker; protective management goes on while a switch is on.
 
 ## 7. Diagnosis sessions
@@ -108,7 +131,13 @@ own, outside the task's job — see docs/operator_sessions.md), unless:
 * `monitor.diagnose_enabled: false`, or `operator.enabled: false`,
 * the environment variable `TS_MONITOR_NO_DIAGNOSE` is set (anything but `0`) — set it for a scratch or test run,
 * the previous diagnosis started less than `diagnose_every_hours` (3) ago,
-* the run was `--dry-run` or `--no-diagnose`.
+* the run was `--dry-run` or `--no-diagnose`,
+* the state file cannot be written (`state not persisted`): `last_diagnose_ms` is saved **before** the session
+  starts, so a state that cannot be saved never starts a session on every run,
+* an operator session (the daily or weekly review, another diagnosis) holds `data\shared\locks\operator_session.lock`
+  (`a review session is running`): the diagnosis would end `busy` at once. It stays **wanted** (`diagnose_wanted`):
+  the next runs start it for those findings while they persist, although they are no longer new, for up to 2 h, and
+  the 3-hour interval is not used up.
 
 A finding that is already known (not re-sent) never starts a session. The session gets the new findings as its
 `--reason` and can read all of the run's findings in `data\shared\monitor_state.json` (`run.findings`).
@@ -116,13 +145,15 @@ A finding that is already known (not re-sent) never starts a session. The sessio
 ## 8. The state file
 
 `data\shared\monitor_state.json` (the monitor's only file besides kill switches; replaced atomically, retried while a
-reader holds it). Delete it to start over — the only cost is one run without the between-runs comparisons.
+reader holds it). Delete it to start over — the only cost is one run without the between-runs comparisons. When it
+cannot be written, the run exits 1 and sends a critical *Monitor: state file not saved* (key `monitor:state_error`,
+so the notifier's dedupe sends it at most every 30 min): until it is fixed, every run re-sends its newer findings.
 
 | Key | What |
 |---|---|
 | `first_run_ms` | the monitor's first run (daily-review rule before the first review) |
 | `run` | last run: `ts`, awake clock, boot time, exit code, `findings`, `held` |
-| `alerts` | per finding key: level, first/last seen, last notified |
+| `alerts` | per finding key: level, first/last seen, last notified; `unsent` = the last notification reached no sink (re-sent next run); `cleared_ms` = gone, kept for its cool-down (§5) |
 | `once`, `acted` | one-shot findings sent; daily-loss switches already engaged (by key) |
 | `equity` | last equity per account |
 | `burst_seen` | per system and pair: the newest order already counted in a burst |
@@ -131,6 +162,7 @@ reader holds it). Delete it to start over — the only cost is one run without t
 | `slow_build` | per system: the slow snapshot build seen on the previous run |
 | `vpn` | last state of each watched adapter |
 | `last_diagnose_ms`, `diagnose` | the last diagnosis started (pid, findings) |
+| `diagnose_wanted` | a diagnosis put off by a running operator session (or a failed start): since when, for which findings (§7) |
 
 ## 9. In the health report
 
@@ -145,7 +177,10 @@ reader holds it). Delete it to start over — the only cost is one run without t
 
 ## 10. False positives
 
-Every threshold is a `monitor:` key (override it in `config\config.local.yaml`, in one `monitor:` block). A holiday
+Every threshold is a `monitor:` key (override it in `config\config.local.yaml`, in one `monitor:` block). A mistake
+there (an unknown key, `equity_drop_warn_pct` not below `equity_drop_kill_pct`, a second `monitor:` block) stops the
+monitor: every run then exits **3**, writes `logs\monitor-config-error.log` and shows a critical toast (§1) — run
+`scripts\monitor.bat --dry-run` after an edit to see it at once. A holiday
 closes a market the session calendar still counts as open: expect a stale-quote warning then. A switch engaged by
 mistake costs missed trades, never a loss: check the reason in the file (or the health report) and run
 `kill_switch_off.bat`.

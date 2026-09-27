@@ -140,8 +140,8 @@ class Engine:
             exe = next(iter(self.reg.with_role(pair, "execution")), None) if getattr(self, "reg", None) else None
             if exe is not None:
                 out["holdings_price_space"] = exe.key     # the execution instrument's prices (legend)
-            rows = [{k: v for k, v in x.items() if k not in ("pair", "kind")} for x in d.get("exposure") or []
-                    if x.get("pair") == pair]
+            rows = [{k: v for k, v in x.items() if k not in ("pair", "kind") and not (k == "sl_missing" and not v)}
+                    for x in d.get("exposure") or [] if x.get("pair") == pair]   # the flag only when a leg lacks SL
             kinds = [x.get("kind") for x in d.get("exposure") or [] if x.get("pair") == pair]
             out["open_positions"] = [r for r, k in zip(rows, kinds) if k == "position"]
             out["pending_orders"] = [{k: v for k, v in r.items() if k != "profit_usd"}
@@ -545,14 +545,22 @@ class Engine:
             "adaptive": self._overlay_detail()})
 
     def _gauge_detail(self) -> dict | None:
+        """The gauge for the status row; one notification per level change. A read that failed (``error``) is
+        published but never counts as a level (no notification, the last level is kept); the gauge itself lowers a
+        level only with hysteresis, so usage hovering at a threshold does not notify on every re-read."""
         gs = self._gauge_state()
         if gs is None:
             return None
+        if getattr(gs, "error", None):
+            return gs.as_detail()
         prev = getattr(self, "_gauge_level", None)
         if prev is not None and gs.level != prev:
+            # the key names the transition: the instances (one engine per pair, one shared ledger) see the same change
+            # and send it once; a different change within the dedupe window is not swallowed
             self._notify("warn" if gs.level > prev else "info", "Usage gauge",
                          f"level {prev} → {gs.level}: {gs.reason}"
-                         + ("" if gs.enforce else " (observe only: ai.usage.enforce is off)"), key=f"gauge:{gs.level}")
+                         + ("" if gs.enforce else " (observe only: ai.usage.enforce is off)"),
+                         key=f"gauge:{prev}>{gs.level}")
         self._gauge_level = gs.level
         return gs.as_detail()
 

@@ -2,6 +2,7 @@
 execution keys), effective values (the direction rule against the config — the gate uses max()), mtime reload,
 an invalid file keeping the last good values, expiry bookkeeping done once, the playbook's hash check."""
 import json
+import time
 import sqlite3
 from pathlib import Path
 
@@ -114,6 +115,50 @@ def test_duplicate_keys_are_refused():
     text = "min_confidence_floor: {value: 60}\nmin_confidence_floor: {value: 70}\n"
     with pytest.raises(yaml.YAMLError):
         ad.load_cfg_text(text, max_expiry_days=14)
+
+
+DEEP = "min_confidence_floor: " + "[" * 3000 + "]" * 3000 + "\n"      # 6 kB: the YAML composer recurses per level
+
+
+def test_a_deeply_nested_file_is_a_value_error_not_a_recursion_error():
+    with pytest.raises(ValueError, match="nested too deeply"):
+        ad.load_cfg_text(DEEP, max_expiry_days=14)
+
+
+def test_deep_flow_nesting_on_one_line_is_refused_quickly():
+    # PyYAML's scanner slows down quadratically on one line of '[': 3000 levels took 8 s, the 256 K cap ~7 min.
+    # The alias walk stops at MAX_YAML_DEPTH, so neither the engine loop nor the dashboard stalls.
+    for text in ("a: " + "[" * 3000, "a: " + "[" * (ad.MAX_YAML_CHARS - 10)):
+        t0 = time.perf_counter()
+        with pytest.raises(ValueError, match="nested too deeply"):
+            ad.load_cfg_text(text, max_expiry_days=14)
+        assert time.perf_counter() - t0 < 2.0
+
+
+def test_evidence_deeper_than_the_limit_is_refused_and_the_files_nesting_stays_below_the_yaml_limit():
+    deep = {"a": 1}
+    for _ in range(ad.MAX_EVIDENCE_DEPTH):
+        deep = [deep]
+    assert ad.json_depth(deep) == ad.MAX_EVIDENCE_DEPTH + 1 and ad.json_depth(7) == 0
+    with pytest.raises(ValueError, match="nested deeper"):
+        ad.Entry.model_validate(dict(entry(60), evidence=deep))
+    ok = deep[0]                                                          # exactly MAX_EVIDENCE_DEPTH
+    assert ad.Entry.model_validate(dict(entry(60), evidence=ok)).evidence == ok
+    text = yaml.safe_dump({"trigger": {"weak_min": dict(entry(3), evidence=ok)}})
+    assert ad.has_alias(text) is False                                    # root + group + entry + 8 < MAX_YAML_DEPTH
+
+
+def test_a_deeply_nested_file_keeps_the_last_good_values(s):
+    events, clock = [], Clock()
+    write_overlay(s, {"min_confidence_floor": entry(70)})
+    st = ad.AdaptiveStore(s, PAIR, clock=clock, emit=lambda k, p: events.append((k, p)))
+    assert st.effective(T0 + 1).min_confidence == 70
+    touch_later(ad.adaptive_dir(s, PAIR) / ad.YAML_FILE, DEEP)
+    clock.t += s.adaptive.reload_check_s
+    assert st.effective(T0 + 1).min_confidence == 70                           # not the config's 55
+    assert [k for k, _ in events] == ["adaptive_invalid"] and "nested too deeply" in events[0][1]["text"]
+    with pytest.raises(ValueError, match="nested too deeply"):
+        ad.read_files(s, PAIR)
 
 
 # ------------------------------------------------------------------ effective values
@@ -238,17 +283,37 @@ def test_a_playbook_file_without_its_entry_is_ignored(s):
 def test_a_reload_waits_while_tune_holds_the_lock(s):
     from tradingsystem.core.filelock import FileLock
     write_overlay(s, {"min_confidence_floor": entry(60)})
+    clock = Clock()
+    st = ad.AdaptiveStore(s, PAIR, clock=clock)
+    assert st.effective(T0 + 1).min_confidence == 60
+    write_overlay(s, {"min_confidence_floor": entry(65, reason="a longer reason so the size differs")})
+    clock.t += s.adaptive.reload_check_s
+    lock = FileLock(ad.lock_path(s, PAIR))
+    assert lock.acquire()
+    try:
+        assert st.effective(T0 + 1).min_confidence == 60                       # the last good values are kept
+    finally:
+        lock.release()
+    assert st.effective(T0 + 1).min_confidence == 60                           # no retry before the next check ...
+    clock.t += s.adaptive.reload_check_s
+    assert st.effective(T0 + 1).min_confidence == 65                           # ... which reads it
+
+
+def test_a_busy_lock_on_the_first_read_is_retried_on_the_next_call(s):
+    """A service (re)started while tune.py holds the lock has no last good values yet — only the config's as a
+    placeholder — so it must not answer with them for a whole reload_check_s."""
+    from tradingsystem.core.filelock import FileLock
+    write_overlay(s, {"min_confidence_floor": entry(75)})
     lock = FileLock(ad.lock_path(s, PAIR))
     clock = Clock()
     assert lock.acquire()
     try:
         st = ad.AdaptiveStore(s, PAIR, clock=clock)
-        assert st.effective(T0 + 1).min_confidence == s.risk.min_confidence      # last good (= defaults) kept
+        assert st.effective(T0 + 1).min_confidence == s.risk.min_confidence      # nothing read yet
+        assert st.effective(T0 + 1).min_confidence == s.risk.min_confidence      # still busy: tried again
     finally:
         lock.release()
-    assert st.effective(T0 + 1).min_confidence == s.risk.min_confidence      # no retry before the next check ...
-    clock.t += s.adaptive.reload_check_s
-    assert st.effective(T0 + 1).min_confidence == 60                           # ... which reads it
+    assert st.effective(T0 + 1).min_confidence == 75                           # the next call reads it, same clock
 
 
 # ------------------------------------------------------------------ expiry
@@ -310,3 +375,23 @@ def test_changes_reader_skips_a_torn_line(s):
     ad.append_jsonl(d / ad.CHANGES_FILE, {"action": "revert", "key": "a"})
     assert [r["action"] for r in ad.read_changes(s, PAIR)] == ["set", "revert"]
     assert json.loads((d / ad.CHANGES_FILE).read_text(encoding="utf-8").splitlines()[-1])["action"] == "revert"
+
+
+def test_a_line_separator_in_a_record_does_not_split_it(s):
+    d = ad.adaptive_dir(s, PAIR)
+    d.mkdir(parents=True)
+    # an older line written raw (before the lines were ASCII): a splitlines() reader would cut it in two
+    (d / ad.CHANGES_FILE).write_text(json.dumps({"action": "set", "reason": "a\u2028b"}, ensure_ascii=False) + "\n",
+                                     encoding="utf-8")
+    ad.append_jsonl(d / ad.CHANGES_FILE, {"action": "revert", "reason": "c\u2029d \u00e9 \u0085"})
+    raw = (d / ad.CHANGES_FILE).read_bytes()
+    assert raw.splitlines()[-1].isascii()                                       # the new line is escaped
+    assert [(r["action"], r["reason"]) for r in ad.read_changes(s, PAIR)] == [
+        ("set", "a\u2028b"), ("revert", "c\u2029d \u00e9 \u0085")]
+
+
+def test_an_expired_entry_with_non_ascii_text_is_recorded_once(s):
+    write_overlay(s, {"tp_hint": entry("TP1 at the prior swing \u2192 then trail", days=1)})
+    for _ in range(3):                                                        # three processes / restarts
+        ad.AdaptiveStore(s, PAIR, clock=Clock()).effective(T0 + 2 * MS_PER_DAY)
+    assert len([r for r in ad.read_changes(s, PAIR) if r["action"] == "expired"]) == 1

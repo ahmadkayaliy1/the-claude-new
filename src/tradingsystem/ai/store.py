@@ -46,8 +46,11 @@ _DDL = [
         mfe_r REAL, mae_r REAL, tp1_hit INTEGER, tp2_hit INTEGER, tp3_hit INTEGER, minutes_to_resolve INTEGER,
         exit_reason TEXT, slippage REAL, spread_at_gate REAL, commission REAL, swap REAL,
         rejected_but_virtual_win INTEGER, no_trade_counterfactual_atr REAL, detail TEXT)""",
-    """CREATE TABLE IF NOT EXISTS prompt_versions (prompt_hash TEXT PRIMARY KEY, role TEXT NOT NULL,
-        library_hash TEXT NOT NULL, versions TEXT NOT NULL, git_sha TEXT, first_seen_ms INTEGER NOT NULL)""",
+    # keyed on the system prompt AND the library: an edit of a user template (instructions.md) leaves prompt_hash
+    # unchanged but changes library_hash, and is a new version of what the model saw
+    """CREATE TABLE IF NOT EXISTS prompt_versions (prompt_hash TEXT NOT NULL, role TEXT NOT NULL,
+        library_hash TEXT NOT NULL, versions TEXT NOT NULL, git_sha TEXT, first_seen_ms INTEGER NOT NULL,
+        PRIMARY KEY (prompt_hash, library_hash))""",
     """CREATE TABLE IF NOT EXISTS tuning_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
         pair TEXT NOT NULL, key TEXT NOT NULL, old_value TEXT, new_value TEXT, reason TEXT, evidence TEXT,
         window_hours INTEGER, expires_ms INTEGER, review_id TEXT, actor TEXT, reverted_ms INTEGER)""",
@@ -112,6 +115,9 @@ class DecisionRecord:
     adaptive_hash: str | None = None         # the pair's adaptive values in force
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     ts: int = field(default_factory=now_ms)
+    # not stored: the pair's effective tunables the prompts were rendered with (core/tunables.py) — attribution
+    # takes the hashes from it, not from a later read (the overlay may change during a long model call)
+    tunables: Any = field(default=None, repr=False, compare=False)
 
 
 class DecisionStore:
@@ -120,7 +126,8 @@ class DecisionStore:
         self._lock = threading.Lock()
         self.config_hash = config_hash
         self.git_sha = git_sha()
-        self._prompts_seen: set[str] = set()      # prompt hashes registered by this process (prompt_versions)
+        # (prompt hash, library hash) pairs registered by this process (prompt_versions)
+        self._prompts_seen: set[tuple[str, str]] = set()
         with self._lock:
             for s in _DDL:
                 self._con.execute(s)
@@ -313,19 +320,20 @@ class DecisionStore:
         out["detail"] = _loads(out["detail"])
         return out
 
-    def prompt_known(self, prompt_hash: str) -> bool:
-        """Whether this process already registered ``prompt_hash`` (no database read)."""
-        return prompt_hash in self._prompts_seen
+    def prompt_known(self, prompt_hash: str, library_hash: str) -> bool:
+        """Whether this process already registered ``prompt_hash`` under ``library_hash`` (no database read)."""
+        return (prompt_hash, library_hash) in self._prompts_seen
 
     def register_prompt(self, prompt_hash: str, role: str, library_hash: str, versions: dict[str, int]) -> None:
-        """``prompt_versions``: the first time a system prompt is seen, with the versions of the files it was built
-        from (INSERT OR IGNORE keeps the first sighting; the engine and the executor may race)."""
+        """``prompt_versions``: the first time a system prompt is seen with a prompt library, with the versions of the
+        files the render used (INSERT OR IGNORE keeps the first sighting; the engine and the executor may race). A
+        user-template edit keeps the system prompt's hash but changes the library's, so it gets its own row."""
         with self._lock:
             self._con.execute("INSERT OR IGNORE INTO prompt_versions (prompt_hash, role, library_hash, versions, "
                               "git_sha, first_seen_ms) VALUES (?,?,?,?,?,?)",
                               (prompt_hash, role, library_hash, json.dumps(versions, sort_keys=True), self.git_sha,
                                now_ms()))
-            self._prompts_seen.add(prompt_hash)
+            self._prompts_seen.add((prompt_hash, library_hash))
 
     def recent(self, pair: str, limit: int = 5) -> list[dict[str, Any]]:
         """Compact history for the snapshot (spec rule 10: consistency with recent decisions)."""

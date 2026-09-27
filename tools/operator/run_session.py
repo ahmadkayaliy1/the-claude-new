@@ -21,7 +21,9 @@ OEM code page):
 6. the result document: ``success`` and ``error_max_turns`` are both a finished session (the second has no summary);
    usage, turns, API-equivalent cost and permission denials are kept; one ledger row (provider claude_code, role
    review|diagnose, pair NULL, cost 0 — the API-equivalent cost goes to ``api_equivalent_usd``) when
-   ``operator.record_usage``;
+   ``operator.record_usage``. Without a result document (the time limit killed the CLI, which prints it only at the
+   end, or the CLI crashed) the spend is unknown, not zero: the row's ``error`` starts with ``usage_unknown: `` (with
+   the elapsed seconds) and the review pack counts such sessions;
 7. the diff guard: ``git status --porcelain`` (+ content hashes of the files already dirty) before and after —
    any difference notifies ``review_touched_checkout``; nothing is ever reverted;
 8. ``<ts>_<kind>.session.json`` (written at the start as ``running`` and at the end), and the final summary (the
@@ -30,7 +32,10 @@ OEM code page):
 ``--dry-run``: builds the pack and the prompt, prints the exact command, working directory and environment changes;
 no sign-in check, no CLI, no ledger row, no notification, no session file.
 Exit codes: 0 finished (summary or turn limit) or dry run, 1 failed (CLI missing, not signed in, error, timeout),
-2 not run (disabled, another session running, usage gauge).
+2 not run (disabled, another session running, usage gauge), 3 the config cannot be read (``load_settings`` failed,
+e.g. a bad ``config.local.yaml``): there are no Settings, so no normal log, notifier or data root — one timestamped
+line goes to ``logs/operator-session-config-error.log`` of this checkout, a best-effort critical toast is shown
+(``notify.ps1``, 15 s at most; skipped under ``TS_NOTIFY_DISABLE``) and the error is printed to stderr; nothing runs.
 """
 from __future__ import annotations
 
@@ -63,10 +68,14 @@ from tradingsystem.core.timeutil import now_ms as _now_ms  # noqa: E402
 
 log = logging.getLogger("operator")
 
-EXIT_OK, EXIT_FAILED, EXIT_SKIPPED = 0, 1, 2
+EXIT_OK, EXIT_FAILED, EXIT_SKIPPED, EXIT_CONFIG = 0, 1, 2, 3
+CONFIG_ERROR_LOG = ROOT / "logs" / "operator-session-config-error.log"   # fixed: without Settings, no logs dir
+CONFIG_ERROR_LOG_MAX = 1_000_000               # bytes; then it is rotated once (.1)
+CONFIG_TOAST_TIMEOUT_S = 15.0
 FINISHED = ("ok", "max_turns")                  # both are a normal end of a session
 SKIPPED = ("disabled", "busy", "gauge_paused")
-KILL_MARGIN_S = 90.0             # the run ends this long before operator.<kind>_timeout_min (Task Scheduler's limit)
+KILL_MARGIN_S = 90.0             # the run ends this long before operator.<kind>_timeout_min — the governing deadline;
+                                 # the task's ExecutionTimeLimit (130/190 min) is only a backstop beyond every config value
 MIN_CLI_S = 120.0                # less time than this left for the CLI → do not start it
 BUSY_WAIT_S = {"daily": 300.0, "weekly": 300.0, "diagnose": 0.0}
 STAGGER_MAX_WAIT_S = 180.0
@@ -231,7 +240,8 @@ def parse_result(stdout: str, stderr: str, rc: int | None, *, timed_out: bool = 
                  default_model: str = "") -> dict[str, Any]:
     """The session's end from ``--output-format json``. ``success`` → ok; ``error_max_turns`` (``errors[]``, no
     ``result``) → max_turns — both normal ends; anything else → error (classified only from the error text and
-    stderr, never from a successful answer that merely mentions a "usage limit")."""
+    stderr, never from a successful answer that merely mentions a "usage limit"). Without a result document the
+    token counts are 0 placeholders and ``usage_unknown`` is True (the CLI prints its usage only at the end)."""
     doc = cc.result_doc(stdout)
     out: dict[str, Any] = {"status": "error", "rc": rc, "timed_out": timed_out}
     if doc is None:
@@ -241,6 +251,7 @@ def parse_result(stdout: str, stderr: str, rc: int | None, *, timed_out: bool = 
         out["error_kind"] = "timeout" if timed_out else _classify(f"{out['error']}\n{stderr}")
         out["usage"] = {"input_tokens": 0, "cache_read": 0, "cache_creation": 0, "output_tokens": 0}
         out["ledger_tokens"] = {"input": 0, "cached": 0, "output": 0}
+        out["usage_unknown"] = True
         out["model"] = default_model
         return out
     subtype, is_error = doc.get("subtype"), bool(doc.get("is_error"))
@@ -311,10 +322,16 @@ def extract_summary(text: str | None, max_chars: int) -> tuple[str | None, str]:
 def record_usage(ledger: Path, spec: Any, parsed: dict[str, Any], *, purpose: str, elapsed_s: float) -> str | None:
     """One ledger row for the whole session (None = recorded, else why not). Provider = the claude_code provider:
     the subscription's shared limits count every call; ``cost_usd`` 0 (the plan, not a bill) — the API-equivalent
-    price goes to ``api_equivalent_usd`` like every other claude_code row."""
+    price goes to ``api_equivalent_usd`` like every other claude_code row. A session without a result document
+    (``usage_unknown``: time limit, crash) is not a cheap one: its ``error`` starts with the review pack's
+    ``USAGE_UNKNOWN_PREFIX`` and gives the elapsed seconds, so its 0 tokens are never read as the real spend."""
     try:
         from tradingsystem.ai.budget import UsageStore
         from tradingsystem.ai.providers.base import LLMResult
+        error = parsed.get("error")
+        if parsed.get("usage_unknown"):
+            error = (f"{pack_module().USAGE_UNKNOWN_PREFIX}no result document after {elapsed_s:.0f} s "
+                     f"({parsed.get('status')}): {error or '-'}")
         t = parsed.get("ledger_tokens") or {}
         res = LLMResult(provider=spec.provider, model=parsed.get("model") or spec.model, text="", data=None,
                         input_tokens=int(t.get("input") or 0), output_tokens=int(t.get("output") or 0),
@@ -328,7 +345,8 @@ def record_usage(ledger: Path, spec: Any, parsed: dict[str, Any], *, purpose: st
         store = UsageStore(ledger)
         try:
             store.record(res, provider=spec.provider, model=res.model, purpose=purpose, pair=None,
-                         ok=parsed.get("status") in FINISHED, error=parsed.get("error"), role=spec.ledger_role)
+                         ok=parsed.get("status") in FINISHED, error=_redact(error)[:600] if error else None,
+                         role=spec.ledger_role)
         finally:
             store.close()
         return None
@@ -501,7 +519,8 @@ def _run_locked(kind: str, *, s: Settings, spec: Any, rp: types.ModuleType, rec:
     # ---- ledger
     if s.operator.record_usage:
         why = record_usage(pack.ledger, spec, parsed, purpose=f"operator_{kind}", elapsed_s=elapsed)
-        rec["ledger"] = {"path": str(pack.ledger), "recorded": why is None, **({"error": why} if why else {})}
+        rec["ledger"] = {"path": str(pack.ledger), "recorded": why is None, **({"error": why} if why else {}),
+                         **({"usage_unknown": True} if parsed.get("usage_unknown") else {})}
     # ---- diff guard
     guard = diff_guard(before, git_snapshot(spec.root))
     rec["diff_guard"] = guard
@@ -511,8 +530,9 @@ def _run_locked(kind: str, *, s: Settings, spec: Any, rp: types.ModuleType, rec:
              + "; ".join((guard["added"] + guard["content_changed"] + guard["removed"])[:8])[:900],
              key="review_touched_checkout")
     # ---- summary
-    usage_line = (f"({parsed.get('num_turns')} turns, in {parsed['ledger_tokens']['input']:,} / out "
-                  f"{parsed['ledger_tokens']['output']:,} tokens, {elapsed / 60:.1f} min)")
+    usage_line = (f"({elapsed / 60:.1f} min, usage unknown: no result document)" if parsed.get("usage_unknown")
+                  else f"({parsed.get('num_turns')} turns, in {parsed['ledger_tokens']['input']:,} / out "
+                       f"{parsed['ledger_tokens']['output']:,} tokens, {elapsed / 60:.1f} min)")
     if status == "ok":
         summary, level = extract_summary(text, s.operator.summary_max_chars)
         rec["summary"], rec["summary_level"] = summary, level
@@ -528,6 +548,42 @@ def _run_locked(kind: str, *, s: Settings, spec: Any, rp: types.ModuleType, rec:
 
 
 # --------------------------------------------------------------------------- CLI
+def config_error(kind: str, exc: Exception) -> int:
+    """``load_settings()`` failed (e.g. a bad ``config.local.yaml``): there are no Settings, so no normal log, no
+    notifier and no data root. One timestamped line goes to ``CONFIG_ERROR_LOG``, a best-effort critical toast is
+    shown (skipped under ``TS_NOTIFY_DISABLE``), the error is printed to stderr; exit ``EXIT_CONFIG``. Never raises:
+    under Task Scheduler this is the only trace the session leaves."""
+    short = " ".join(f"{type(exc).__name__}: {exc}".split())
+    try:
+        short = get_redactor()(short)
+    except Exception:  # noqa: BLE001
+        pass
+    line = f"{iso(_now_ms())} operator session ({kind}) cannot read its config: {short[:4000]}"
+    try:
+        CONFIG_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        if CONFIG_ERROR_LOG.exists() and CONFIG_ERROR_LOG.stat().st_size > CONFIG_ERROR_LOG_MAX:
+            CONFIG_ERROR_LOG.replace(CONFIG_ERROR_LOG.with_name(CONFIG_ERROR_LOG.name + ".1"))
+        with open(CONFIG_ERROR_LOG, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+    try:
+        from tradingsystem.core import notify as nt
+        if not nt.disabled():
+            subprocess.run(nt.toast_command("critical", "Operator session cannot read its config",
+                                            f"{kind}: {short[:300]} — no review runs until it is fixed "
+                                            f"({CONFIG_ERROR_LOG})"),
+                           capture_output=True, timeout=CONFIG_TOAST_TIMEOUT_S, creationflags=_NO_WINDOW)
+    except Exception:  # noqa: BLE001 — best effort (no powershell, a timeout, …)
+        pass
+    if sys.stderr is not None:
+        try:
+            print(f"!! {line}", file=sys.stderr)
+        except (OSError, ValueError):
+            pass
+    return EXIT_CONFIG
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -539,7 +595,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="build the pack, print the command; no CLI call")
     ap.add_argument("--reason", help="why this session runs (the monitor's findings for a diagnosis)")
     a = ap.parse_args(argv)
-    s = load_settings()
+    try:
+        s = load_settings()
+    except Exception as exc:  # noqa: BLE001 — a config error must leave a trace (exit 3), never a lost traceback
+        return config_error(a.kind, exc)
     try:
         setup_log(s)
     except OSError:

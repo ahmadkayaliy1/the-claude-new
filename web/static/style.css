@@ -57,9 +57,11 @@ details summary { cursor: pointer; color: var(--blue); margin: 8px 0; }
 .chart-thumb { margin: 0; max-width: 360px; }
 .chart-thumb img { width: 100%; height: auto; border: 1px solid var(--line, #333); border-radius: 4px; }
 
-/* Phase 4: operator / tuning / proposals / reviews tabs and the kill-switch ON button */
-button.danger { background: var(--red); color: white; border: 0; border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; white-space: nowrap; }
-button.danger:hover { filter: brightness(1.12); }
+/* Phase 4: operator / tuning / proposals / reviews tabs and the kill-switch button. The button is an action, outlined
+   (red border + red text, no fill), so it never reads as the filled .badge.kill that shows the state */
+button.danger { background: transparent; color: var(--red); border: 1px solid var(--red); border-radius: 6px; padding: 2px 10px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; white-space: nowrap; }
+button.danger:hover:not(:disabled) { background: rgba(229, 72, 77, .12); }
+button.danger:disabled { color: var(--muted); border-color: var(--line); cursor: not-allowed; }
 .meta .badge.kill { white-space: nowrap; }
 .state-applied, .state-done, .state-ok { color: var(--green); }
 .state-armed, .state-pending, .state-deferred, .state-awaiting_user, .state-running, .state-set { color: var(--amber); }

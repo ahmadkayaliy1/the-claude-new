@@ -116,8 +116,8 @@ def test_diagnose_adds_the_kill_switch_and_uses_the_monitor_model(sa, tmp_path):
     assert args[args.index("--model") + 1] == s.ai.models.monitor.model == "sonnet"
     assert args[args.index("--effort") + 1] == "low"
     assert args[args.index("--max-turns") + 1] == str(s.operator.diagnose_max_turns)
-    assert args[-1] == "Bash(.venv/Scripts/python.exe tools/kill_switch.py*)"
-    assert "Bash(.venv/Scripts/python.exe tools/kill_switch.py*)" not in sa.allowed_tools("daily")
+    assert args[-1] == "Bash(.venv/Scripts/python.exe tools/kill_switch.py --pair *)"
+    assert not any("kill_switch" in r for r in sa.allowed_tools("daily") + sa.allowed_tools("weekly"))
     # a data root outside the checkout (a scratch live run) is added; one inside is not
     assert args[args.index("--add-dir") + 1] == str(s.paths.data())
     assert spec.ledger_role == "diagnose" and sa.spec_for(s, "weekly", exe=FAKE_EXE).ledger_role == "review"
@@ -125,14 +125,45 @@ def test_diagnose_adds_the_kill_switch_and_uses_the_monitor_model(sa, tmp_path):
         sa.spec_for(s, "hourly")
 
 
+def _allowed_by(rules: list[str], command: str) -> bool:
+    """Whether a Bash command matches one of the allow-list's Bash rules (``*`` = any text, the rest literal)."""
+    pats = [r[len("Bash("):-1] for r in rules if r.startswith("Bash(")]
+    return any(re.fullmatch(".*".join(map(re.escape, p.split("*"))), command, re.S) for p in pats)
+
+
+def test_a_diagnosis_may_engage_one_pairs_switch_but_never_the_global_one(sa):
+    """§3.8: the diagnosis gets ``kill_switch.py --pair`` only; ``--all`` (every system) is the monitor's decision."""
+    rules = sa.allowed_tools("diagnose")
+    ks = f"{sa.PY} tools/kill_switch.py"
+    assert _allowed_by(rules, f"{ks} --pair BTCUSDT --reason 'order burst: 5 orders in 40 min'")
+    for cmd in (f"{ks} --all --reason 'equity -12 %'", f"{ks} --reason 'x' --all", f"{ks} --all",
+                f"{ks}  --all --reason x", f"{ks} --status", f"{ks}"):
+        assert not _allowed_by(rules, cmd), cmd
+    assert _allowed_by(rules, f"{sa.PY} tools/tune.py --pair BTCUSDT list")          # the matcher itself works
+    assert not any(_allowed_by(sa.allowed_tools(k), f"{ks} --pair BTCUSDT --reason x") for k in ("daily", "weekly"))
+
+
 def test_the_system_prompt_names_every_allowed_command_exactly(sa):
     text = sa.SYSTEM_PROMPT.read_text(encoding="utf-8")
     for tool in sa.BASE_TOOLS + sa.DIAGNOSE_TOOLS:
         assert f"{sa.PY} tools/{tool}.py" in text
     assert "## SUMMARY" in text and "level: info|warn|critical" in text and ".env" in text
+    # every command form the prompt shows is one the allow-list lets through
+    shown = re.findall(rf"^{re.escape(sa.PY)} tools/\S+\.py[^\n(]*", text, re.M)
+    assert len(shown) >= 9 and all(_allowed_by(sa.allowed_tools("diagnose"), c.strip()) for c in shown)
     for kind in sa.KINDS:
         body = (sa.PROMPTS / f"{kind}.md").read_text(encoding="utf-8")
         assert "$review_id" in body and "$summary_max_chars" in body and "## SUMMARY" in body
+
+
+def test_the_prompts_state_what_a_session_may_not_do_with_the_tools(sa):
+    """The tools refuse these in a session (TS_OPERATOR_SESSION=1); the prompts say so, so no turn is wasted."""
+    text = sa.SYSTEM_PROMPT.read_text(encoding="utf-8")
+    assert "only with `--text`" in text and "FILE and `-` forms are refused" in text                # tune.py playbook
+    assert "`--pair` only" in text and "global switch is the monitor's" in text                     # kill_switch.py
+    assert "always from `main`" in text and "never pass `--base`" in text and "`--body-file`" in text  # propose.py
+    diag = (sa.PROMPTS / "diagnose.md").read_text(encoding="utf-8")
+    assert "--pair PAIR" in diag and "global switch is the monitor's" in diag and "from `main`" in diag
 
 
 # ------------------------------------------------------------------ environment
@@ -151,6 +182,9 @@ def test_child_env_scrubs_the_calling_session_and_secrets_but_keeps_the_data_roo
               "CLAUDE_CODE_OAUTH_TOKEN"):
         assert k not in env
     assert env["PYTHONIOENCODING"] == "utf-8" and env["PYTHONUTF8"] == "1" and env["MSYS_NO_PATHCONV"] == "1"
+    # the session marker: every command the session runs inherits it (the tools refuse the human-only forms)
+    assert env["TS_OPERATOR_SESSION"] == "1" and sa.SESSION_ENV == "TS_OPERATOR_SESSION"
+    assert sa.child_env(None, {**parent, "TS_OPERATOR_SESSION": "0"}, oauth_token="")["TS_OPERATOR_SESSION"] == "1"
     tok = sa.child_env(None, parent, oauth_token="sk-ant-oat-secret")
     assert tok["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-secret"                # exactly as the provider passes it
     diff = sa.env_diff(parent, tok)
@@ -354,6 +388,7 @@ def test_dry_run_builds_the_pack_and_prints_the_command_only(rs, tmp_path, monke
     doc = json.loads(printed[-1])
     assert doc["dry_run"] is True and doc["args"][0] == FAKE_EXE and doc["problems"] == []
     assert "CLAUDECODE" in doc["env"]["removed"] and doc["env"]["added_or_changed"]["MSYS_NO_PATHCONV"] == "1"
+    assert doc["env"]["added_or_changed"]["TS_OPERATOR_SESSION"] == "1"
     reviews = tmp_path / "data" / "reviews"
     assert (reviews / f"{doc['review_id']}.md").exists() and (reviews / f"{doc['review_id']}.prompt.md").exists()
     assert not list(reviews.glob("*.session.json"))
@@ -413,14 +448,33 @@ def test_task_scripts_are_ascii_and_derive_the_root():
     ops = (ROOT / "scripts" / "install_operator_tasks.ps1").read_text(encoding="ascii")
     assert "StartBoundary" in ops and "'Z'" in ops and "-LogonType Interactive" in ops and "-DryRun" in ops
     assert "New-TimeSpan -Minutes 15" not in ops or "$MonitorMinutes" in ops
-    assert "[int]$DailyLimitMinutes = 20" in ops and "[int]$WeeklyLimitMinutes = 40" in ops
     assert '$root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path' in ops
     launcher = (OPS / "run_session.ps1").read_text(encoding="ascii")
     assert 'Join-Path $PSScriptRoot "..\\.."' in launcher and "run_session.py" in launcher
 
 
+def test_review_task_limits_are_a_backstop_beyond_every_config_value():
+    """Task Scheduler kills the task's whole job at its limit (no session.json, no ledger row, no notification): the
+    review tasks' limits must lie beyond every operator.<kind>_timeout_min the settings accept, so the runner's own
+    config deadline always ends a session first."""
+    from tradingsystem.core.settings import OperatorCfg
+
+    ops = (ROOT / "scripts" / "install_operator_tasks.ps1").read_text(encoding="ascii")
+    margin = int(re.search(r"^\$MarginMinutes = (\d+)\s*$", ops, re.M).group(1))
+    cfg_max = dict(re.findall(r"(daily|weekly) = (\d+)", re.search(r"^\$ConfigMaxMinutes = @\{([^}]*)\}", ops,
+                                                                     re.M).group(1)))
+    assert margin >= 5
+    for kind, param in (("daily", "DailyLimitMinutes"), ("weekly", "WeeklyLimitMinutes")):
+        le = next(m.le for m in OperatorCfg.model_fields[f"{kind}_timeout_min"].metadata if hasattr(m, "le"))
+        default = int(re.search(rf"\[int\]\${param} = (\d+)", ops).group(1))
+        assert int(cfg_max[kind]) == le, f"$ConfigMaxMinutes.{kind} must be OperatorCfg's bound {le}"
+        assert default == le + margin, f"-{param} must default to {le} + {margin}"
+        assert f"(New-OpsSettings ${param})" in ops                   # the parameter is what gets registered
+
+
 # ------------------------------------------------------------------ tools/kill_switch.py (the diagnosis' only switch)
 def test_kill_switch_tool_is_on_only_and_stays_in_the_loaded_data_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("TS_OPERATOR_SESSION", raising=False)              # a human's call (--all allowed)
     ks = load("test_ts_kill_switch", ROOT / "tools" / "kill_switch.py")
     sent: list[tuple] = []
     monkeypatch.setattr(ks, "notify", lambda s, level, title, text, key=None: sent.append((level, title, key)))
@@ -443,6 +497,26 @@ def test_kill_switch_tool_is_on_only_and_stays_in_the_loaded_data_root(tmp_path,
     assert ks.main(["--status"], settings=s) == 0
     rows = {r["scope"]: r["on"] for r in json.loads(capsys.readouterr().out)}
     assert rows["all"] is True and rows["BTCUSDT"] is True and rows["ETHUSDT"] is False
+
+
+def test_kill_switch_tool_refuses_the_global_switch_in_an_operator_session(tmp_path, monkeypatch, capsys):
+    """A session (TS_OPERATOR_SESSION=1) may engage one pair's switch only; --all is the monitor's or the owner's."""
+    ks = load("test_ts_kill_switch", ROOT / "tools" / "kill_switch.py")
+    sent: list[tuple] = []
+    monkeypatch.setattr(ks, "notify", lambda s, level, title, text, key=None: sent.append((level, title, key)))
+    monkeypatch.setattr(ks, "setup_log", lambda s: None)
+    monkeypatch.setattr(ks, "load_settings", lambda: pytest.fail("refused before the settings are loaded"))
+    monkeypatch.setenv("TS_OPERATOR_SESSION", "1")
+    s = settings_at(tmp_path)
+    assert ks.main(["--all", "--reason", "equity -12 %"]) == 2
+    assert "a session may engage one pair's switch only" in capsys.readouterr().out
+    assert not (tmp_path / "data" / "KILL_SWITCH").exists() and not sent
+    assert ks.main(["--pair", "ETHUSDT", "--reason", "order burst"], settings=s) == 0          # one pair: allowed
+    assert (tmp_path / "data" / "instances" / "ETHUSDT" / "KILL_SWITCH").exists()
+    assert not (tmp_path / "data" / "KILL_SWITCH").exists()
+    monkeypatch.setenv("TS_OPERATOR_SESSION", "0")                    # outside a session --all works as before
+    assert ks.main(["--all", "--reason", "equity -12 %"], settings=s) == 0
+    assert (tmp_path / "data" / "KILL_SWITCH").exists()
 
 
 def test_the_prompt_fills_the_checklist_and_never_reparses_the_reason(rs, tmp_path):

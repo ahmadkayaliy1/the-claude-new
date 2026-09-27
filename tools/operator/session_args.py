@@ -12,8 +12,9 @@ The session is a read-only reviewer with a narrow Bash allow-list:
   asked (nobody is there to answer) — the denials come back in the result's ``permission_denials``;
 * tools Read, Grep, Glob and Bash; editors and the web disallowed, ``.env`` unreadable; Bash only for the exact
   prefixes ``.venv/Scripts/python.exe tools/<tool>.py`` of health_report, review_pack, tune, propose and notify (the
-  diagnosis adds kill_switch). No git rule: the review pack carries the git facts, and ``git diff``/``git log`` take
-  ``--output=<file>`` (a file write through a read-only-looking prefix);
+  diagnosis adds ``tools/kill_switch.py --pair``: one pair's switch only — the global switch is the monitor's). No
+  git rule: the review pack carries the git facts, and ``git diff``/``git log`` take ``--output=<file>`` (a file write
+  through a read-only-looking prefix);
 * the working directory is the checkout this file lives in (never a hard-coded path), so the relative allow-list paths
   resolve there; the data root is added with ``--add-dir`` only when it lies outside the checkout (a scratch root);
 * model and effort per kind from ``ai.models.review`` (daily, weekly) or ``ai.models.monitor`` (diagnose), resolved
@@ -26,8 +27,10 @@ tools must see the same data root as this runner: a scratch live run depends on 
 ``CLAUDE_CODE_GIT_BASH_PATH`` (where the CLI finds Git Bash, when the user set it) and the subscription token when one
 is configured (exactly as the provider passes it); never ``CLAUDECODE``, other ``CLAUDE_CODE_*``, ``CLAUDE_EFFORT`` or
 ``ANTHROPIC_*`` (an inherited API key would bill per token, D-030). Added: ``PYTHONIOENCODING=utf-8``, ``PYTHONUTF8=1``
-(tool output carries "≥"/"→", which a cp1252 pipe cannot encode) and ``MSYS_NO_PATHCONV=1`` (Git Bash would rewrite
-``/nopause``-style arguments into paths).
+(tool output carries "≥"/"→", which a cp1252 pipe cannot encode), ``MSYS_NO_PATHCONV=1`` (Git Bash would rewrite
+``/nopause``-style arguments into paths) and the session marker ``TS_OPERATOR_SESSION=1``: every command the session
+runs inherits it, and the allow-listed tools refuse what only a human may do (tune.py: a playbook FILE or ``-``;
+propose.py: ``--body-file`` and a ``--base`` other than main; kill_switch.py: ``--all``).
 """
 from __future__ import annotations
 
@@ -49,6 +52,10 @@ KINDS = ("daily", "weekly", "diagnose")
 PY = ".venv/Scripts/python.exe"                 # relative to the working directory = the checkout
 BASE_TOOLS = ("health_report", "review_pack", "tune", "propose", "notify")
 DIAGNOSE_TOOLS = ("kill_switch",)
+# what may follow ``tools/<tool>.py`` in a rule (default "*": any arguments); the diagnosis may engage one pair's
+# switch only — ``--all`` (the global switch) is the monitor's decision (§3.8), and kill_switch.py refuses it in a
+# session too
+RULE_TAIL = {"kill_switch": " --pair *"}
 READ_TOOLS = ("Read", "Grep", "Glob")
 TOOLS = "Read,Grep,Glob,Bash"
 DISALLOWED = ("Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Read(**/.env)", "Read(.env)",
@@ -67,7 +74,8 @@ PACK_MAX_CHARS = {"daily": 40_000, "weekly": 40_000, "diagnose": 16_000}   # dia
 PASS_THROUGH = ("TRADINGSYSTEM_CONFIG", "TS_INSTANCE", "TS_NOTIFY_DISABLE", "CLAUDE_CODE_GIT_BASH_PATH")
 DROP_PREFIXES = ("CLAUDE_CODE_", "ANTHROPIC_")
 DROP_NAMES = ("CLAUDECODE", "CLAUDE_EFFORT")
-ADDED_ENV = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "MSYS_NO_PATHCONV": "1"}
+SESSION_ENV = "TS_OPERATOR_SESSION"        # the session marker the tools check (tune, propose, kill_switch, …)
+ADDED_ENV = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "MSYS_NO_PATHCONV": "1", SESSION_ENV: "1"}
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
 
@@ -120,10 +128,10 @@ def model_effort(s: Settings, kind: str) -> tuple[str, str | None, str]:
 
 def allowed_tools(kind: str) -> list[str]:
     """The allow-list: Read/Grep/Glob, and Bash only for the exact tool prefixes (the diagnosis adds the kill
-    switch). The rules match the command text literally — ``./.venv/…``, backslashes or ``python tools/…`` are
-    denied."""
+    switch, ``--pair`` only). The rules match the command text literally — ``./.venv/…``, backslashes or
+    ``python tools/…`` are denied."""
     tools = BASE_TOOLS + (DIAGNOSE_TOOLS if check_kind(kind) == "diagnose" else ())
-    return [*READ_TOOLS, *(f"Bash({PY} tools/{t}.py*)" for t in tools)]
+    return [*READ_TOOLS, *(f"Bash({PY} tools/{t}.py{RULE_TAIL.get(t, '*')})" for t in tools)]
 
 
 def outside(path: Path, root: Path) -> bool:

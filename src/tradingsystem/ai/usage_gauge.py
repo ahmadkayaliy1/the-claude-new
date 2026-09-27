@@ -3,17 +3,22 @@
 The subscription's real limits are not published, so the gauge is ledger-based: rolling 7-day and 5-hour sums of the
 shared AI ledger (``ai_usage``: every decision, repair, escalation and operator session, of every instance) against
 ``ai.usage.weekly_token_budget`` and ``five_hour_token_budget`` — both calibration guesses until a week of data exists
-(H21). A cache read costs the subscription far less than fresh input, so it counts ``cache_read_weight`` of a token:
+(H21). Only the rows of the ``claude_code`` providers count (operator sessions are recorded under that provider's
+name); a fallback provider's calls (e.g. Gemini while Claude is at its limit) do not use the subscription. A cache
+read costs the subscription far less than fresh input, so it counts ``cache_read_weight`` of a token:
 
     effective = (input - cached) + cached * cache_read_weight + output         (input already contains cache reads)
 
 Level 0 below ``level1_pct`` of both budgets, 1 (reviews and events only) at or above it in either window, 2 (events
-only) at or above ``level2_pct``. The engine rations by the level only while ``ai.usage.enforce`` is true; otherwise
-the gauge is only published (engine status, health report, review pack). The CLI's own usage-limit cooldown stays
-the hard stop either way.
+only) at or above ``level2_pct``. A level is raised at its threshold but lowered only once the worse window is
+``HYSTERESIS_PCT`` points below it (the gauge instance remembers its last level), so usage hovering at a threshold does
+not flip the level — and its notifications — on every re-read. The engine rations by the level only while
+``ai.usage.enforce`` is true; otherwise the gauge is only published (engine status, health report, review pack). The
+CLI's own usage-limit cooldown stays the hard stop either way.
 
 The engine asks every 10 s on its event loop, so the sums are cached for ``ai.usage.cache_s``; the gauge never raises
-(an unreadable ledger is level 0 with the reason — a gauge problem is never a reason to stop analysing).
+(an unreadable ledger is level 0 with the reason and ``error`` set — a gauge problem is never a reason to stop
+analysing; it leaves the remembered level unchanged).
 """
 from __future__ import annotations
 
@@ -31,11 +36,13 @@ log = logging.getLogger(__name__)
 WEEK_MS = 7 * MS_PER_DAY
 FIVE_HOURS_MS = 5 * MS_PER_HOUR
 LEVEL_TEXT = {0: "all triggers", 1: "reviews and events only", 2: "events only"}
+HYSTERESIS_PCT = 5.0          # a level steps down only this many points below its threshold
 
 
 @dataclass
 class GaugeState:
-    level: int            # 0 ok · 1 (≥ level1_pct: reviews/events only) · 2 (≥ level2_pct: events only)
+    level: int            # 0 ok · 1 (≥ level1_pct: reviews/events only) · 2 (≥ level2_pct: events only); down with
+    #                       hysteresis (HYSTERESIS_PCT)
     week_tokens: float
     week_pct: float
     five_h_tokens: float
@@ -70,11 +77,18 @@ def _millions(n: float) -> str:
     return f"{n / 1e6:.2f} M"
 
 
+def claude_providers(s: Settings) -> list[str]:
+    """Names of the configured providers of kind ``claude_code``: the subscription's calls (the operator sessions'
+    ledger rows carry that provider's name too — ``tools/operator/session_args.provider_name``)."""
+    return [name for name, cfg in s.ai.providers.items() if cfg.kind == "claude_code"]
+
+
 class UsageGauge:
     def __init__(self, s: Settings, usage: UsageStore, *, clock: Callable[[], float] = time.monotonic) -> None:
         self.s, self.usage, self.clock = s, usage, clock
         self._cached: tuple[float, int | None, GaugeState] | None = None     # (clock, requested now_ms, state)
         self._last_error: str | None = None
+        self._level: int | None = None        # the last level of a successful read (hysteresis; errors keep it)
 
     def state(self, now_ms: int | None = None) -> GaugeState:
         """The gauge now (or as of ``now_ms``), re-read at most every ``ai.usage.cache_s`` (an explicit ``now_ms``
@@ -98,21 +112,29 @@ class UsageGauge:
             u = self.s.ai.usage
             enforce = bool(u.enforce)
             week_budget, five_budget = max(int(u.weekly_token_budget), 1), max(int(u.five_hour_token_budget), 1)
-            wk = self.usage.tokens_since(now - WEEK_MS)
-            fh = self.usage.tokens_since(now - FIVE_HOURS_MS)
+            providers = claude_providers(self.s)
+            wk = self.usage.tokens_since(now - WEEK_MS, providers=providers)
+            fh = self.usage.tokens_since(now - FIVE_HOURS_MS, providers=providers)
             week, five = effective_tokens(wk, u.cache_read_weight), effective_tokens(fh, u.cache_read_weight)
             week_pct, five_pct = 100.0 * week / week_budget, 100.0 * five / five_budget
             worst = max(week_pct, five_pct)
-            level = 2 if worst >= u.level2_pct else 1 if worst >= u.level1_pct else 0
+            limits = {1: float(u.level1_pct), 2: float(u.level2_pct)}
+            raw = 2 if worst >= limits[2] else 1 if worst >= limits[1] else 0
+            level = self._settle(raw, worst, limits)
+            windows = (("7 d", week, week_pct, week_budget), ("5 h", five, five_pct, five_budget))
             if level == 0:
                 reason = "within budget"
+            elif level > raw:                                      # held by the hysteresis
+                limit = limits[level]
+                name, v, pct, b = max(windows, key=lambda w: w[2])
+                reason = (f"{name} {_millions(v)} tokens = {pct:.0f} % of {_millions(b)} (level {level} held until "
+                          f"≤ {limit - HYSTERESIS_PCT:g} % → {LEVEL_TEXT[level]})")
             else:
-                limit = u.level2_pct if level == 2 else u.level1_pct
+                limit = limits[level]
                 over = [f"{name} {_millions(v)} tokens = {pct:.0f} % of {_millions(b)}"
-                        for name, v, pct, b in (("7 d", week, week_pct, week_budget),
-                                                ("5 h", five, five_pct, five_budget)) if pct >= limit]
+                        for name, v, pct, b in windows if pct >= limit]
                 reason = f"{'; '.join(over)} (≥ {limit:g} % → {LEVEL_TEXT[level]})"
-            self._last_error = None
+            self._last_error, self._level = None, level
             return GaugeState(level, week, week_pct, five, five_pct, enforce, reason, week_budget=week_budget,
                               five_h_budget=five_budget, week_calls=int(wk.get("calls") or 0),
                               five_h_calls=int(fh.get("calls") or 0), as_of_ms=now)
@@ -123,5 +145,16 @@ class UsageGauge:
                 self._last_error = err
             return GaugeState(0, 0.0, 0.0, 0.0, 0.0, enforce, f"gauge unavailable ({err})", as_of_ms=now, error=err)
 
+    def _settle(self, raw: int, worst: float, limits: dict[int, float]) -> int:
+        """The level with hysteresis: up as soon as ``raw`` (the thresholds alone) is higher than the last level; down
+        one level at a time, each only while ``worst`` is at least ``HYSTERESIS_PCT`` points below that level's
+        threshold (from level 2 at 92 % → 60 % the level goes straight to 0; at 87 % it stays 2, at 85 % it is 1)."""
+        level = self._level
+        if level is None or raw >= level:
+            return raw
+        while level > raw and worst <= limits[level] - HYSTERESIS_PCT:
+            level -= 1
+        return level
 
-__all__ = ["GaugeState", "UsageGauge", "effective_tokens", "LEVEL_TEXT"]
+
+__all__ = ["GaugeState", "UsageGauge", "claude_providers", "effective_tokens", "HYSTERESIS_PCT", "LEVEL_TEXT"]

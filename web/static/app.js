@@ -108,9 +108,15 @@ function renderLive() {
   const mode = ex?.detail?.mode || "—";
   $("#mode-badge").textContent = `${mode.toUpperCase()} · ${ex?.detail?.trigger || ""}`;
   $("#mode-badge").className = `badge ${mode}`;
-  $("#kill-badge").classList.toggle("hidden", !killSwitchOn());
+  const killOn = killSwitchOn();
+  $("#kill-badge").classList.toggle("hidden", !killOn);
   const ks = STATUS.kill_switch?.files || [];
   $("#kill-badge").title = `${ks.length ? ks.join(" · ") : "reported by the executor"} — the executor blocks all new orders`;
+  // the button is an action, never a state: disabled while a switch is on, so the badge is the header's only indicator
+  const kb = $("#kill-on");
+  kb.dataset.title ??= kb.title;
+  kb.disabled = killOn;
+  kb.title = killOn ? "kill switch already engaged" : kb.dataset.title;
   const eng = (STATUS.collectors || []).find((c) => c.collector === "engine");
   const g = eng?.detail?.usage_gauge;
   const gauge = g && g.level != null ? ` · usage L${g.level}${g.week_pct != null ? ` (${g.week_pct}% wk)` : ""}` : "";
@@ -414,13 +420,21 @@ async function loadTuning() {
     + grid(["time", "pair", "key", "old → new", "expires", "reverted", "actor", "review", "reason"], rows, "No tuning change recorded.");
 }
 
+/* What a merge of the proposal branch brings in: its base and the commits not in main (1 = the proposal only). */
+function baseNote(x) {
+  if (x.base == null && x.commits_not_in_main == null) return "";
+  const n = x.commits_not_in_main;
+  const base = `from ${esc(x.base || "?")}${x.base_sha ? ` @ ${esc(String(x.base_sha).slice(0, 10))}` : ""}`;
+  return `<div class="${n != null && n !== 1 ? "fail" : "muted"}">${base} · ${n == null ? "?" : esc(n)} commit(s) not in main</div>`;
+}
+
 async function loadProposals() {
   const tb = $("#proposals tbody");
   let p;
   try { p = await api("/api/proposals?limit=200"); } catch (e) { tb.innerHTML = `<tr><td class="fail">${esc(e.message)}</td></tr>`; return; }
   tb.innerHTML = p.length ? `<tr><th>Time (UTC)</th><th>Pair</th><th>Title</th><th>Status</th><th>Branch / worktree</th><th>Document</th><th>Review / commit</th></tr>`
     + p.map((x) => `<tr><td>${tSafe(x.ts)}</td><td>${esc(x.pair || "—")}</td><td><b>${esc(x.title)}</b><div class="small muted">${esc(x.slug)}</div></td>
-      <td>${stateSpan(x.status)}</td><td class="small">${esc(x.branch)}<div class="muted">${esc(x.worktree)}</div></td><td class="small">${esc(x.doc)}</td>
+      <td>${stateSpan(x.status)}</td><td class="small">${esc(x.branch)}<div class="muted">${esc(x.worktree)}</div>${baseNote(x)}</td><td class="small">${esc(x.doc)}</td>
       <td class="small">${esc(x.review_id)}${x.commit ? `<div class="muted">${esc(String(x.commit).slice(0, 10))}</div>` : ""}</td></tr>`).join("")
     : `<tr><td class="muted">No proposal yet.</td></tr>`;
 }

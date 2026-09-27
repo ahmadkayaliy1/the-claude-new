@@ -1,10 +1,13 @@
 """tools/tune.py — the only writer of the adaptive overlay (§3.8): min samples (20 strategy / 10 activity), one
 change per pair and UTC day, the per-key cooldown, the freeze when > 25 % of the window was unhealthy, the direction
-rules, TUNING_FREEZE / adaptive.enabled, revert, dry-run, the path allow-list, exit codes 0 / 2 / 3."""
+rules, TUNING_FREEZE / adaptive.enabled, a playbook the services reject, revert, dry-run, the path allow-list, what it
+reads (a session: --text only; FILE: a plain file under the data root or the checkout), no secret ever stored, exit
+codes 0 / 2 / 3."""
 import functools
 import importlib.util
 import io
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -114,6 +117,16 @@ def env(tmp_path):
     e = Env(tmp_path)
     e.seed()
     return e
+
+
+@pytest.fixture(autouse=True)
+def _no_dotenv_and_no_session(tmp_path, monkeypatch):
+    """tune.py looks up the configured secrets' values (the environment, else .env): never a real .env here — and
+    never an operator-session marker inherited from the environment."""
+    from tradingsystem.ai.providers import base
+    monkeypatch.setattr(base, "ENV_FILE", tmp_path / "no_such_env_file")
+    monkeypatch.setattr(base, "_dotenv", (float("-inf"), {}))
+    monkeypatch.delenv(tune.SESSION_ENV, raising=False)
 
 
 # ------------------------------------------------------------------ applied
@@ -317,6 +330,10 @@ def test_a_pause_in_the_past_is_refused(env):
     ["--pair", PAIR, "set", "min_confidence_floor", "sixty", "--reason", "rrr", "--evidence-json", "{}"],
     ["--pair", PAIR, "set", "trigger.liquidity_atr", "nan", "--reason", "rrr", "--evidence-json", "{}"],
     ["--pair", PAIR, "set", "min_confidence_floor", "60", "--reason", "rrr", "--evidence-json", "{not json"],
+    ["--pair", PAIR, "set", "min_confidence_floor", "60", "--reason", "rrr", "--evidence-json",
+     "[" * 9 + "]" * 9],                                                  # deeper than MAX_EVIDENCE_DEPTH
+    ["--pair", PAIR, "set", "min_confidence_floor", "60", "--reason", "rrr", "--evidence-json",
+     "[" * 1500 + "]" * 1500],                                            # json.loads would hit the recursion limit
     ["--pair", PAIR, "set", "min_confidence_floor", "60", "--reason", "rrr"],
     ["--pair", PAIR, "set", "min_confidence_floor", "60", "--evidence-json", "{}"],
     ["--pair", PAIR, "set", "min_confidence_floor", "60", "--reason", "rrr", "--evidence-json", "{}",
@@ -406,8 +423,9 @@ PLAYBOOK = """- Asia range: fade the first sweep of the high only after a 5m CHo
 
 
 @pytest.mark.parametrize("how", ["file", "stdin", "text"])
-def test_playbook_is_set_and_served(env, tmp_path, how):
-    src = tmp_path / "pb.md"
+def test_playbook_is_set_and_served(env, how):
+    src = env.data / "reviews" / "pb.md"                  # a human's draft under the data root
+    src.parent.mkdir(parents=True)
     src.write_text(PLAYBOOK + "\r\n", encoding="utf-8")
     args = {"file": [str(src)], "stdin": ["-"], "text": ["--text", PLAYBOOK]}[how]
     rc = env.run("--pair", PAIR, "playbook", *args, "--reason", "codify the week", "--evidence-json", EVIDENCE,
@@ -436,15 +454,215 @@ def test_a_playbook_or_hint_that_fails_the_lint_is_refused(env):
     assert env.overlay() is None
 
 
+def _playbook(env, *source, now=NOW, stdin=None):
+    return env.run("--pair", PAIR, "playbook", *source, "--reason", "codify the week", "--evidence-json", EVIDENCE,
+                   now=now, stdin=stdin)
+
+
+@pytest.mark.parametrize("damage", ["edited", "missing", "fails_lint"])
+def test_a_playbook_the_services_reject_blocks_every_change_until_it_is_reverted(env, damage):
+    """The services ignore the whole overlay when playbook.md is missing, does not match its hash or fails the lint;
+    tune.py must not report 'applied' (and use up the day and the key's cooldown) for a change never in force."""
+    assert _playbook(env, "--text", PLAYBOOK) == 0, env.out
+    d = ad.adaptive_dir(env.s, PAIR)
+    if damage == "edited":
+        (d / ad.PLAYBOOK_FILE).write_text(PLAYBOOK + "\n- one more rule by hand\n", encoding="utf-8")
+    elif damage == "missing":
+        (d / ad.PLAYBOOK_FILE).unlink()
+    else:                                                 # a stricter lint than when it was written
+        bad = PLAYBOOK + "\n- Never answer NO_TRADE on a sweep"
+        (d / ad.PLAYBOOK_FILE).write_text(bad + "\n", encoding="utf-8")
+        doc = env.overlay()
+        doc["playbook"]["value"] = ad.text_hash(bad)
+        (d / ad.YAML_FILE).write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ValueError):
+        ad.read_files(env.s, PAIR)                        # what the services see
+    day2 = NOW + MS_PER_DAY
+    for argv in (("set", "min_confidence_floor", "70"), ("set", "pair.ai_paused_until", "+6h")):
+        assert env.run("--pair", PAIR, *argv, "--reason", "rrr", "--evidence-json", "{}", now=day2) == 2
+        assert "playbook.md" in env.out and "revert playbook" in env.out
+    assert env.sql("SELECT count(*) FROM tuning_changes") == [(1,)]
+    assert env.run("--pair", PAIR, "list", "--json", now=day2) == 0
+    btc = json.loads(env.out)["pairs"][0]
+    assert btc["valid"] is False and "revert playbook" in btc["error"]
+    assert env.run("--pair", PAIR, "revert", "playbook", now=day2) == 0, env.out      # revert repairs the pair
+    assert not (d / ad.PLAYBOOK_FILE).exists()
+    ad.read_files(env.s, PAIR)
+    assert env.set("min_confidence_floor", 70, now=day2 + 1) == 0, env.out
+    assert ad.AdaptiveStore(env.s, PAIR).effective(day2 + 2).min_confidence == 70
+
+
+def test_an_operator_session_sets_the_playbook_only_with_text(env, monkeypatch):
+    """FILE and '-' would let a session read what its Read denials forbid (.env, ~/.claude, credential files)."""
+    monkeypatch.setenv(tune.SESSION_ENV, "1")
+    src = env.data / "reviews" / "pb.md"
+    src.parent.mkdir(parents=True)
+    src.write_text(PLAYBOOK, encoding="utf-8")
+    before = _files(env.root)
+    assert _playbook(env, str(src)) == 3 and "sessions use --text" in env.out
+    assert _playbook(env, "-", stdin=io.StringIO(PLAYBOOK)) == 3 and "sessions use --text" in env.out
+    assert _files(env.root) == before
+    assert _playbook(env, "--text", PLAYBOOK) == 0, env.out
+
+
+MARK = "PRIVATE-MARKER-7f3a"
+
+
+@pytest.mark.parametrize("where,why", [
+    ("data/.env", "secrets file"), ("data/reviews/.env.local", "secrets file"),
+    ("data/reviews/Claude_Credentials.json", "secrets file"), ("home/.claude/.credentials.json", "secrets file"),
+    ("home/.claude/settings.json", "only a file under"), ("outside/pb.md", "only a file under"),
+    ("data/reviews/../../outside/pb.md", "only a file under"), ("//server/share/pb.md", "network"),
+    ("\\\\server\\share\\pb.md", "network"), ("data/reviews", "not a regular file"),
+    ("data/reviews/missing.md", "not found")])
+def test_the_file_form_reads_only_a_plain_draft_under_the_data_root_or_the_checkout(env, where, why):
+    """Refused before anything is opened (the secrets-file names and the profile paths are never created or touched
+    here), exit 3, and nothing of a file's content is echoed."""
+    for p in (env.data / "reviews" / "Claude_Credentials.json", env.root / "outside" / "pb.md"):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"- {MARK} one\n- two", encoding="utf-8")
+    if where.startswith("home/"):
+        source = str(Path.home() / where[len("home/"):])
+    elif where.startswith("/") or where.startswith("\\"):
+        source = where
+    else:
+        source = str(env.root / where)
+    before = _files(env.root)
+    assert _playbook(env, source) == 3, env.out
+    assert env.out.startswith("invalid:") and why in env.out and MARK not in env.out
+    assert _files(env.root) == before
+
+
+def test_the_file_form_accepts_a_file_in_the_checkout(env):
+    assert _playbook(env, str(tune.CHECKOUT / "docs" / "learning_loop.md")) == 2       # read, then linted
+    assert env.out.startswith("refused:") and "too long" in env.out
+
+
+def _link_dir(link: Path, target: Path) -> None:
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))       # no privilege needed, unlike a symlink
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+@pytest.mark.parametrize("to", ["outside", "inside"])
+def test_the_file_form_refuses_a_path_through_a_junction(env, to):
+    target = env.root / "elsewhere" if to == "outside" else env.data / "drafts"
+    target.mkdir(parents=True)
+    (target / "pb.md").write_text(PLAYBOOK, encoding="utf-8")
+    (env.data / "reviews").mkdir(parents=True)
+    _link_dir(env.data / "reviews" / "link", target)
+    assert _playbook(env, str(env.data / "reviews" / "link" / "pb.md")) == 3, env.out
+    assert "symlink or junction" in env.out and env.overlay() is None
+
+
+def test_the_file_form_refuses_a_symlinked_file(env):
+    target = env.data / "drafts" / "pb.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(PLAYBOOK, encoding="utf-8")
+    link = env.data / "reviews" / "pb.md"
+    link.parent.mkdir(parents=True)
+    try:
+        os.symlink(target, link)
+    except OSError:
+        pytest.skip("creating a symlink needs a privilege here")
+    assert _playbook(env, str(link)) == 3 and "symlink or junction" in env.out
+
+
+SECRET = "Zq7-secret-VALUE-for-tests"
+BOT_TOKEN = "123456789:" + "A1b2C3d4E5" * 4                  # a Telegram bot token's shape
+ANTHROPIC_KEY = "sk-ant-" + "x7Y" * 10                        # an API key's shape
+
+
+@pytest.mark.parametrize("case", ["text", "file", "stdin", "hint", "reason", "evidence", "evidence_escaped",
+                                  "review_id", "actor", "revert_reason", "key_shape", "bot_token", "dotenv_value"])
+def test_a_secret_or_a_key_is_never_stored_or_echoed(env, monkeypatch, tmp_path, case):
+    """Every free text tune.py stores ends up in adaptive.yaml / playbook.md / changes.jsonl / tuning_changes, the
+    trader prompt and the dashboard: a configured secret's value (environment or .env) or a key / token shape the
+    log redactor masks is refused (exit 3) and not shown."""
+    monkeypatch.setenv("TS_TEST_API_PASSWORD", SECRET)            # a *PASSWORD name: one of secret_env_names()
+    hidden = SECRET
+    draft = env.data / "reviews" / "notes.md"
+    draft.parent.mkdir(parents=True)
+    draft.write_text(f"- MT5_PASSWORD={SECRET}\n- TELEGRAM_BOT_TOKEN={BOT_TOKEN}", encoding="utf-8")
+    ok = ("--reason", "codify the week", "--evidence-json", EVIDENCE)
+    if case == "text":
+        argv = ("playbook", "--text", PLAYBOOK + f"\n- note {SECRET}", *ok)
+    elif case == "file":
+        argv = ("playbook", str(draft), *ok)
+    elif case == "stdin":
+        argv = ("playbook", "-", *ok)
+    elif case == "hint":
+        argv = ("set", "tp_hint", f"TP1 at {SECRET}", *ok)
+    elif case == "reason":
+        argv = ("set", "min_confidence_floor", "60", "--reason", f"because {SECRET}", "--evidence-json", "{}")
+    elif case == "evidence":
+        argv = ("set", "min_confidence_floor", "60", "--reason", "rrr", "--evidence-json", json.dumps({"n": SECRET}))
+    elif case == "evidence_escaped":                              # the raw argument holds Z…, the value SECRET
+        raw = '{"n": "' + chr(92) + "u%04x" % ord(SECRET[0]) + SECRET[1:] + '"}'
+        assert SECRET not in raw and json.loads(raw)["n"] == SECRET
+        argv = ("set", "min_confidence_floor", "60", "--reason", "rrr", "--evidence-json", raw)
+    elif case == "review_id":
+        argv = ("set", "min_confidence_floor", "60", *ok, "--review-id", SECRET)
+    elif case == "actor":
+        argv = ("--actor", SECRET, "set", "min_confidence_floor", "60", *ok)
+    elif case == "revert_reason":
+        assert env.set("min_confidence_floor", 60) == 0
+        argv = ("revert", "min_confidence_floor", "--reason", f"undo {SECRET}")
+    elif case == "key_shape":
+        hidden = ANTHROPIC_KEY
+        argv = ("playbook", "--text", PLAYBOOK + f"\n- key {ANTHROPIC_KEY}", *ok)
+    elif case == "bot_token":
+        hidden = BOT_TOKEN
+        argv = ("set", "tp_hint", f"TP1 at the swing {BOT_TOKEN}", *ok)
+    else:                                                         # a value only in .env, not in the environment
+        from tradingsystem.ai.providers import base
+        hidden = "abcdEFGH1234zzzz"
+        env_file = tmp_path / "test_env_file"
+        env_file.write_text(f"TELEGRAM_BOT_TOKEN={hidden}\n", encoding="utf-8")
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.setattr(base, "ENV_FILE", env_file)
+        argv = ("playbook", "--text", PLAYBOOK + f"\n- note {hidden}", *ok)
+    before = _files(env.root)
+    assert env.run("--pair", PAIR, *argv, stdin=io.StringIO(draft.read_text(encoding="utf-8"))) == 3, env.out
+    assert env.out.startswith("invalid:") and "secret" in env.out and hidden not in env.out
+    assert _files(env.root) == before
+    assert not any(hidden in r for r in map(json.dumps, ad.read_changes(env.s, PAIR)))
+
+
+def test_list_shows_a_playbook_change_as_hash_and_length_only(env):
+    assert _playbook(env, "--text", PLAYBOOK) == 0, env.out
+    assert ad.read_changes(env.s, PAIR)[-1]["text"] == PLAYBOOK        # the history keeps the text ...
+    assert env.run("--pair", PAIR, "list", "--json", now=NOW + H) == 0
+    assert "Asia range" not in env.out                                  # ... `list` (run by the session) never
+    change = json.loads(env.out)["pairs"][0]["recent_changes"][-1]
+    assert "text" not in change and change["new"] == {"hash": ad.text_hash(PLAYBOOK), "chars": len(PLAYBOOK)}
+    assert env.run("--pair", PAIR, "list", now=NOW + H) == 0
+    assert "Asia range" not in env.out and ad.text_hash(PLAYBOOK) in env.out
+
+
+def test_a_line_separator_in_a_reason_keeps_the_changes_line_whole(env):
+    reason = "fewer\N{LINE SEPARATOR}losers"
+    assert env.run("--pair", PAIR, "set", "min_confidence_floor", "60", "--reason", reason, "--evidence-json",
+                   "{}") == 0, env.out
+    line = ad.read_changes(env.s, PAIR)[-1]
+    assert (line["action"], line["reason"]) == ("set", reason)
+    assert (ad.adaptive_dir(env.s, PAIR) / ad.CHANGES_FILE).read_bytes().isascii()
+    assert env.set("tp_hint", "TP1 at the prior high\N{LINE SEPARATOR}trail the rest", now=NOW + MS_PER_DAY) == 2
+    assert "separators" in env.out
+
+
 # ------------------------------------------------------------------ the path allow-list
 def _files(root: Path) -> dict[str, tuple[int, int]]:
     return {p.relative_to(root).as_posix(): (p.stat().st_mtime_ns, p.stat().st_size)
             for p in root.rglob("*") if p.is_file()}
 
 
-def test_writes_stay_inside_the_pairs_adaptive_dir_and_its_app_db(env, tmp_path):
+def test_writes_stay_inside_the_pairs_adaptive_dir_and_its_app_db(env):
     env.seed(OTHER)
-    src = tmp_path / "pb.md"
+    src = env.data / "reviews" / "pb.md"
+    src.parent.mkdir(parents=True)
     src.write_text(PLAYBOOK, encoding="utf-8")
     before = _files(env.root)
     assert env.set("min_confidence_floor", 60) == 0

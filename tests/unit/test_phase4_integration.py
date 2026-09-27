@@ -17,6 +17,7 @@ from tradingsystem.core import adaptive as ad
 from tradingsystem.core.settings import PathsCfg, load_settings
 from tradingsystem.core.tunables import Tunables, config_tunables, tunables_of
 
+from .test_orchestrator import make  # noqa: F401 — the orchestrator fixture (scripted provider)
 from .test_position_actions import live  # noqa: F401 — the paper executor fixture
 
 
@@ -169,6 +170,76 @@ def test_the_orchestrator_shows_the_playbook_and_records_hashes_attribution_and_
     assert row[0] == "p" * 16 and row[1] == "a" * 16
     assert row[3] in ("bullish", "bearish", "mixed") and json.loads(row[5]) is not None and json.loads(row[6]) is not None
     assert store._con.execute("SELECT count(*) FROM prompt_versions WHERE role='agent_per_pair'").fetchone()[0] == 1
+
+
+class SwitchingTunables:
+    """The overlay as ``tools/tune.py`` (or an expiring entry) may change it while a model call runs."""
+
+    def __init__(self, t):
+        self.now = t
+
+    def get(self, pair, now_ms=None):
+        return self.now
+
+
+ASSESSMENT = {"pair": "XAUUSD", "timeframe": "1h", "bias": "bullish", "confidence": 60, "structure": "HH/HL",
+              "key_levels": [{"price": 4295.76, "kind": "liquidity_high"}]}
+
+
+@pytest.mark.parametrize("mode", ["agent_per_pair", "agent_per_pair_with_risk_reviewer", "agent_per_pair_and_timeframe",
+                                  "agent_per_timeframe", "single_agent_global", "multi_provider_consensus"])
+def test_a_decision_is_attributed_to_the_overlay_its_prompts_were_rendered_with(make, monkeypatch, mode):
+    """A new playbook lands during the first model call: every prompt of the unit (escalation, risk review,
+    coordinator) still shows the overlay the unit started with, and the record keeps that overlay's hashes (None
+    included — no playbook yet) and its liquidity_atr for the setup kinds."""
+    import asyncio
+    from tradingsystem.ai import triggers
+    from tradingsystem.ai.orchestrator import CycleRequest
+    from .test_orchestrator import rec_for
+
+    def answer(schema, user):
+        tn.now = after                                                 # the overlay changed during the call
+        return {"RiskReview": {"verdict": "approve", "issues": [], "final_recommendation": rec_for()},
+                "EscalationReview": {"verdict": "confirm", "issues": [], "confidence": 60,
+                                     "final_recommendation": rec_for()},
+                "TimeframeAssessment": ASSESSMENT, "AssessmentSet": {"assessments": [ASSESSMENT]},
+                "RecommendationSet": {"recommendations": [rec_for()]}}.get(schema) or rec_for()
+
+    o, prov, store = make(mode, answer, consensus=["claude_code", "claude_code"])
+    esc = o.s.ai.escalation.model_copy(update={"enabled": True})
+    o.s = o.s.model_copy(update={"ai": o.s.ai.model_copy(update={"escalation": esc})})
+    before = overlay(o.s, min_confidence=71, liquidity_atr=0.31, adaptive_hash="a" * 16)
+    after = overlay(o.s, playbook="- only fade the Asia high", playbook_hash="b" * 16, adaptive_hash="c" * 16,
+                    min_confidence=77, liquidity_atr=0.99)
+    tn = o.tunables = SwitchingTunables(before)
+    atr = []
+    orig = triggers.scan_setups
+    monkeypatch.setattr(triggers, "scan_setups", lambda *a, **k: (atr.append(k.get("liquidity_atr")), orig(*a, **k))[1])
+    [r] = asyncio.run(o.run_cycle([CycleRequest("XAUUSD", "t", "strong")], as_of=1790334600000))
+    assert prov.calls and tn.now is after
+    for schema, system, user in prov.calls:
+        assert "nothing below 77" not in system and "only fade the Asia high" not in user, schema
+    # a prompt rendered after the change (the escalation, the coordinator after its analysts) shows the snapshot
+    late = {"agent_per_pair_and_timeframe": "Recommendation", "agent_per_timeframe": None,
+            "single_agent_global": None}.get(mode, "EscalationReview")
+    if late:
+        shown = [c[1] for c in prov.calls[1:] if c[0] == late]
+        assert shown and all("nothing below 71" in text for text in shown)
+    rows = store._con.execute("SELECT playbook_hash, adaptive_hash FROM ai_decisions").fetchall()
+    assert rows == [(None, "a" * 16)] and (r.playbook_hash, r.adaptive_hash) == (None, "a" * 16)
+    assert atr == [0.31]
+
+
+def test_a_record_without_a_rendered_prompt_is_attributed_as_of_now(make):
+    """A paused cycle (or a failed snapshot, or a cancelled unit) rendered nothing: the overlay in force now."""
+    import asyncio
+    from tradingsystem.ai.orchestrator import CycleRequest
+    o, prov, store = make("agent_per_pair", lambda schema, user: {})
+    o.tunables = FixedTunables(overlay(o.s, playbook_hash="p" * 16, adaptive_hash="a" * 16))
+    o.effective_mode = lambda: ("paused", "Cost Governor paused AI calls")
+    [r] = asyncio.run(o.run_cycle([CycleRequest("XAUUSD", "t", "strong")], as_of=1790334600000))
+    assert r.status == "budget_blocked" and not prov.calls and r.tunables is None
+    assert (r.playbook_hash, r.adaptive_hash) == ("p" * 16, "a" * 16)
 
 
 def test_the_executor_gate_uses_the_overlay_confidence_floor(live, monkeypatch):

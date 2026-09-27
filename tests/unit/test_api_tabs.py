@@ -206,6 +206,43 @@ def test_adaptive_tab_reports_an_invalid_or_broken_overlay_without_failing(env):
     assert time.monotonic() - t0 < 10 and x["valid"] is False and "aliases" in x["problem"]
 
 
+def test_adaptive_tab_refuses_a_merge_key_bomb_before_parsing_it(env):
+    # merge keys are copied eagerly by safe_load (not shared like list aliases): 10^7 key copies at 7 levels, ~550 bytes
+    lines = ["l0: &l0 {" + ", ".join(f"k{i}: {i}" for i in range(10)) + "}"]
+    lines += [f"l{n}: &l{n} {{<<: [{', '.join([f'*l{n - 1}'] * 10)}]}}" for n in range(1, 8)]
+    a = env.data / "adaptive" / "XAUUSD"
+    a.mkdir(parents=True)
+    (a / "adaptive.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    t0 = time.monotonic()
+    r = env.client.get("/api/adaptive")
+    assert time.monotonic() - t0 < 1 and r.status_code == 200
+    x = r.json()["pairs"]["XAUUSD"]
+    assert x["entries"] == [] and "aliases" in x["yaml_error"]
+    assert x["valid"] is False and "aliases" in x["problem"] and x["effective"] is None
+
+
+def test_adaptive_tab_answers_200_for_deep_nesting_a_bad_date_and_an_oversized_file(env):
+    a = env.data / "adaptive" / "XAUUSD"
+    a.mkdir(parents=True)
+    f = a / "adaptive.yaml"
+    # 3000 levels: RecursionError in the composer, not a YAMLError (one bracket a line keeps the scanner fast)
+    f.write_text("a: " + "[\n" * 3000 + "]\n" * 3000, encoding="utf-8")
+    t0 = time.monotonic()
+    r = env.client.get("/api/adaptive")
+    assert r.status_code == 200 and time.monotonic() - t0 < 5
+    x = r.json()["pairs"]["XAUUSD"]
+    assert x["valid"] is False and x["entries"] == [] and "nested too deeply" in x["yaml_error"]
+    assert r.json()["pairs"]["BTCUSDT"]["valid"] is True                           # the other pairs still answer
+    f.write_text("a: 2001-13-01\n", encoding="utf-8")                              # ValueError from the constructor
+    r = env.client.get("/api/adaptive")
+    assert r.status_code == 200 and r.json()["pairs"]["XAUUSD"]["yaml_error"]
+    assert r.json()["pairs"]["XAUUSD"]["valid"] is False
+    f.write_text("# " + "x" * ad.MAX_YAML_CHARS + "\n", encoding="utf-8")          # the services' own size cap
+    x = env.client.get("/api/adaptive").json()["pairs"]["XAUUSD"]
+    assert x["entries"] == [] and "larger than" in x["yaml_error"]
+    assert x["valid"] is False and "larger than" in x["problem"]
+
+
 def test_tuning_changes_route_reads_the_table_and_changes_jsonl_skipping_bad_lines(env):
     seed(env)
     t = env.client.get("/api/tuning_changes").json()
@@ -223,6 +260,25 @@ def test_proposals_newest_first_and_a_torn_last_line_is_skipped(env):
     seed(env)
     p = env.client.get("/api/proposals").json()
     assert [x["slug"] for x in p] == ["wider-sl", "older"] and p[0]["title"].endswith("<script>")
+
+
+def test_jsonl_routes_split_records_on_newline_only_not_on_unicode_line_separators(env):
+    # older writers kept U+2028 / U+2029 / U+0085 raw (ensure_ascii=False): str.splitlines() cut such a record in two
+    a = env.data / "adaptive" / "XAUUSD"
+    a.mkdir(parents=True)
+    hint = "TP1 at the prior high trail the rest"
+    (a / "changes.jsonl").write_text(
+        json.dumps({"ts": 1, "action": "set", "key": "tp_hint", "new": hint}, ensure_ascii=False) + "\r\n"
+        + json.dumps({"ts": 2, "action": "revert", "reason": "c d \u0085e"}, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    ch = env.client.get("/api/tuning_changes?pair=XAUUSD").json()["changes"]["XAUUSD"]
+    assert [c["ts"] for c in ch] == [2, 1] and ch[1]["new"] == hint and ch[0]["reason"] == "c d \u0085e"
+    env.data.joinpath("shared").mkdir(parents=True, exist_ok=True)
+    (env.data / "shared" / "proposals.jsonl").write_text(
+        json.dumps({"ts": 1, "slug": "one", "title": "a b"}, ensure_ascii=False) + "\n"
+        + json.dumps({"ts": 2, "slug": "two", "title": "c d"}, ensure_ascii=False) + "\n", encoding="utf-8")
+    p = env.client.get("/api/proposals").json()
+    assert [x["slug"] for x in p] == ["two", "one"] and p[1]["title"] == "a b"
 
 
 # ---------------------------------------------------------------------- Reviews
@@ -352,3 +408,20 @@ def test_page_has_the_new_tabs_and_a_cache_buster(env):
         assert f'data-tab="{tab}"' in html and f'id="tab-{tab}"' in html
     assert 'id="kill-on"' in html
     assert env.client.get(f"/static/app.js?v={v}").status_code == 200
+
+
+def test_kill_switch_button_reads_as_an_action_is_outlined_and_disabled_while_a_switch_is_on(env):
+    html = env.client.get("/").text
+    button = html.split('id="kill-on"', 1)[1].split("</button>", 1)[0]
+    assert button.endswith(">Engage kill switch…") and ">Kill switch ON<" not in html     # an action, not a state
+    assert 'class="badge kill hidden"' in html and ">KILL SWITCH ON</span>" in html        # the state stays the badge
+    css = env.client.get("/static/style.css").text
+    rule = lambda sel: css.split(sel + " {", 1)[1].split("}", 1)[0]                    # noqa: E731
+    danger, badge = rule("button.danger"), rule(".badge.kill")
+    assert "background: transparent" in danger and "color: var(--red)" in danger
+    assert "border: 1px solid var(--red)" in danger and "color: white" not in danger
+    assert "background: var(--red)" in badge and "color: white" in badge                # filled: clearly different
+    assert "cursor: not-allowed" in rule("button.danger:disabled")
+    js = env.client.get("/static/app.js").text
+    assert "kb.disabled = killOn;" in js and '"kill switch already engaged"' in js
+    assert 'addEventListener("click", killSwitchNow)' in js and 'method: "POST"' in js    # flow unchanged

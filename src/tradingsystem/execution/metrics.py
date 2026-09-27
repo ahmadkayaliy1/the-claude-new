@@ -3,15 +3,19 @@
 The executor's housekeeping (every 60 s) runs :class:`MetricsJob`, which writes one ``decision_metrics`` row per valid
 decision of this system's pairs:
 
-* **executed trade** — once the venue settled it (``outcome``); again when a later settlement is newer than the row
-  (an idea first scored virtually, executed afterwards from the manual queue). The window runs from the real fill
-  (``outcome_detail.open_ms``; else the virtual fill) to the last leg's real close (``outcome_detail.close_ms``; else
-  the settlement time, flagged in ``detail``).
+* **executed trade** — once the venue settled it (``outcome``) and the 1m bar the last leg closed in has closed and is
+  stored (the exit usually happens at that bar's extreme: without it a TP reached there reads as missed); again when a
+  later settlement is newer than the row (an idea first scored virtually, executed afterwards from the manual queue).
+  The window runs from the real fill (``outcome_detail.open_ms``; else the virtual fill) to the last leg's real close
+  (``outcome_detail.close_ms``; else the settlement time, flagged in ``detail``). A close bar still missing
+  ``MISSING_BARS_GRACE_MS`` after the close → scored on the bars stored, flagged ``detail.partial``.
 * **trade idea not executed** (gate-rejected, expired, not placed, manual mode) — once ``virtual_outcome`` is known, on
   the virtual trade :func:`.executor.evaluate_virtual` scores: the same fill rules and entry, the ORIGINAL stop and
   every target, from the cycle time until the stop is touched, the farthest target is touched or the horizon
   (valid_until + 24 h) passes; the stop is checked before the targets on the same bar (as the virtual outcome).
-* **NO_TRADE** — once ``COUNTERFACTUAL_BARS`` decision-timeframe bars have closed after the cycle time.
+* **NO_TRADE** — once ``COUNTERFACTUAL_BARS`` decision-timeframe bars have closed after the cycle time and the
+  window's last 1m bar is stored; a window whose stored bars end at most ``COVER_TOL_MS`` early (a quiet minute, a
+  session break) counts as complete only ``COVER_TOL_MS`` after its end (before that the bars may still be coming).
 
 Everything is measured on the ANALYSIS instrument's 1m bars in the recommendation's own price space. Columns:
 
@@ -19,7 +23,9 @@ Everything is measured on the ANALYSIS instrument's 1m bars in the recommendatio
   the entry zone, SELL: bottom — :meth:`..ai.contract.Recommendation.rr_computed`), in R of the ORIGINAL stop
   (|worst entry − stop|). Signed excursions: ``mae_r`` ≥ 1 means the stop was reached, ``mfe_r`` < 0 that the price
   never came back to the worst edge after the fill. On the bar that touched the stop (virtual trade) only its adverse
-  extreme counts — the order inside a bar is unknown, read conservatively as for the virtual outcome.
+  extreme counts — the order inside a bar is unknown, read conservatively as for the virtual outcome; a virtual trade
+  stopped on its fill bar takes its fill price (the trigger; MARKET: the entry price) as its favourable extreme, so
+  both excursions are stored (``mae_r`` ≥ 1).
 * ``tp1_hit`` … ``tp3_hit`` — the target was reached inside the window (a fourth target: ``detail.tp4_hit``).
 * ``minutes_to_resolve`` — whole minutes from the cycle time (``recommendation.timestamp``) to the last leg's real
   close (paper leg ``close_ms``; MT5 closing deal time mapped server → UTC) or to the bar that decided the virtual
@@ -79,7 +85,8 @@ NOT_READY_RETRY_MS = 5 * MS_PER_MINUTE     # bars not stored yet / a virtual tra
 ERROR_RETRY_MS = 5 * MS_PER_MINUTE         # a failing decision: retried with backoff …
 ERROR_RETRY_MAX_MS = 6 * MS_PER_HOUR       # … up to this
 MISSING_BARS_GRACE_MS = 6 * MS_PER_HOUR    # bars still missing this long after the window → scored on what exists
-COVER_TOL_MS = 10 * MS_PER_MINUTE          # a window counts as stored when its last bar is at most this early
+COVER_TOL_MS = 10 * MS_PER_MINUTE          # NO_TRADE: this long after its end, a window whose last stored bar is at
+                                           # most this early counts as stored (no bar for a quiet minute / a break)
 BUDGET_S = 5.0                             # wall time of one pass (the executor loop's heartbeat waits for it)
 MAX_EXCLUDE = 500                          # waiting decisions left out by the query itself (SQL parameters)
 _SPREAD = re.compile(r"spread ([\d.]+)")
@@ -193,7 +200,8 @@ class VirtualTrade:
     resolved_ms: int | None = None       # open time of the bar that decided ``outcome``
     fill_ms: int | None = None           # open time of the fill bar
     end_ms: int | None = None            # open time of the bar that ended the trade; None = still running
-    best: float | None = None            # most favourable price from the fill to the end
+    best: float | None = None            # most favourable price from the fill to the end (stopped on the fill bar: the
+                                         # fill price)
     worst: float | None = None           # most adverse price
     tp_hits: list[bool] = field(default_factory=list)
 
@@ -224,6 +232,8 @@ def virtual_trade(lv: Levels, cycle_ms: int, t: np.ndarray, h: np.ndarray, l: np
         if (bl <= lv.stop) if lv.buy else (bh >= lv.stop):
             if vt.outcome is None:
                 vt.outcome, vt.resolved_ms = "sl_first", bt
+            if vt.best is None:               # stopped on the fill bar: the fill price is the only favourable one known
+                vt.best = lv.trigger if lv.trigger is not None else lv.entry
             vt.end_ms = bt
             return vt                         # stopped out: this bar's favourable extreme and targets do not count
         vt.best = favourable if vt.best is None else (max if lv.buy else min)(vt.best, favourable)
@@ -431,9 +441,12 @@ class MetricsJob:
         if end is None:
             end = row.get("outcome_ts") or now
             detail["window_end"] = "settlement time (the venue gave no close time)"
-        b = self._bars(inst, cycle, _floor(end, bar) + bar, now)
-        if (not len(b) or b.t[-1] < _floor(end, bar) - COVER_TOL_MS) and now < end + MISSING_BARS_GRACE_MS:
-            return None
+        last = _floor(end, bar)                  # the bar the last leg closed in: often where the exit price was
+        b = self._bars(inst, cycle, last + bar, now)
+        if not (now >= last + bar and len(b) and b.t[-1] >= last):
+            if now < end + MISSING_BARS_GRACE_MS:
+                return None                      # still forming / not stored yet (a row written now would be final)
+            detail["partial"] = "bars missing - scored on the bars stored"
         start = (od or {}).get("open_ms")
         if start is None:
             start = virtual_trade(lv, cycle, b.t, b.h, b.l).fill_ms or cycle
@@ -463,7 +476,10 @@ class MetricsJob:
         first = -(-cycle // bar) * bar                            # the first whole bar after the cycle time
         b = self._bars(inst, first - bar, end, now)
         win = b.t >= first
-        covered = win.any() and b.t[win][-1] >= end - bar - COVER_TOL_MS
+        last = int(b.t[win][-1]) if win.any() else None
+        # the window's last bar stored; else a short gap at the end only once the bars had time to be ingested
+        covered = last is not None and (last >= end - bar or
+                                        (now >= end + COVER_TOL_MS and last >= end - bar - COVER_TOL_MS))
         if not covered and now < end + MISSING_BARS_GRACE_MS:
             return None
         detail.update(basis="no_trade", window=[first, end], bars=int(win.sum()), timeframe=tf.value)

@@ -382,6 +382,9 @@ normal priority, and as soon as possible after a missed run:
 - **Verify:** `scripts\check_ops.bat`, or `taskschd.msc` → Task Scheduler Library → `TradingSystem*`.
 - **Remove:** `scripts\uninstall_autostart.bat` (removes every `TradingSystem*` task, per-pair ones too). Stop
   the system first with `stop.bat` (or `stop_all.bat`).
+- **The Phase 4 tasks are separate** (`TradingSystemOps-Monitor`, `-ReviewDaily`, `-ReviewWeekly`, §8):
+  `scripts\install_operator_tasks.bat` registers them, `scripts\install_operator_tasks.bat -Uninstall` removes them.
+  `uninstall_autostart.bat` leaves them alone, and `check_ops.bat` lists them too.
 
 ### 6.2 Stop, start and autostart
 
@@ -435,3 +438,58 @@ therefore never causes a restart loop.
 | `manage_mt5_terminal` | Start a missing terminal outside our processes. |
 | `mt5_task` | Name of the MT5 autostart task. |
 | `child_log_max_bytes` / `child_log_backups` | Size and number of the `<service>.stderr.log` files. |
+
+---
+
+## 8. Watching and learning (Phase 4)
+
+Four parts, each with its own page:
+
+| Part | What it does | Runs | Page |
+|---|---|---|---|
+| Notifications | a log line, a Windows toast and (optional, H18) a Telegram message for orders, fills, closes, outcomes, Claude's actions, kill switches, drawdown trips, monitor findings, reviews and proposals | inside every system and tool | `docs\notifications.md` |
+| Monitor | pure Python, no Claude: stale heartbeats, hung MT5 IPC, positions without SL, order bursts, daily loss, equity drops, restart loops, RAM/disk, overdue reviews, slow snapshots; engages kill switches on the hard rules | task `TradingSystemOps-Monitor`, every 15 min | `docs\monitoring.md` |
+| Operator sessions | Claude (Opus) reads a review pack of the last 24 h (daily) or 7 days (weekly) with read-only tools, may tune the bounded per-pair overlay through `tools\tune.py`, and writes proposals for anything else; a diagnosis session when the monitor finds something new | tasks `TradingSystemOps-ReviewDaily` (04:30 UTC) and `-ReviewWeekly` (Sunday 06:00 UTC) | `docs\operator_sessions.md` |
+| Learning loop | decision metrics (MFE/MAE, targets hit, exit reason, costs) for every resolved decision; a per-pair overlay (`data\adaptive\<PAIR>\`) that can only make the system more careful, expires after 14 days and can be reverted; a playbook of desk notes in the trader's prompt | executor every 60 s; `tune.py` only from a session or by hand | `docs\learning_loop.md` |
+
+- **Install the tasks after the merge (H19),** from `C:\the_claude_new`: `scripts\install_operator_tasks.bat -DryRun`,
+  then `scripts\install_operator_tasks.bat`. Then retire the desktop app's 3-hourly monitor task.
+- **The first start after the merge** computes the metrics of every older resolved decision, 20 per minute per
+  system, oldest first (a few hours of background work with a long history; it never delays an order).
+- **Dashboard tabs:** Operator (Claude's notes, position actions and management per pair), Tuning (values in force,
+  expiry, change log, playbook, freeze flag), Proposals, Reviews (the packs and the session results).
+- **The kill-switch button** (dashboard header, "Engage kill switch…", disabled while a switch is on; the red
+  "KILL SWITCH ON" badge is the state) turns the switch **on** only; off stays
+  `scripts\kill_switch_off.bat [PAIR]` on purpose. In a pair's system (`8766`/`8767`/`8768`) it stops that pair only;
+  in the all-pairs system it writes the **global** `data\KILL_SWITCH` and every system stops opening trades. Open
+  trades keep their SL/TP and protective management either way.
+- **The usage gauge** (dashboard status, health report, review pack) compares the last 7 days and 5 hours of Claude
+  tokens in the shared ledger (rows of the `claude_code` providers only — a fallback provider does not count; a level
+  steps down only 5 points below its threshold) with `ai.usage.weekly_token_budget` / `five_hour_token_budget`. It only **observes**
+  (`ai.usage.enforce: false`) until you calibrate the budgets after a week (H21); enforced, level 1 (≥ 70 %) keeps only
+  review and event calls and level 2 (≥ 90 %) only event calls.
+- **Snapshot build time:** the monitor and the health report show `snapshot_build_ms` (median of the last builds) and
+  warn when it stays above 3 s (`monitor.snapshot_build_warn_ms`); the first build after a restart is always slower.
+
+Rollback switches in `config\config.local.yaml` (one block per section, as in §1b), then `scripts\restart_all.bat`;
+the tools (monitor, sessions, `tune.py`) read the config at every run, so for them the next run is enough:
+
+| Problem | Switch |
+|---|---|
+| Tuning does something you do not want | create `data\TUNING_FREEZE` (no restart; `tune.py` refuses every change) and revert: `.venv\Scripts\python.exe tools\tune.py --pair <PAIR> revert <KEY>` |
+| The overlay itself | `adaptive: {enabled: false}` — every system uses the config values, `tune.py` refuses |
+| Too many notifications | `notify: {min_level: warn}`, `toast: false`, or `enabled: false` (log lines only); Telegram: empty the two values in `.env` (`TELEGRAM_BOT_TOKEN=` and `TELEGRAM_CHAT_ID=`), no restart — deleting the lines does not reach a system that never sent a message since its start (docs\notifications.md §4) |
+| The monitor starts diagnosis sessions you do not want | `monitor: {diagnose_enabled: false}` |
+| The monitor itself | `monitor: {enabled: false}`, or `scripts\install_operator_tasks.bat -Uninstall` |
+| The review sessions | `operator: {enabled: false}` (the tasks start and exit at once), or remove the tasks |
+
+Check what is in force with `.venv\Scripts\python.exe -m tradingsystem config` before `restart_all.bat`. A
+`config.local.yaml` the tools cannot read stops the monitor and the sessions with exit code 3 (task "Last Result"),
+a line in `logs\monitor-config-error.log` / `logs\operator-session-config-error.log` and a toast; `check_ops.bat`
+points there.
+
+**Going back to the code before Phase 4:** first run `scripts\install_operator_tasks.bat -Uninstall` (the older code
+has no monitor or session runner), then remove every Phase 4 key from `config\config.local.yaml` (`ai.usage`,
+`adaptive`, `notify`, `monitor`, `operator`, and the same keys under `instances.*.overrides`) — the older code refuses
+unknown keys and no service would start. The databases need nothing: the older code ignores the new tables and
+columns. `data\adaptive\`, `data\reviews\` and `data\shared\{monitor_state,notify_state}.json` can stay.

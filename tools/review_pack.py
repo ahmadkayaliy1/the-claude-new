@@ -7,15 +7,19 @@
 Contents: machine + per-system health (``tools/health_report.py``, imported — the same lines a person reads), per pair
 the funnel (5m screens → triggers by strength → calls by role → answers → ideas → gate by check → placed → outcomes
 broker/virtual → decision-metric means), attribution breakdowns (session / regime / setup kind), position actions and
-rule executions, escalation verdicts, the adaptive values in force with their expiry, the playbook, recent tuning
-changes, the kill switches, log ERROR counts, the last 25 trade ideas, hashes (prompt / library / playbook / adaptive
-/ config / git), git (sha, last commits, dirty flag — so a session needs no git command), AI usage by role with the
-cache-read share and the usage gauge level. The markdown stays under ~40 k characters (≈ 10 k tokens); the JSON holds
-the same data structured.
+rule executions, escalation verdicts, the adaptive values in force with their expiry (validated by the services' own
+reader: an invalid overlay, an expired entry or an unreferenced playbook is never shown as in force), the playbook,
+recent tuning changes, the kill switches, log ERROR counts, the last 25 trade ideas, hashes (prompt / library /
+playbook / adaptive / config / git), git (sha, last commits, dirty flag — so a session needs no git command), AI usage
+by role with the cache-read share, the operator sessions whose usage is unknown (timed out or crashed) and the usage
+gauge level. The markdown stays under ~40 k characters (≈ 10 k tokens); the JSON holds the same data structured.
 
 Everything is read through read-only SQLite URIs and plain file reads: the pack never writes a database, an adaptive
 file or a switch. ``--kind`` only names the files (``adhoc`` when not given, so an ad-hoc pack is never mistaken for
-the scheduled daily review). Exit 0 written/printed, 1 unexpected error, 3 invalid arguments.
+the scheduled daily review). ``--out`` must be ``data/reviews`` or a directory under it (a UNC or ``//`` path is
+refused before it is touched): the operator session's allow-list matches this tool's prefix, and a free directory
+would be a file write the session's diff guard never sees — the session runner imports :func:`build_pack` instead.
+Exit 0 written/printed, 1 unexpected error, 3 invalid arguments.
 """
 from __future__ import annotations
 
@@ -57,6 +61,14 @@ _SCREEN_RE = re.compile(r"^(?P<pair>[A-Z0-9]+) (?P<tf>\w+) close \S+: "
 LOG_TAIL_BYTES = 2_000_000       # per log file for the ERROR counts (health_report reads the same tail)
 SCREEN_LOG_MAX_BYTES = 60_000_000   # engine.jsonl + rotations read for the screen counts, at most
 ADAPTIVE_GROUPS = ("trigger", "pair")   # nested groups of adaptive.yaml (trigger.weak_min, pair.ai_paused_until)
+ADAPTIVE_INVALID = "adaptive.yaml invalid (services keep the last good values; config defaults after a restart): "
+PLAYBOOK_NOT_IN_FORCE = "on disk, NOT in force (expired / unreferenced / hash mismatch)"
+PLAYBOOK_MAX_BYTES = 256 * 1024  # tune.py writes ≤ 1500 characters; a larger playbook.md is reported, not read
+# the ledger ``error`` prefix of an operator session that ended without a result document (time limit, crash): its
+# tokens are unknown, not zero (tools/operator/run_session.py writes it; the usage section counts these rows)
+USAGE_UNKNOWN_PREFIX = "usage_unknown: "
+ENTRY_STATES = {"expired": "EXPIRED", "disabled": "NOT APPLIED: adaptive.enabled is false",
+                "not_applied": "NOT APPLIED: the file is invalid"}
 
 
 class Invalid(Exception):
@@ -93,6 +105,20 @@ ROLE_NOTES = {"decision": " (the trader's cycle calls)", "agent_per_pair": " (tr
 def reviews_dir(s: Settings) -> Path:
     """``data/reviews`` under the data root (shared by every system; honours a scratch root)."""
     return s.paths.data() / "reviews"
+
+
+def checked_out_dir(s: Settings, raw: str) -> Path:
+    """``--out`` confined to :func:`reviews_dir` or a directory under it (raises :class:`Invalid`). A UNC / ``//``
+    path is refused before anything touches it (no outbound SMB connection); the containment is checked lexically
+    first (nothing outside is resolved), then once more resolved (a junction inside that points out)."""
+    head = raw.lstrip()[:2]
+    if len(head) == 2 and all(c in "\\/" for c in head):
+        raise Invalid(f"--out {raw!r}: network (UNC) and device paths are refused")
+    base = Path(os.path.abspath(reviews_dir(s)))
+    out = Path(os.path.abspath(raw))
+    if not out.is_relative_to(base) or not out.resolve().is_relative_to(base.resolve()):
+        raise Invalid(f"--out {raw!r}: must be {base} or a directory under it")
+    return out
 
 
 def ro(db: Path) -> sqlite3.Connection | None:
@@ -228,7 +254,9 @@ def library_hash() -> str | None:
 # --------------------------------------------------------------------------- usage ledger + gauge
 def usage_section(ledger: Path, since: int) -> dict[str, Any]:
     """Calls and tokens of the window by role (and by pair), with the cache-read share. ``input_tokens`` of a row
-    already includes the cache reads and writes (the claude_code convention), ``cached_tokens`` = the reads."""
+    already includes the cache reads and writes (the claude_code convention), ``cached_tokens`` = the reads.
+    ``usage_unknown_sessions``: operator sessions of the window without a result document (their row holds 0 tokens
+    and says ``usage_unknown:`` — the real spend is missing from the totals, not zero)."""
     con = ro(ledger)
     if con is None:
         return {"ledger": str(ledger), "error": "no ledger yet"}
@@ -242,6 +270,9 @@ def usage_section(ledger: Path, since: int) -> dict[str, Any]:
             f"COALESCE(sum(input_tokens),0), COALESCE(sum(cached_tokens),0), COALESCE(sum(output_tokens),0), "
             f"{turns}, {api} FROM ai_usage "
             "WHERE ts>=? GROUP BY r, p ORDER BY r, p", (since,)).fetchall()
+        unknown = con.execute("SELECT count(*) FROM ai_usage WHERE ts>=? AND substr(error, 1, ?)=?",
+                              (since, len(USAGE_UNKNOWN_PREFIX), USAGE_UNKNOWN_PREFIX)).fetchone()[0] \
+            if "error" in have else 0
     except sqlite3.Error as exc:
         return {"ledger": str(ledger), "error": f"unreadable: {exc}"[:200]}
     finally:
@@ -261,7 +292,8 @@ def usage_section(ledger: Path, since: int) -> dict[str, Any]:
     for agg in (*by_role.values(), *by_pair.values(), tot):
         agg["cache_read_share"] = round(agg["cached"] / agg["input"], 3) if agg["input"] else None
         agg["api_equivalent_usd"] = round(agg["api_equivalent_usd"], 2)
-    return {"ledger": str(ledger), "by_role": by_role, "by_pair": by_pair, "total": tot}
+    return {"ledger": str(ledger), "by_role": by_role, "by_pair": by_pair, "total": tot,
+            "usage_unknown_sessions": unknown}
 
 
 def gauge_state(s: Settings, ledger: Path, now: int) -> dict[str, Any]:
@@ -395,44 +427,123 @@ def _text_hash(text: str) -> str:
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
 
 
+def _file_sha(path: Path) -> str:
+    """sha256 (16 hex) of a file, streamed: an oversized file is hashed, never held in memory."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:16]
+
+
+def _safe_iso(ms: Any) -> str | None:
+    """``iso`` of an epoch-ms value from a file nobody validated (None / out-of-range values never raise)."""
+    if not isinstance(ms, int) or isinstance(ms, bool):
+        return None
+    try:
+        return iso(ms)
+    except (OverflowError, OSError, ValueError):
+        return str(ms)
+
+
+def _entry(key: str, value: Any, set_ms: Any, expires_ms: Any, reason: Any, review_id: Any, window_hours: Any,
+           state: str) -> dict[str, Any]:
+    """One overlay entry for the pack. ``state``: ``in_force``, ``expired``, ``disabled`` (``adaptive.enabled``
+    false) or ``not_applied`` (the services refuse the file) — only ``in_force`` is applied by the services."""
+    if key == "pair.ai_paused_until":
+        value = _safe_iso(value) or value
+    if value is not None and not isinstance(value, (bool, int, float)):
+        value = _short(value, 160)
+    return {"key": str(key), "value": value, "set": _safe_iso(set_ms), "expires": _safe_iso(expires_ms),
+            "in_force": state == "in_force", "state": state, "reason": _short(reason, 160),
+            "review_id": None if review_id is None else _short(review_id, 120),
+            "window_hours": window_hours if isinstance(window_hours, int) else None}
+
+
+def _raw_entries(text: str, ad: types.ModuleType) -> list[dict[str, Any]]:
+    """What an INVALID ``adaptive.yaml`` holds, listed as NOT applied. Parsed only behind the services' own size
+    and alias guard: a merge-key bomb or deep nesting must neither stall nor crash the pack (nothing is listed
+    then — the error line says why)."""
+    if len(text) > ad.MAX_YAML_CHARS:
+        return []
+    try:
+        if ad.has_alias(text):
+            return []
+        doc = yaml.safe_load(text)
+    except (yaml.YAMLError, RecursionError, ValueError):
+        return []
+    if not isinstance(doc, dict):
+        return []
+    return [_entry(k, e.get("value"), e.get("set_ms"), e.get("expires_ms"), e.get("reason"), e.get("review_id"),
+                   e.get("window_hours"), "not_applied")
+            for k, e in sorted(_flatten_entries(doc).items(), key=lambda kv: str(kv[0]))]
+
+
 def adaptive_info(s: Settings, pair: str, now: int) -> dict[str, Any]:
-    """``data/adaptive/<PAIR>/``: the entries (in force / expired), the playbook and the last change lines. Read as
-    plain files — the pack must work whatever state the overlay module or the file is in (an invalid file is
-    reported, not repaired)."""
+    """``data/adaptive/<PAIR>/`` as the services see it: the overlay goes through their own side-effect-free
+    reader (``core.adaptive.read_files``: size, alias, duplicate-key, schema, expiry-bound and playbook-hash checks)
+    and ``compute_effective``. An entry is in force only while it is live and ``adaptive.enabled`` is on; an invalid
+    file is reported (the services keep their last good values — the config defaults after a restart) and its
+    entries are listed as NOT applied. playbook.md is the playbook in force only when the effective playbook is
+    non-empty; otherwise it is labelled :data:`PLAYBOOK_NOT_IN_FORCE`. No lock, no ``expired`` line, no database
+    write — the pack must work whatever state the overlay module or the files are in."""
     d = s.paths.data() / "adaptive" / pair
-    out: dict[str, Any] = {"dir": str(d), "entries": [], "playbook": None, "changes": [], "file_hash": None}
+    out: dict[str, Any] = {"dir": str(d), "enabled": s.adaptive.enabled, "entries": [], "effective": None,
+                           "playbook": None, "changes": [], "file_hash": None}
     y = d / "adaptive.yaml"
+    eff = None
+    try:
+        from tradingsystem.core import adaptive as ad
+    except Exception as exc:  # noqa: BLE001 — the pack reports what it can
+        ad = None
+        out["error"] = f"adaptive validator unavailable ({type(exc).__name__}) — nothing is shown as in force"
+    if ad is not None:
+        try:
+            if y.exists() and y.stat().st_size > 4 * ad.MAX_YAML_CHARS:     # ≥ 1 byte per character: never read
+                raise ValueError(f"adaptive.yaml is larger than {ad.MAX_YAML_CHARS} characters")
+            cfg, playbook = ad.read_files(s, pair, d)
+            eff = ad.compute_effective(s, cfg, playbook, now)
+            live, _ = ad.active_entries(cfg, now)
+            for key, e in sorted(cfg.entries().items()):
+                state = "expired" if key not in live else "in_force" if s.adaptive.enabled else "disabled"
+                out["entries"].append(_entry(key, e.value, e.set_ms, e.expires_ms, e.reason, e.review_id,
+                                             e.window_hours, state))
+            out["effective"] = eff.as_detail()
+        except (ValueError, yaml.YAMLError, RecursionError) as exc:
+            eff, out["entries"] = None, []
+            out["error"] = (ADAPTIVE_INVALID + " ".join(str(exc).split()))[:400]
+        except OSError as exc:
+            eff, out["entries"] = None, []
+            out["error"] = f"adaptive files unreadable: {exc}"[:300]
+        except Exception as exc:  # noqa: BLE001 — a validator bug is a problem line, never a failed pack
+            eff, out["entries"] = None, []
+            out["error"] = (f"adaptive validation failed ({type(exc).__name__}: {exc}) — nothing is shown as in "
+                            "force")[:300]
     if y.exists():
         try:
-            raw = y.read_bytes()
-            out["file_hash"] = hashlib.sha256(raw).hexdigest()[:16]
-            doc = yaml.safe_load(raw.decode("utf-8", "replace")) or {}
-            if not isinstance(doc, dict):
-                raise ValueError("not a mapping")
-            for key, e in sorted(_flatten_entries(doc).items()):
-                exp = e.get("expires_ms")
-                value = e.get("value")
-                if key == "pair.ai_paused_until" and isinstance(value, int):
-                    value = iso(value)
-                out["entries"].append({
-                    "key": key, "value": value,
-                    "set": iso(e.get("set_ms")) if isinstance(e.get("set_ms"), int) else None,
-                    "expires": iso(exp) if isinstance(exp, int) else None,
-                    "in_force": isinstance(exp, int) and exp > now, "reason": _short(e.get("reason"), 160),
-                    "review_id": e.get("review_id"), "window_hours": e.get("window_hours")})
-        except (OSError, ValueError, yaml.YAMLError) as exc:
-            out["error"] = f"adaptive.yaml unreadable: {exc}"[:200]
-    pb = d / "playbook.md"
-    if pb.exists():
-        try:
-            text = pb.read_text(encoding="utf-8", errors="replace")
-            out["playbook"] = {"hash": _text_hash(text), "chars": len(text.strip()), "text": text.strip()[:1600]}
+            out["file_hash"] = _file_sha(y)
+            if eff is None and ad is not None and y.stat().st_size <= 4 * ad.MAX_YAML_CHARS:
+                out["entries"] = _raw_entries(y.read_bytes().decode("utf-8", "replace"), ad)
         except OSError as exc:
-            out["playbook"] = {"error": str(exc)[:120]}
+            out.setdefault("error", f"adaptive.yaml unreadable: {exc}"[:300])
+    pbf = d / "playbook.md"
+    if eff is not None and eff.playbook:
+        out["playbook"] = {"in_force": True, "hash": eff.playbook_hash, "chars": len(eff.playbook),
+                           "text": eff.playbook[:1600]}
+    elif pbf.exists():
+        try:
+            if pbf.stat().st_size > PLAYBOOK_MAX_BYTES:
+                out["playbook"] = {"in_force": False, "error": f"larger than {PLAYBOOK_MAX_BYTES} bytes — not read"}
+            else:
+                text = pbf.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").strip()
+                out["playbook"] = {"in_force": False, "state": PLAYBOOK_NOT_IN_FORCE, "hash": _text_hash(text),
+                                   "chars": len(text), "text": text[:1600]}
+        except OSError as exc:
+            out["playbook"] = {"in_force": False, "error": str(exc)[:120]}
     ch = d / "changes.jsonl"
     if ch.exists():
         try:
-            lines = ch.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = ch.read_text(encoding="utf-8", errors="replace").split("\n")    # not splitlines(): U+2028
         except OSError:
             lines = []
         recs = []
@@ -564,7 +675,7 @@ def _funnel(decs: list[dict[str, Any]], metrics: dict[str, dict[str, Any]]) -> d
     virt = collections.Counter(d.get("virtual_outcome") for d in ideas if d.get("virtual_outcome"))
     resolved = [d for d in ideas if d.get("virtual_outcome") in ("tp1_first", "sl_first")]
     ms = [metrics[d["id"]] for d in decs if d["id"] in metrics]
-    ms_ideas = [m for m in ms if m.get("mfe_r") is not None]
+    ms_ideas = [m for m in ms if m.get("mae_r") is not None]            # a fill-bar stop-out has mae_r, mfe_r 0
     exit_reasons = collections.Counter(m.get("exit_reason") for m in ms if m.get("exit_reason"))
     nt = [m.get("no_trade_counterfactual_atr") for m in ms if m.get("no_trade_counterfactual_atr") is not None]
     return {
@@ -707,7 +818,7 @@ def _kill_switch(s: Settings, pair: str | None) -> dict[str, Any]:
 def _jsonl_tail(path: Path, n: int) -> list[dict[str, Any]]:
     """The last ``n`` records of an append-only jsonl; a torn or bad line is skipped."""
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").split("\n")      # not splitlines(): U+2028
     except OSError:
         return []
     out = []
@@ -919,6 +1030,9 @@ def _render(d: dict[str, Any], n_ideas: int, n_health: int, n_rows: int) -> str:
         for r, x in sorted(u["by_role"].items()):
             p(f"- role {r}{ROLE_NOTES.get(r, '')}: {x['calls']} calls ({x['ok']} ok), in {x['input']:,} (cache-read "
               f"{_num(x['cache_read_share'])}), out {x['output']:,}")
+        if u.get("usage_unknown_sessions"):
+            p(f"!! {u['usage_unknown_sessions']} operator session(s) with unknown usage (timed out or crashed) — "
+              "their tokens are missing from these totals, not zero")
     gz = u.get("gauge") or {}
     if gz.get("error"):
         p(f"usage gauge: {gz['error']}")
@@ -1006,15 +1120,27 @@ def _render(d: dict[str, Any], n_ideas: int, n_health: int, n_rows: int) -> str:
             p(f"!! adaptive: {ad['error']}")
         ents = ad.get("entries") or []
         p("adaptive overlay: " + ("; ".join(f"{e['key']}={e['value']} ("
-                                             + (f"until {e['expires']}" if e["in_force"] else "EXPIRED")
+                                             + (f"until {e['expires']}" if e["in_force"]
+                                                else ENTRY_STATES.get(e.get("state"), "NOT APPLIED"))
                                              + f"; {e['reason']})" for e in ents)
-                                   or "nothing set (config values in force)"))
+                                   or ("nothing listed (see the line above)" if ad.get("error")
+                                       else "nothing set (config values in force)")))
+        eff = ad.get("effective") or {}
+        if eff and ents:
+            p("effective values (config + overlay in force): " + ", ".join(
+                f"{k} {_short(v, 120) if isinstance(v, str) else _num(v)}" for k, v in eff.items()
+                if v is not None and not isinstance(v, (dict, list)) and k not in ("adaptive_hash", "playbook_hash")))
         pb = ad.get("playbook")
-        if pb and pb.get("text"):
-            p(f"playbook ({pb['chars']} chars, hash {pb['hash']}):")
+        if pb and pb.get("in_force") and pb.get("text"):
+            p(f"playbook in force ({pb['chars']} chars, hash {pb['hash']}):")
             p("```")
             p(pb["text"])
             p("```")
+        elif pb and pb.get("error"):
+            p(f"playbook.md: {pb['error']} — NOT in force")
+        elif pb:
+            p(f"playbook.md {PLAYBOOK_NOT_IN_FORCE} ({pb.get('chars')} chars, hash {pb.get('hash')}): the trader's "
+              "prompt does not carry it (the text is in the pack JSON)")
         else:
             p("playbook: none")
         for c in (ad.get("changes") or [])[-n_rows:]:
@@ -1074,13 +1200,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hours", type=float, default=24.0)
     ap.add_argument("--kind", choices=KINDS, default="adhoc", help="names the files (default adhoc)")
     ap.add_argument("--pair", help="only this pair")
-    ap.add_argument("--out", help="directory (default data/reviews under the data root)")
+    ap.add_argument("--out", help="data/reviews under the data root (the default) or a directory under it")
     ap.add_argument("--print", dest="print_only", action="store_true", help="print the markdown, write nothing")
     try:
         a = ap.parse_args(argv)
         s = load_settings()
-        pack = build_pack(s, hours=a.hours, kind=a.kind, pair=a.pair, out_dir=Path(a.out) if a.out else None,
-                          write=not a.print_only)
+        out_dir = checked_out_dir(s, a.out) if a.out else None       # before anything is built or written
+        pack = build_pack(s, hours=a.hours, kind=a.kind, pair=a.pair, out_dir=out_dir, write=not a.print_only)
     except Invalid as exc:
         print(f"invalid: {exc}")
         return EXIT_INVALID

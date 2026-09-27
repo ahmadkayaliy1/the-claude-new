@@ -5,6 +5,7 @@ notifications; a diagnosis session is never started for real (the spawn is refus
 """
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import importlib.util
 import json
@@ -18,7 +19,9 @@ import pytest
 from tradingsystem.core.killswitch import read_reason
 from tradingsystem.core.settings import INSTANCE_ENV, load_settings
 from tradingsystem.core.timeutil import MS_PER_HOUR, MS_PER_MINUTE, iso
+from tradingsystem.core.filelock import FileLock, locks_dir
 from tradingsystem.execution import drawdown
+from tradingsystem.execution.exposure import aggregate, leg
 from tradingsystem.ingest.common.appdb import AppDB
 from tradingsystem.supervisor import control, winops
 from tradingsystem.supervisor import supervisor as sv
@@ -232,6 +235,36 @@ def test_a_smaller_equity_drop_only_warns(mon, world):
     assert switches(world["data"]) == set()
 
 
+def test_a_paper_or_unidentified_account_drop_never_engages_the_global_switch(mon, world):
+    seed(world["BTCUSDT"], status=fresh(equity=100.0))                          # paper → paper:BTCUSDT
+    seed(world["ETHUSDT"], status=fresh(equity=100.0, mode="mt5"))              # no account_drawdown → mt5:mt5:?
+    assert run(mon, world, ["BTCUSDT", "ETHUSDT"]).findings == []
+    seed(world["BTCUSDT"], status=fresh(T0 + 15 * MIN, equity=80.0))
+    seed(world["ETHUSDT"], status=fresh(T0 + 15 * MIN, equity=80.0, mode="mt5"))
+    res = run(mon, world, ["BTCUSDT", "ETHUSDT"], at=T0 + 15 * MIN)
+    got = {f.key.rsplit(":", 1)[0]: f for f in res.problems}
+    assert set(got) == {"equity_drop:paper:BTCUSDT", "equity_drop:mt5:mt5:?"}
+    assert all(f.level == "warn" and f.switch is None and "but no switch" in f.text for f in got.values())
+    assert "paper account" in got["equity_drop:paper:BTCUSDT"].text
+    assert "not identified" in got["equity_drop:mt5:mt5:?"].text
+    assert switches(world["data"]) == set()
+
+
+def test_an_equity_baseline_older_than_the_runs_only_warns_unless_the_machine_slept(mon, world):
+    acct = {"account": "mt5:Demo:7", "peak": 100.0, "drawdown_pct": 0.0, "tripped": None}
+    s = world["BTCUSDT"]
+    seed(s, status=fresh(equity=100.0, account_drawdown=acct, mode="mt5"))
+    run(mon, world, ["BTCUSDT"])
+    later = T0 + 2 * MS_PER_HOUR                                     # no run in between (the task was not running)
+    seed(s, status=fresh(later, equity=85.0, account_drawdown=acct, mode="mt5"))
+    (f,) = run(mon, world, ["BTCUSDT"], at=later).problems
+    assert (f.level, f.switch) == ("warn", None) and "2.0 h old" in f.text and switches(world["data"]) == set()
+    mon.clock["awake_lag_s"] = 90 * 60.0                             # this time the machine slept 90 of 120 min
+    seed(s, status=fresh(later + 2 * MS_PER_HOUR, equity=70.0, account_drawdown=acct, mode="mt5"))
+    (f,) = run(mon, world, ["BTCUSDT"], at=later + 2 * MS_PER_HOUR).problems
+    assert (f.level, f.switch) == ("critical", "*") and switches(world["data"]) == {"KILL_SWITCH"}
+
+
 # ------------------------------------------------------------------ dedupe across runs
 def test_findings_are_deduplicated_across_runs_and_reminded_later(mon, world):
     s = world["BTCUSDT"]
@@ -248,10 +281,121 @@ def test_findings_are_deduplicated_across_runs_and_reminded_later(mon, world):
     run(mon, world, ["BTCUSDT"], at=T0 + 7 * MS_PER_HOUR)                                 # warn reminder after 6 h
     assert len(mon.sent) == 2
     seed(s, status=fresh(T0 + 8 * MS_PER_HOUR))
-    assert run(mon, world, ["BTCUSDT"], at=T0 + 8 * MS_PER_HOUR).findings == []          # recovered: forgotten
+    assert run(mon, world, ["BTCUSDT"], at=T0 + 8 * MS_PER_HOUR).findings == []          # recovered: cooling down
     stale_at(T0 + 9 * MS_PER_HOUR)
-    run(mon, world, ["BTCUSDT"], at=T0 + 9 * MS_PER_HOUR)                                 # a new episode: sent again
-    assert len(mon.sent) == 3
+    res = run(mon, world, ["BTCUSDT"], at=T0 + 9 * MS_PER_HOUR)                           # back within 6 h: persists
+    assert len(mon.sent) == 2 and not res.problems[0].new
+    seed(s, status=fresh(T0 + 10 * MS_PER_HOUR))
+    run(mon, world, ["BTCUSDT"], at=T0 + 10 * MS_PER_HOUR)
+    stale_at(T0 + 16 * MS_PER_HOUR)
+    res = run(mon, world, ["BTCUSDT"], at=T0 + 16 * MS_PER_HOUR)                          # 7 h after: a new episode
+    assert len(mon.sent) == 3 and res.problems[0].new
+
+
+def test_a_flapping_finding_is_not_new_each_time_it_returns_within_the_cool_down(mon, world, monkeypatch, tmp_path):
+    script = tmp_path / "run_session.py"
+    script.write_text("# stand-in\n", encoding="utf-8")
+    monkeypatch.setattr(mon, "RUN_SESSION", script)                  # _spawn refuses: no diagnosis may start
+    ram = {"mb": 250.0}
+    monkeypatch.setattr(mon, "_free_ram_mb", lambda: ram["mb"])
+    for i in range(8):                                               # below / above the 300 MB line, every 15 min
+        at = T0 + i * 15 * MIN
+        ram["mb"] = 250.0 if i % 2 == 0 else 400.0
+        seed(world["BTCUSDT"], status=fresh(at))
+        res = run(mon, world, ["BTCUSDT"], at=at, diagnose=i > 0)
+    assert [k for _, k, _, _ in mon.sent] == ["monitor:ram"]          # sent once, not every 30 min
+    ram["mb"] = 250.0
+    seed(world["BTCUSDT"], status=fresh(T0 + 8 * 15 * MIN))
+    res = run(mon, world, ["BTCUSDT"], at=T0 + 8 * 15 * MIN, diagnose=True)
+    assert not res.problems[0].new and res.diagnose["why"] == "no new warning"
+    st = json.loads((world["data"] / "shared" / "monitor_state.json").read_text(encoding="utf-8"))
+    assert "cleared_ms" not in st["alerts"]["ram"]
+
+
+def test_a_cleared_alert_that_returns_at_a_higher_level_is_sent(mon, world, monkeypatch):
+    shared = world["data"] / "shared"
+    shared.mkdir(parents=True)
+    (shared / "monitor_state.json").write_text(json.dumps({"alerts": {"ram": {
+        "level": "info", "first_ms": T0 - 60 * MIN, "last_ms": T0 - 30 * MIN, "notified_ms": T0 - 60 * MIN,
+        "cleared_ms": T0 - 15 * MIN, "title": "Low free RAM"}}}), encoding="utf-8")
+    seed(world["BTCUSDT"], status=fresh())
+    monkeypatch.setattr(mon, "_free_ram_mb", lambda: 120.0)
+    res = run(mon, world, ["BTCUSDT"])
+    assert [f.key for f in res.problems] == ["ram"] and res.problems[0].new and len(mon.sent) == 1
+
+
+# ------------------------------------------------------------------ undelivered notifications are re-armed
+def result(toast="pending", telegram="pending", **kw) -> dict:
+    """A core.notify result record as the worker leaves it (done once no sink is pending)."""
+    return {"toast": toast, "telegram": telegram, "done": "pending" not in (toast, telegram), "deduped": False, **kw}
+
+
+def test_undelivered_means_no_sink_got_it_through_and_config_log_only_counts_as_delivered(mon):
+    lost = mon._undelivered
+    assert lost(result()) and lost(result("failed: timed out after 10 s", "failed: ConnectTimeout"))
+    assert lost(result("pending", "failed: HTTP 502")) and lost(result("queue full: log only", "queue full: log only"))
+    assert lost(result("failed: exit 1", "skipped (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set)"))
+    assert not lost(result("shown", "failed: ConnectTimeout")) and not lost(result("pending", "sent"))
+    assert not lost(result("off (notify.toast: false)", "skipped (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set)"))
+    assert not lost(result(None, None, why="log only (TS_NOTIFY_DISABLE)"))                 # log only by config
+    assert not lost(None) and not lost(result("rate limit 20/hour: log only", "rate limit 20/hour: log only"))
+    dup = result("deduped (key sent within 30 min)", "deduped (key sent within 30 min)", deduped=True)
+    assert not lost(dup) and lost(dup, retry=True)          # a re-armed alert's earlier attempt claimed the key
+
+
+def test_an_undelivered_notification_is_re_armed_and_sent_by_the_next_run(mon, world, monkeypatch):
+    data = world["data"]
+    outcome = {"r": result}
+    monkeypatch.setattr(mon, "_notify", lambda s, level, title, text, *, key, pair: (
+        mon.sent.append((level, key, title, text)), outcome["r"]())[1])
+    budgets = []
+    monkeypatch.setattr(mon, "_flush_notify", lambda timeout_s=15.0: budgets.append(timeout_s))
+    shared = data / "shared"
+    shared.mkdir(parents=True)
+    trip = T0 - 30 * MIN
+    (shared / drawdown.FILE).write_text(json.dumps({"mt5:Demo:1": {"peak": 110.0, "tripped_ms": trip}}),
+                                        encoding="utf-8")
+    acct = {"account": "mt5:Demo:1", "peak": 110.0, "drawdown_pct": 12.7, "tripped": iso(trip)}
+    orders = [(T0 - i * MIN, "executor", "order", f"mt5 BTCUSDT {i:08d}: legs 1") for i in range(1, 5)]
+    rows = fresh(account_drawdown=acct, mode="mt5")
+    rows[1] = ("engine", "live", T0 - 20 * MIN, None, {})
+    seed(world["BTCUSDT"], status=rows, events=orders)
+    res = run(mon, world, ["BTCUSDT"])                    # the network is black-holed: nothing arrives
+    keys = {f.key.split(":")[0]: f for f in res.problems}
+    assert set(keys) == {"stale", "burst", "drawdown"}
+    assert [lv for lv, *_ in mon.sent] == ["critical", "critical", "warn"]        # criticals are queued first
+    assert budgets == [min(15 + 12 * 3, 240)]                                     # the budget grows with the queue
+    assert not any(f.notified for f in res.problems) and all(f.new for f in res.problems)
+    st = json.loads((shared / "monitor_state.json").read_text(encoding="utf-8"))
+    assert all(st["alerts"][f.key]["unsent"] and st["alerts"][f.key]["notified_ms"] == 0 for f in res.problems)
+    assert st["once"] == {} and st["burst_seen"] == {}           # the one-shot trip and the burst are not "done"
+    assert switches(data) == {"instances/BTCUSDT/KILL_SWITCH"}
+    # the next run: the same three are sent again (the timestamped burst key is detected again), now delivered
+    outcome["r"] = lambda: result("shown", "sent")
+    rows = fresh(T0 + 15 * MIN, account_drawdown=acct, mode="mt5")
+    rows[1] = ("engine", "live", T0 - 20 * MIN, None, {})
+    seed(world["BTCUSDT"], status=rows)
+    res = run(mon, world, ["BTCUSDT"], at=T0 + 15 * MIN)
+    assert sorted(k for _, k, _, _ in mon.sent[3:]) == sorted(f"monitor:{f.key}" for f in res.problems)
+    assert len(mon.sent) == 6 and all(f.notified for f in res.problems)
+    assert budgets == [51]                                        # delivered at once: no second wait
+    st = json.loads((shared / "monitor_state.json").read_text(encoding="utf-8"))
+    assert not any(a.get("unsent") for a in st["alerts"].values()) and list(st["once"]) == [keys["drawdown"].key]
+    rows = fresh(T0 + 30 * MIN, account_drawdown=acct, mode="mt5")
+    rows[1] = ("engine", "live", T0 - 20 * MIN, None, {})
+    seed(world["BTCUSDT"], status=rows)
+    run(mon, world, ["BTCUSDT"], at=T0 + 30 * MIN)                # delivered: nothing is sent again
+    assert len(mon.sent) == 6
+
+
+def test_a_notification_delivered_by_one_sink_is_not_re_armed(mon, world, monkeypatch):
+    monkeypatch.setattr(mon, "_notify", lambda s, level, title, text, *, key, pair: (
+        mon.sent.append((level, key, title, text)), result("shown", "failed: ConnectTimeout"))[1])
+    stale_engine(world["BTCUSDT"])
+    run(mon, world, ["BTCUSDT"])
+    st = json.loads((world["data"] / "shared" / "monitor_state.json").read_text(encoding="utf-8"))
+    assert st["alerts"]["stale:BTCUSDT:engine"]["notified_ms"] == T0 and "unsent" not in st["alerts"][
+        "stale:BTCUSDT:engine"]
 
 
 # ------------------------------------------------------------------ follow-up (b): snapshot build on two runs
@@ -335,6 +479,71 @@ def test_the_diagnosis_is_suppressed_by_the_env_the_config_and_without_new_warni
     assert not res.diagnose["launched"]
 
 
+def test_the_state_is_saved_before_the_diagnosis_starts(mon, world, monkeypatch, tmp_path):
+    script = tmp_path / "run_session.py"
+    script.write_text("# stand-in\n", encoding="utf-8")
+    monkeypatch.setattr(mon, "RUN_SESSION", script)
+    path = world["data"] / "shared" / "monitor_state.json"
+    seen = []
+
+    def spawn(cmd, cwd):                                             # noqa: ANN001
+        seen.append(json.loads(path.read_text(encoding="utf-8")))
+        return type("P", (), {"pid": 77})()
+
+    monkeypatch.setattr(mon, "_spawn", spawn)
+    stale_engine(world["BTCUSDT"])
+    res = run(mon, world, ["BTCUSDT"], diagnose=True)
+    assert res.diagnose["launched"] and seen[0]["last_diagnose_ms"] == T0
+    assert seen[0]["alerts"]["stale:BTCUSDT:engine"]["notified_ms"] == T0
+    assert json.loads(path.read_text(encoding="utf-8"))["diagnose"]["pid"] == 77
+
+
+def test_a_state_that_cannot_be_saved_starts_no_diagnosis_and_sends_a_critical(mon, world, monkeypatch, tmp_path):
+    script = tmp_path / "run_session.py"
+    script.write_text("# stand-in\n", encoding="utf-8")
+    monkeypatch.setattr(mon, "RUN_SESSION", script)                  # _spawn refuses: it must not be called
+
+    def full(path, doc):                                             # noqa: ANN001
+        raise PermissionError(13, "read-only file")
+
+    monkeypatch.setattr(mon, "save_state", full)
+    stale_engine(world["BTCUSDT"])
+    res = run(mon, world, ["BTCUSDT"], diagnose=True)
+    assert res.diagnose == {"launched": False, "why": "state not persisted"}
+    assert res.state_error and res.exit_code == 1
+    crit = [x for x in mon.sent if x[1] == "monitor:state_error"]
+    assert [x[0] for x in crit] == ["critical"] and "could not be written" in crit[0][3]
+
+
+def test_no_diagnosis_while_a_review_session_holds_the_lock_and_the_next_run_retries(mon, world, monkeypatch,
+                                                                                     tmp_path):
+    script = tmp_path / "run_session.py"
+    script.write_text("# stand-in\n", encoding="utf-8")
+    monkeypatch.setattr(mon, "RUN_SESSION", script)
+    review = FileLock(locks_dir(world["base"]) / mon.SESSION_LOCK)   # the daily review runs
+    assert review.acquire(timeout=0)
+    try:
+        stale_engine(world["BTCUSDT"])
+        res = run(mon, world, ["BTCUSDT"], diagnose=True)            # _spawn refuses: it must not be called
+    finally:
+        review.release()
+    assert res.diagnose == {"launched": False, "why": "a review session is running"}
+    st = json.loads((world["data"] / "shared" / "monitor_state.json").read_text(encoding="utf-8"))
+    assert st["last_diagnose_ms"] is None and st["diagnose_wanted"]["findings"] == ["stale:BTCUSDT:engine"]
+    calls = []
+    monkeypatch.setattr(mon, "_spawn", lambda cmd, cwd: calls.append(cmd) or type("P", (), {"pid": 5})())
+    stale_engine(world["BTCUSDT"], T0 + 15 * MIN)                    # the same warning, no longer new
+    res = run(mon, world, ["BTCUSDT"], at=T0 + 15 * MIN, diagnose=True)
+    assert res.diagnose["launched"] and "stale heartbeat" in calls[0][5] and not res.problems[0].new
+    st = json.loads((world["data"] / "shared" / "monitor_state.json").read_text(encoding="utf-8"))
+    assert st["last_diagnose_ms"] == T0 + 15 * MIN and "diagnose_wanted" not in st
+
+
+def test_the_session_lock_is_the_one_run_session_takes(mon):
+    text = (ROOT / "tools" / "operator" / "run_session.py").read_text(encoding="utf-8")
+    assert f'LOCK_NAME = "{mon.SESSION_LOCK}"' in text
+
+
 # ------------------------------------------------------------------ executor rules
 def test_a_position_without_sl_and_the_daily_loss_limit(mon, world):
     data = world["data"]
@@ -357,6 +566,33 @@ def test_a_position_without_sl_and_the_daily_loss_limit(mon, world):
     seed(world["ETHUSDT"], status=fresh(T0 + 30 * MIN, today_pnl_pct=-8.5))
     (warn,) = [f for f in run(mon, world, ["ETHUSDT"], at=T0 + 30 * MIN).problems]
     assert warn.level == "warn" and warn.switch is None and "near the limit" in warn.title
+
+
+def test_a_second_leg_without_sl_is_a_position_without_sl(mon, world):
+    def legs(decision: str, sl2):                                    # noqa: ANN001 — TP1 / TP2 legs of one decision
+        return [leg(pair="BTCUSDT", decision=decision, kind="position", side="BUY", order_type="MARKET",
+                    volume=0.01, price=60000.0, sl=59000.0, tp=61000.0),
+                leg(pair="BTCUSDT", decision=decision, kind="position", side="BUY", order_type="MARKET",
+                    volume=0.01, price=60000.0, sl=sl2, tp=62000.0)]
+    rows = aggregate(legs("a" * 20, None) + legs("b" * 20, 59000.0))
+    by = {r["decision"]: r for r in rows}
+    assert by["aaaaaaaa"]["sl"] == 59000.0 and by["aaaaaaaa"]["sl_missing"] is True   # 'sl' stays the first leg's
+    assert by["bbbbbbbb"]["sl_missing"] is False
+    seed(world["BTCUSDT"], status=fresh(exposure=rows))
+    (f,) = run(mon, world, ["BTCUSDT"]).problems
+    assert f.key == "nosl:BTCUSDT:BTCUSDT:aaaaaaaa" and f.level == "critical" and "a leg without a stop-loss" in f.text
+
+
+def test_the_daily_loss_warning_needs_a_band_below_the_limit(mon, world):
+    s = world["ETHUSDT"]
+    s = s.model_copy(update={"risk": s.risk.model_copy(update={"max_daily_loss_pct": 2.0}),
+                             "monitor": s.monitor.model_copy(update={"daily_loss_warn_margin_pct": 2.0})})
+    world["ETHUSDT"] = s                                              # the code defaults: no band at all
+    seed(s, status=fresh(today_pnl_pct=-0.01))
+    assert run(mon, world, ["ETHUSDT"]).problems == []               # a floating −0.01 % is not "near the limit"
+    seed(s, status=fresh(T0 + 15 * MIN, today_pnl_pct=-1.7))
+    (f,) = run(mon, world, ["ETHUSDT"], at=T0 + 15 * MIN).problems
+    assert f.level == "warn" and "near the limit" in f.title and "warning at -1.60 %" in f.text
 
 
 def test_an_mt5_ipc_hang_is_critical_after_the_limit_and_never_restarts_anything(mon, world):
@@ -456,6 +692,25 @@ def test_system_notes_become_warnings_and_a_stopped_system_is_skipped(mon, world
     assert [f.title for f in res.problems] == ["System not running"] and "stopped by the user" in res.skipped[0]
 
 
+def test_a_no_supervisor_note_waits_for_the_second_run_while_the_machine_settles(mon, world, monkeypatch, tmp_path):
+    script = tmp_path / "run_session.py"
+    script.write_text("# stand-in\n", encoding="utf-8")
+    monkeypatch.setattr(mon, "RUN_SESSION", script)                  # _spawn refuses: no diagnosis may start
+    monkeypatch.setattr(mon, "_clock", lambda: (mon.clock["now"] / 1000, T0 - 2 * MIN))     # booted 2 min ago
+    seed(world["BTCUSDT"], status=fresh())
+    down = "!! ETHUSDT: its system should run (own app.db, not stopped by the user) but no supervisor runs"
+    res = run(mon, world, ["BTCUSDT"], notes=[down], diagnose=True)   # the keep-alive starts it 90-150 s after logon
+    assert res.problems == [] and mon.sent == [] and res.diagnose["why"] == "no new warning"
+    assert res.held == ["system not running ETHUSDT: booted 2 min ago — checked again on the next run"]
+    other = "!! supervisor running for DOGEUSDT, which is not in config 'instances:' — not reported"
+    seed(world["BTCUSDT"], status=fresh(T0 + 6 * MIN))
+    res = run(mon, world, ["BTCUSDT"], at=T0 + 6 * MIN, notes=[down, other])      # still down 6 min later
+    assert sorted(f.title for f in res.problems) == ["System check", "System not running"] and not res.held
+    seed(world["BTCUSDT"], status=fresh(T0 + 7 * MIN))
+    res = run(mon, world, ["BTCUSDT"], at=T0 + 7 * MIN, notes=[other.replace("DOGE", "SOL")])
+    assert [f.title for f in res.problems] == ["System check"]       # any other note: at once, even while settling
+
+
 def test_a_running_pair_without_an_app_db_here_means_the_monitor_is_blind(mon, world):
     res = run(mon, world, ["BTCUSDT", "base"])                   # BTC chosen (its supervisor runs), nothing seeded
     assert [f.key for f in res.problems] == ["blind:BTCUSDT"]
@@ -524,3 +779,34 @@ def test_main_json_quiet_and_exit_codes(mon, world, monkeypatch, capsys):
     monkeypatch.setattr(mon.sys, "stdout", None)                     # pythonw: no console at all
     monkeypatch.setattr(mon.sys, "stderr", None)
     assert mon.main(["--no-diagnose"]) == 0
+
+
+def test_a_config_that_cannot_be_read_exits_3_with_a_log_line_and_a_toast(mon, monkeypatch, tmp_path, capsys):
+    def bad(**kw):                                                   # noqa: ANN003
+        raise ValueError("1 validation error for Settings\nmonitor\n  equity_drop_warn_pct must be below ...")
+
+    monkeypatch.setattr(mon, "load_settings", bad)
+    monkeypatch.setattr(mon, "setup_logging", lambda *a, **kw: pytest.fail("no Settings, no normal log"))
+    log_file = tmp_path / "logs" / "monitor-config-error.log"
+    monkeypatch.setattr(mon, "CONFIG_ERROR_LOG", log_file)
+    toasts = []
+    monkeypatch.setattr(mon.subprocess, "run", lambda cmd, **kw: toasts.append((cmd, kw)))
+    assert mon.main(["--quiet"]) == 3                                # TS_NOTIFY_DISABLE (the suite): no toast
+    assert toasts == [] and capsys.readouterr().err == ""
+    (line,) = log_file.read_text(encoding="utf-8").splitlines()
+    assert "monitor cannot read its config: ValueError: 1 validation error for Settings monitor" in line
+    assert line[:4].isdigit() and line[10] == "T"                    # timestamped (ISO UTC)
+    monkeypatch.delenv("TS_NOTIFY_DISABLE", raising=False)
+    assert mon.main([]) == 3
+    (cmd, kw), = toasts
+    assert cmd[cmd.index("-Level") + 1] == "critical" and kw["timeout"] == 15.0
+    title = cmd[cmd.index("-TitleB64") + 1]
+    assert base64.b64decode(title).decode("utf-8") == "Monitor cannot read its config"
+    assert "!! " in capsys.readouterr().err and len(log_file.read_text(encoding="utf-8").splitlines()) == 2
+
+    def hang(cmd, **kw):                                             # noqa: ANN001, ANN003
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(mon.subprocess, "run", hang)
+    monkeypatch.setattr(mon.sys, "stderr", None)                     # pythonw
+    assert mon.main([]) == 3                                         # a toast that hangs never raises

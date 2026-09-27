@@ -1,9 +1,9 @@
 """core/notify.py + tools/notify.py (Phase 4, §3.8 component 5): log line, toast, Telegram, limits, redaction.
 
 Nothing here reaches the desktop or the network: Telegram goes through ``httpx.MockTransport``, the toast runner
-(``subprocess.run``) is replaced by a recorder, ``secret()`` reads a tmp ``.env`` (never the checkout's), and the
-data root is tmp_path. ``tests/conftest.py`` sets ``TS_NOTIFY_DISABLE=1`` for the suite; the tests that exercise the
-sinks remove it.
+(``subprocess.run``) is replaced by a recorder, the ``.env`` the notifier reads (``base.ENV_FILE``) is a tmp file
+(never the checkout's), and the data root is tmp_path. ``tests/conftest.py`` sets ``TS_NOTIFY_DISABLE=1`` for the
+suite; the tests that exercise the sinks remove it.
 """
 from __future__ import annotations
 
@@ -163,6 +163,84 @@ def test_token_added_to_env_file_is_used_without_a_restart(tmp_path, monkeypatch
     assert res["telegram"] == "sent" and json.loads(reqs[0].content)["chat_id"] == CHAT
 
 
+NEW_TOKEN = "2222222222:AAHrotatedTokenNotReal_zyxwvutsrqpon"
+
+
+def test_telegram_values_follow_the_env_file_without_a_restart(tmp_path, monkeypatch, isolated):
+    """A running service: load_settings() copied the start-up .env into os.environ (the supervisor passes it on).
+    Adding, rotating, emptying and removing the lines in .env must all reach it within a minute."""
+    monkeypatch.delenv(nt.DISABLE_ENV, raising=False)
+    env = tmp_path / "user.env"
+    monkeypatch.setattr(base, "ENV_FILE", env)
+    clock = {"t": 1000.0}
+    transport, reqs = recorder()
+    n = nt.Notifier(transport=transport, monotonic=lambda: clock["t"])
+    s = settings(tmp_path, toast=False, rate_per_hour=100)
+
+    def send() -> str:
+        res = n.submit(s, "info", "Order filled", "x")
+        assert n.flush(5)
+        return res["telegram"]
+
+    def token_used() -> str:
+        return str(reqs[-1].url).split("/bot")[1].split("/")[0]
+
+    skipped = "skipped (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set)"
+    assert send() == skipped                                         # no .env yet
+    env.write_text(f"TELEGRAM_BOT_TOKEN={TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n", encoding="utf-8")        # add
+    clock["t"] += 61
+    assert send() == "sent" and token_used() == TOKEN
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[0], TOKEN)                # the start-up copy load_env() makes
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[1], CHAT)
+    env.write_text(f"TELEGRAM_BOT_TOKEN={NEW_TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n", encoding="utf-8")    # rotate
+    assert send() == "sent" and token_used() == TOKEN                # the file is re-read at most once a minute
+    clock["t"] += 61
+    assert send() == "sent" and token_used() == NEW_TOKEN            # the revoked token is no longer used
+    env.write_text("TELEGRAM_BOT_TOKEN=\nTELEGRAM_CHAT_ID=\n", encoding="utf-8")                     # empty = off
+    clock["t"] += 61
+    assert send() == skipped
+    env.write_text(f"TELEGRAM_BOT_TOKEN={NEW_TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n", encoding="utf-8")
+    clock["t"] += 61
+    assert send() == "sent"
+    env.write_text("OTHER=1\n", encoding="utf-8")                   # the lines removed: off, not the start-up copy
+    clock["t"] += 61
+    assert send() == skipped
+    assert len(reqs) == 4
+
+
+def test_environment_values_are_used_while_the_env_file_has_no_line(tmp_path, monkeypatch, isolated):
+    monkeypatch.delenv(nt.DISABLE_ENV, raising=False)
+    env = tmp_path / "user.env"
+    env.write_text("OTHER=1\n", encoding="utf-8")
+    monkeypatch.setattr(base, "ENV_FILE", env)
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[0], TOKEN)
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[1], CHAT)
+    transport, reqs = recorder()
+    n = nt.Notifier(transport=transport)
+    res = n.submit(settings(tmp_path, toast=False), "info", "Order filled", "x")
+    assert n.flush(5) and res["telegram"] == "sent" and TOKEN in str(reqs[0].url)
+
+
+def test_an_unreadable_env_file_keeps_the_last_telegram_values(tmp_path, monkeypatch, isolated):
+    """A .env being saved (locked, half written) must not switch Telegram off or back to the start-up copy."""
+    monkeypatch.delenv(nt.DISABLE_ENV, raising=False)
+    env = tmp_path / "user.env"
+    env.write_text(f"TELEGRAM_BOT_TOKEN={NEW_TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n", encoding="utf-8")
+    monkeypatch.setattr(base, "ENV_FILE", env)
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[0], TOKEN)
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[1], CHAT)
+    clock = {"t": 1000.0}
+    n = nt.Notifier(transport=recorder()[0], monotonic=lambda: clock["t"])
+    assert n._telegram_creds() == (NEW_TOKEN, CHAT)
+
+    def locked(path):                                                # noqa: ANN001
+        raise PermissionError(13, "in use", str(path))
+
+    monkeypatch.setattr(nt, "dotenv_values", locked)
+    clock["t"] += 61
+    assert n._telegram_creds() == (NEW_TOKEN, CHAT)
+
+
 @pytest.mark.parametrize("env", [{}, {"TELEGRAM_BOT_TOKEN": TOKEN}, {"TELEGRAM_CHAT_ID": CHAT}])
 def test_unset_token_is_skipped_silently(tmp_path, monkeypatch, caplog, isolated, env):
     monkeypatch.delenv(nt.DISABLE_ENV, raising=False)
@@ -221,13 +299,31 @@ def test_rate_limit_per_process(tmp_path, live, caplog, isolated):
     with caplog.at_level(logging.DEBUG, logger="notify"):
         res = [n.submit(s, "info", f"event {i}", "x") for i in range(5)]
         assert n.flush(5)
-    assert [r["telegram"] for r in res] == ["sent"] * 3 + ["rate limit 3/hour: log only"] * 2
+    assert [r["telegram"] for r in res] == ["sent"] * 3 + ["rate limit 3 info/hour: log only"] * 2
     assert [r["rate_limited"] for r in res] == [False] * 3 + [True] * 2 and len(reqs) == 3
     limit_lines = [r for r in notify_records(caplog) if "rate limit" in r.getMessage()]
     assert [r.levelno for r in limit_lines] == [logging.WARNING, logging.DEBUG]      # one warning, then quiet
     clock["t"] += 3601
     later = n.submit(s, "info", "event 5", "x")
     assert n.flush(5) and later["telegram"] == "sent" and len(reqs) == 4
+
+
+def test_info_traffic_never_uses_up_the_warning_budget(tmp_path, live, caplog, isolated):
+    """Trailing stops, fills and closes (info) fill their budget; a management error (warn) still goes out."""
+    transport, reqs = recorder()
+    n = nt.Notifier(transport=transport, monotonic=lambda: 1000.0)
+    s = settings(tmp_path, toast=False, rate_per_hour=2, dedupe_minutes=0)
+    with caplog.at_level(logging.DEBUG, logger="notify"):
+        infos = [n.submit(s, "info", f"stop moved {i}", "x") for i in range(4)]
+        warns = [n.submit(s, "warn", f"management error {i}", "x") for i in range(3)]
+        crit = n.submit(s, "critical", "Drawdown stop", "x")
+        assert n.flush(5)
+    assert [r["telegram"] for r in infos] == ["sent"] * 2 + ["rate limit 2 info/hour: log only"] * 2
+    assert [r["telegram"] for r in warns] == ["sent"] * 2 + ["rate limit 2 warn/hour: log only"]
+    assert crit["telegram"] == "sent" and not crit["rate_limited"] and len(reqs) == 5
+    warned = [r.getMessage() for r in notify_records(caplog) if r.levelno == logging.WARNING
+              and "rate limit" in r.getMessage()]
+    assert len(warned) == 2 and "2 info/hour" in warned[0] and "2 warn/hour" in warned[1]   # one per level
 
 
 def test_a_deduped_notification_costs_no_rate(tmp_path, live, isolated):
@@ -289,6 +385,39 @@ def test_a_corrupt_state_file_is_rebuilt(tmp_path, live, isolated):
     assert json.loads((shared / nt.STATE_FILE).read_text(encoding="utf-8"))["keys"] == {"k": T0}
 
 
+def test_trailing_stop_moves_collapse_into_one_notification(tmp_path, live, isolated):
+    """executor._emit: a trailing rule re-plans the stop on every decision bar; the new value is not part of the
+    mgmt_applied key, so the moves of one rule on one leg are one notification per dedupe window."""
+    from types import SimpleNamespace
+
+    from tradingsystem.execution.executor import Executor
+
+    transport, reqs = recorder()
+    n = nt.Notifier(transport=transport, clock=lambda: T0)
+    s = settings(tmp_path, toast=False)
+    events: list[str] = []
+    results: list[dict] = []
+    fake = SimpleNamespace(appdb=SimpleNamespace(add_event=lambda src, kind, detail: events.append(kind)),
+                           _notify=lambda level, title, text, *, key=None, pair=None: results.append(
+                               n.submit(s, level, title, text, key=key, pair=pair)))
+
+    def applied(leg: str, rule: str, value: float) -> dict:
+        return {"pair": "BTCUSDT", "decision": "d1", "leg": leg, "tp_index": 1, "rule": rule, "op": "set_sl",
+                "value": value, "text": f"BTCUSDT leg 1: stop → {value} ({rule})"}
+
+    for payload in (applied("L1", "trail_atr", 65000.0), applied("L1", "trail_atr", 65100.0),
+                    applied("L1", "trail_atr", 65200.0), applied("L2", "trail_atr", 65100.0),
+                    applied("L1", "move_sl_to_breakeven", 64900.0)):
+        Executor._emit(fake, "mgmt_applied", payload)
+    Executor._emit(fake, "mgmt_error", {"pair": "BTCUSDT", "decision": "d1", "leg": "L1", "rule": "trail_atr",
+                                        "text": "BTCUSDT trail_atr failed 3×: retcode 10016"})
+    assert n.flush(5)
+    assert [r["key"] for r in results[:3]] == ["mgmt_applied:d1:L1:trail_atr"] * 3
+    assert [r["deduped"] for r in results] == [False, True, True, False, False, False]
+    assert len(reqs) == 4 and events == ["mgmt_applied"] * 5 + ["mgmt_error"]      # every move is still an event
+    assert "65000.0" in json.loads(reqs[0].content)["text"]
+    assert results[-1]["key"].startswith("mgmt_error:d1:L1:BTCUSDT trail_atr failed")
+
 # --------------------------------------------------------------------------- toast
 @pytest.mark.skipif(os.name != "nt", reason="the toast is Windows-only")
 def test_toast_runner_gets_base64_args_and_no_window(tmp_path, monkeypatch, isolated):
@@ -331,6 +460,33 @@ def test_toast_level_filter_and_failure(tmp_path, monkeypatch, caplog, isolated)
     monkeypatch.setattr(nt.subprocess, "run", hang)
     slow = n.submit(settings(tmp_path), "warn", "Stale heartbeat", "x")
     assert n.flush(5) and slow["toast"].startswith("failed: timed out after")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the toast is Windows-only")
+def test_the_toast_goes_out_before_a_stalled_telegram_request(tmp_path, live, monkeypatch, isolated):
+    """A black-holed network: Telegram hangs until its timeout, the local toast must not wait for it (a
+    short-lived tool's flush may end first, and the monitor counts a shown toast as delivered)."""
+    order: list[str] = []
+    entered, release = threading.Event(), threading.Event()
+
+    def stalled(req: httpx.Request) -> httpx.Response:
+        order.append("telegram")
+        entered.set()
+        release.wait(10)
+        return ok_response(req)
+
+    monkeypatch.setattr(nt.subprocess, "run",
+                        lambda cmd, **kw: order.append("toast") or subprocess.CompletedProcess(cmd, 0, b"", b""))
+    n = nt.Notifier(transport=httpx.MockTransport(stalled))
+    res = [n.submit(settings(tmp_path), "warn", f"Stale quote {i}", "x") for i in range(2)]
+    assert entered.wait(5)
+    assert not n.flush(0.3)                                          # still waiting on the first Telegram call
+    assert order == ["toast", "telegram"]
+    assert res[0]["toast"] == "shown" and res[0]["telegram"] == "pending"
+    release.set()
+    assert n.flush(5)
+    assert [r["toast"] for r in res] == ["shown"] * 2 and [r["telegram"] for r in res] == ["sent"] * 2
+    assert order == ["toast", "telegram"] * 2
 
 
 # --------------------------------------------------------------------------- robustness
@@ -429,7 +585,7 @@ def test_tool_sends_prints_the_outcome_and_never_the_secrets(tmp_path, live, mon
     assert 'notification warn: "Daily review" - log: written; toast: off (notify.toast: false); ' \
            "telegram: failed: HTTP 400 Bad Request: chat **** not found" in out
     assert TOKEN not in out and CHAT not in out
-    assert nt.last_result()["pair"] == "BTCUSDT" and nt.last_result()["key"] == "review:daily"
+    assert nt.last_result()["pair"] == "BTCUSDT" and nt.last_result()["key"] == "cli:review:daily"   # namespaced
 
     monkeypatch.setenv(nt.DISABLE_ENV, "1")
     assert t.main(["--level", "info", "--title", "t", "--text", ""], settings=s) == 0

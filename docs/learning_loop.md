@@ -18,7 +18,7 @@ Everything is per pair, under the shared data root, and nothing is in git:
 |---|---|---|
 | `data/adaptive/<PAIR>/adaptive.yaml` | `tools/tune.py` only | the overlay: one entry per tuned key |
 | `data/adaptive/<PAIR>/playbook.md` | `tools/tune.py` only | the pair's playbook (its hash is in `adaptive.yaml`) |
-| `data/adaptive/<PAIR>/changes.jsonl` | `tune.py` (set, revert); the services (`expired`) | append-only history |
+| `data/adaptive/<PAIR>/changes.jsonl` | `tune.py` (set, revert); the services (`expired`) | append-only history, one ASCII JSON object per line |
 | `tuning_changes` in the pair's `app.db` | `tune.py`; the services set `reverted_ms` on expiry | one row per set / revert |
 | `data/shared/locks/adaptive_<PAIR>.lock` | `tune.py` and the readers | the pair's lock |
 | `data/TUNING_FREEZE` | **you** | while it exists, no change is applied (revert still works) |
@@ -80,12 +80,15 @@ The two hashes are stored with every decision, so the review can tell which over
 
 - The files are checked at most every `adaptive.reload_check_s` and re-read only when their modification time or size
   changed; the read happens under the pair's lock (a reader waits at most 0.25 s, then keeps the last values and
-  looks again at the next check).
+  looks again at the next check). A store that has not read the files successfully yet — a service just (re)started
+  while `tune.py` holds the lock — has only the config values as a placeholder, so it tries again on its next call
+  instead of waiting for the next check.
 - **Missing file** = config values. **`adaptive.enabled: false`** = config values, whatever the files say.
-- **Invalid file** (bad YAML, a value out of bounds, an unknown key, an expiry beyond the limit, a hint or playbook
-  that fails the lint, a `playbook.md` whose hash does not match — i.e. edited by hand): the last good values stay in
-  force and the process records one `adaptive_invalid` event (one per invalid version of the file). A service that
-  starts with an invalid file uses the config values.
+- **Invalid file** (bad YAML, YAML aliases, larger than 256 kB, nested too deeply, a value out of bounds, an unknown
+  key, an expiry beyond the limit, a hint or playbook that fails the lint, a `playbook.md` that is missing or whose
+  hash does not match — i.e. edited by hand): the last good values stay in force and the process records one
+  `adaptive_invalid` event (one per invalid version of the file). A service that starts with an invalid file uses the
+  config values.
 - **Expired entry**: absent from then on; exactly one `expired` line in `changes.jsonl` (de-duplicated across
   processes under the lock), `tuning_changes.reverted_ms` set by the process that was given the pair's `app_db`
   (the engine), and one `adaptive_expired` event.
@@ -99,7 +102,8 @@ The two hashes are stored with every decision, so the review can tell which over
     --window-hours 168 --review-id 2026-09-25_daily
 .venv\Scripts\python.exe tools\tune.py --pair BTCUSDT set pair.ai_paused_until +6h --reason "..." --evidence-json "{}"
 .venv\Scripts\python.exe tools\tune.py --pair BTCUSDT set tp_hint "TP1 at the prior 15m swing" --reason ... --evidence-json ...
-.venv\Scripts\python.exe tools\tune.py --pair BTCUSDT playbook playbook_draft.md --reason ... --evidence-json ...
+.venv\Scripts\python.exe tools\tune.py --pair BTCUSDT playbook --text "- rule one\n- rule two" --reason ... --evidence-json ...
+.venv\Scripts\python.exe tools\tune.py --pair BTCUSDT playbook data\reviews\playbook_draft.md --reason ... --evidence-json ...
 .venv\Scripts\python.exe tools\tune.py --pair BTCUSDT playbook - --reason ... --evidence-json ...   (text on stdin)
 .venv\Scripts\python.exe tools\tune.py --pair BTCUSDT revert min_confidence_floor --reason "made it worse"
 .venv\Scripts\python.exe tools\tune.py [--pair BTCUSDT] list [--json]
@@ -112,8 +116,20 @@ The two hashes are stored with every decision, so the review can tell which over
   `playbook`. `--window-hours` (24–720, default `adaptive.default_window_hours` = 168) is the window for the sample
   count and the health check. `--expires-days` (1 … `adaptive.max_expiry_days`) shortens the expiry.
 - `pair.ai_paused_until` accepts `+90m` / `+6h` / `+2d`, an ISO time **with** a zone (`2026-09-28T12:00Z`), or UTC ms.
-- `playbook` takes a file, `-` for stdin, or `--text "…"`. The session has no file-writing tool, so stdin or
-  `--text` is the usual way.
+- `playbook` takes `--text "…"` (the two characters `\n` stand for a line break when the text has none), a FILE, or
+  `-` for stdin.
+  - **An operator session uses `--text` only.** The session runner sets `TS_OPERATOR_SESSION=1` in the session's
+    environment; with it, the FILE and `-` forms are refused (exit 3). tune.py is on the session's Bash allow-list, so
+    a FILE it opened on the session's behalf would get around the session's Read denials (`.env`, `~/.claude`,
+    credential files).
+  - **FILE** (a human's draft) must be a regular file under the data root or the checkout, reached without a symlink
+    or junction below that root, and its name must not start with `.env` or contain `credential`. Network and device
+    paths (`\\server\…`, `//…`) are refused. Anything else is refused (exit 3) before the file is opened, and no
+    refusal shows the file's content.
+- **Secrets are never stored.** Every free text tune.py stores — the playbook, `tp_hint`, `--reason`,
+  `--evidence-json`, `--review-id`, `--actor` — is refused (exit 3, the text not shown) when it contains the value of
+  a configured secret (`Settings.secret_env_names()`: from the environment, else `.env`; values of 8 characters or
+  more) or a string the log redactor masks (API-key and bot-token shapes).
 
 Output is one line: `applied: BTCUSDT min_confidence_floor 55 -> 60 until 2026-10-09T11:10:00.000Z (change 12)`,
 `refused: … <every reason, separated by ;>`, or `invalid: …`.
@@ -122,7 +138,7 @@ Output is one line: `applied: BTCUSDT min_confidence_floor 55 -> 60 until 2026-1
 |---|---|
 | 0 | applied (or would apply with `--dry-run`; `list`; nothing to revert) |
 | 2 | refused by the policy (the reasons are printed) — including out-of-bounds values and a busy lock |
-| 3 | invalid request: unknown pair or key, unparsable value or JSON, missing or malformed argument |
+| 3 | invalid request: unknown pair or key, unparsable value or JSON, missing or malformed argument, a FILE or `-` that is refused, a text holding a secret |
 | 1 | unexpected error (e.g. a database error) |
 
 An applied change or revert sends an `info` notification through `core/notify.py` (key `tune:<PAIR>:<key>:<ts>`).
@@ -144,14 +160,19 @@ committed; if anything fails the old files are put back and the row is rolled ba
 A change is refused (exit 2) when any of these holds; every reason is printed.
 
 1. `data/TUNING_FREEZE` exists, or `adaptive.enabled` is false for the pair's system.
-2. The value is out of bounds, or the tp_hint / playbook fails the lint (§6).
-3. **Direction** — against the value in force now (config + overlay): a raise-only key may not go below it, a
+2. The pair's files are in a state the services reject: `adaptive.yaml` is invalid, or `playbook.md` is missing, does
+   not match its hash in `adaptive.yaml`, or fails the lint (§3). The services then ignore the whole overlay, so a
+   change "applied" on top would never be in force. `revert playbook` repairs a playbook (revert accepts that state);
+   an invalid `adaptive.yaml` must be fixed or deleted by hand. `list` shows such a pair as `valid: false` with the
+   reason.
+3. The value is out of bounds, or the tp_hint / playbook fails the lint (§6).
+4. **Direction** — against the value in force now (config + overlay): a raise-only key may not go below it, a
    lower-only key may not go above it. The same value is accepted only as a renewal of an entry that is in force;
    otherwise it would have no effect and is refused.
-4. **One change per pair per UTC day** (`adaptive.max_changes_per_day`). Reverts do not count.
-5. **Cooldown per key** (`adaptive.cooldown_days` = 7) since the key was last *set*. Reverts neither count nor reset it.
-6. **Samples**: fewer resolved virtual outcomes of the pair in the window than the key's group needs (§2).
-7. **Health freeze**: more than `adaptive.unhealthy_freeze_pct` (25 %) of the window's hours were unhealthy. An hour
+5. **One change per pair per UTC day** (`adaptive.max_changes_per_day`). Reverts do not count.
+6. **Cooldown per key** (`adaptive.cooldown_days` = 7) since the key was last *set*. Reverts neither count nor reset it.
+7. **Samples**: fewer resolved virtual outcomes of the pair in the window than the key's group needs (§2).
+8. **Health freeze**: more than `adaptive.unhealthy_freeze_pct` (25 %) of the window's hours were unhealthy. An hour
    is unhealthy when it has
    - an `ai_decisions` row of the pair with status `error`, `skipped` or `budget_blocked`, or whose `data_warnings`
      name the pair's decision timeframe (e.g. `"15m: gaps"`);
@@ -164,7 +185,8 @@ A change is refused (exit 2) when any of these holds; every reason is printed.
    a gap is not counted.
 
 `list` shows, per pair, the values in force, each entry with its expiry, the policy state (samples, unhealthy %,
-changes today, cooldowns) and the last changes — the review session runs it before proposing a change.
+changes today, cooldowns) and the last changes — the review session runs it before proposing a change. A playbook
+appears there only as its hash and length; its text is in `playbook.md`, `changes.jsonl` and `tuning_changes`.
 
 ### Revert
 
@@ -178,12 +200,21 @@ original set still counts for both (a set, revert and set again on the same key 
 
 - Playbook: not empty, ≤ 1500 characters, ≤ 12 bullets (`-`, `*`, `+`, `•`, `1.`, `1)`). Hint: one non-empty line,
   ≤ 200 characters.
-- Denylist (both) — the spec's regex, made robust: `risk per`, `lot`/`lots` (not "slot", "pilot", "plot"; "a lot"
-  *is* refused), `leverage`, `stop loss distance|closer`, `ignore`, `override`, `always buy|sell|trade|long|short`,
-  `never no_trade`, `confidence 80–99`, `daily loss`, `kill switch`, `min_rr`. Matched case-insensitively after
-  Unicode normalisation (full-width letters), with zero-width characters removed, with markdown emphasis inside words
-  removed, and across line breaks.
-- No control characters and no code fences (the payload follows the playbook in a fenced block).
+- Denylist (both) — the spec's regex, widened to the usual phrasings and made robust: `risk per`, `lot`/`lots`
+  (also right after a number, "0.05lots"; not "slot", "pilot", "plot"; "a lot" *is* refused), `leverage`,
+  `stop loss distance|closer`, `ignore`, `override`, `disregard`, `always buy|sell|trade|long|short`,
+  `never no_trade` and `never / don't / do not / avoid` up to three words before `NO_TRADE` in the same clause
+  ("never answer NO_TRADE"; "avoid chasing: no trade after …" passes), and a confidence of 80–99 (or 0.8–0.99) up to
+  three words after or two words before the word `confidence` on the same line ("confidence above 85", "confidence
+  (85-90)", "85+ confidence"; "confidence 70, target 1.85" passes), `daily loss`, `kill switch`, `min_rr`. Matched
+  case-insensitively after Unicode normalisation (NFKC: full-width letters), with zero-width characters removed, with
+  markdown emphasis inside words removed, and across line breaks for the adjacent forms.
+- No word that mixes Latin with Cyrillic or Greek letters ("іgnore" with a Cyrillic "і"): NFKC does not fold such
+  homoglyphs, so the denylist would not see the word. A word wholly in another script is fine.
+- No control characters, no Unicode line / paragraph separators (U+2028 / U+2029: they are line breaks to some
+  readers) and no code fences (the payload follows the playbook in a fenced block).
+- A denylist is never complete: it is a backstop. The bound is that the overlay has no risk keys and the gate's other
+  checks (SL, RR, spread, risk per trade, drawdown, kill switch) stay in force.
 - `$` is allowed. The spec asked for `$$`, but `prompts._fill` checks only the template and inserts values verbatim,
   so `$$` would reach the model literally. Only template text needs `$$`.
 

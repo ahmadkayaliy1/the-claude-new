@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from tradingsystem.ai.budget import UsageStore
-from tradingsystem.ai.usage_gauge import GaugeState, UsageGauge, effective_tokens
+from tradingsystem.ai.usage_gauge import GaugeState, UsageGauge, claude_providers, effective_tokens
 from tradingsystem.core.settings import INSTANCE_ENV, PathsCfg, load_settings
 from tradingsystem.core.timeutil import MS_PER_DAY, MS_PER_HOUR
 
@@ -34,11 +34,12 @@ def ledger(tmp_path):
     db = tmp_path / "ai_usage.db"
     store = UsageStore(db)
 
-    def add(ts: int, inp: int, out: int = 0, cached: int = 0, pair: str | None = "BTCUSDT", ok: int = 1) -> None:
+    def add(ts: int, inp: int, out: int = 0, cached: int = 0, pair: str | None = "BTCUSDT", ok: int = 1,
+            provider: str = "claude_code", role: str | None = None) -> None:
         con = sqlite3.connect(db)
         con.execute("INSERT INTO ai_usage(ts, provider, model, purpose, pair, input_tokens, output_tokens, "
-                    "cached_tokens, cost_usd, latency_ms, ok) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (ts, "claude_code", "sonnet", "decision", pair, inp, out, cached, 0.0, 1000, ok))
+                    "cached_tokens, cost_usd, latency_ms, ok, role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (ts, provider, "sonnet", "decision", pair, inp, out, cached, 0.0, 1000, ok, role))
         con.commit()
         con.close()
 
@@ -63,6 +64,33 @@ def test_tokens_since_sums_every_row(ledger):
     ledger.add(NOW - 3, 1_000, 100, pair=None)                                # the all-pairs system
     assert ledger.tokens_since(NOW - 10) == {"input": 56_000, "cached": 20_000, "output": 9_100, "calls": 3}
     assert ledger.tokens_since(NOW - 10, pair="ETHUSDT") == {"input": 30_000, "cached": 0, "output": 5_000, "calls": 1}
+
+
+def test_tokens_since_filters_by_provider(ledger):
+    ledger.add(NOW - 10, 1_000, 100)
+    ledger.add(NOW - 9, 50_000, 5_000, provider="gemini")
+    ledger.add(NOW - 8, 2_000, 200, provider="cc2")
+    assert ledger.tokens_since(NOW - 10, providers=["claude_code"]) == {"input": 1_000, "cached": 0, "output": 100,
+                                                                       "calls": 1}
+    assert ledger.tokens_since(NOW - 10, providers=("claude_code", "cc2"))["calls"] == 2
+    assert ledger.tokens_since(NOW - 10, providers=[]) == {"input": 0, "cached": 0, "output": 0, "calls": 0}
+    assert ledger.tokens_since(NOW - 10)["calls"] == 3                        # no filter: every row
+
+
+def test_the_gauge_counts_only_the_claude_subscription_providers(tmp_path, ledger):
+    """A fallback provider's calls (Gemini while Claude is at its limit) are not subscription usage; operator
+    sessions are recorded under the claude_code provider's name and count."""
+    ledger.add(NOW - MS_PER_HOUR, 30_000)                                     # a trader call
+    ledger.add(NOW - MS_PER_HOUR, 20_000, pair=None, role="review")          # an operator session
+    ledger.add(NOW - MS_PER_HOUR, 500_000, provider="gemini")                 # the fallback
+    st = UsageGauge(settings(tmp_path), ledger).state(NOW)
+    assert (st.five_h_tokens, st.five_h_calls, st.level) == (50_000, 2, 0)
+    s = settings(tmp_path)
+    two = s.model_copy(update={"ai": s.ai.model_copy(update={
+        "providers": {**s.ai.providers, "cc2": s.ai.providers["claude_code"]}})})
+    ledger.add(NOW - MS_PER_HOUR, 25_000, provider="cc2")                     # a second claude_code provider counts
+    assert UsageGauge(two, ledger).state(NOW).five_h_tokens == 75_000
+    assert sorted(claude_providers(two)) == ["cc2", "claude_code"] and claude_providers(s) == ["claude_code"]
 
 
 def test_cache_reads_count_their_weight():
@@ -162,3 +190,77 @@ def test_never_raises(tmp_path, ledger, caplog):
     assert len([r for r in caplog.records if "usage gauge unavailable" in r.getMessage()]) == 1   # warned once
     broken = UsageGauge(object(), ledger).state(NOW)                          # type: ignore[arg-type]
     assert broken.level == 0 and broken.reason.startswith("gauge unavailable (AttributeError")
+
+
+class Sums:
+    """A ledger stand-in: both windows hold ``pct`` % of a 1 M budget (the tests set both budgets to 1 M)."""
+
+    def __init__(self) -> None:
+        self.pct, self.fail, self.providers = 0.0, False, []
+
+    def tokens_since(self, since_ms, pair=None, providers=None):
+        self.providers.append(providers)
+        if self.fail:
+            raise sqlite3.OperationalError("database is locked")
+        return {"input": int(self.pct * 10_000), "cached": 0, "output": 0, "calls": 1}
+
+
+def flat(tmp_path):
+    return settings(tmp_path, weekly_token_budget=1_000_000, five_hour_token_budget=1_000_000, cache_s=60)
+
+
+def test_a_level_steps_down_only_five_points_below_its_threshold(tmp_path):
+    sums = Sums()
+    g = UsageGauge(flat(tmp_path), sums)
+    times = iter(range(NOW, NOW + 100))
+
+    def level(pct):
+        sums.pct = pct
+        return g.state(next(times))                                          # another explicit time: re-read
+
+    assert level(92).level == 2
+    held = level(87)                                                          # below 90, not 5 points below: still 2
+    assert held.level == 2 and "held until ≤ 85 %" in held.reason and held.reason.startswith("7 d ")
+    assert level(85.5).level == 2
+    assert level(85).level == 1                                               # exactly 5 points below: down
+    assert level(66).level == 1                                               # below 70, not 5 points below
+    assert level(65).level == 0
+    assert level(70).level == 1                                               # up at the threshold itself
+    assert level(90).level == 2
+    assert level(50).level == 0                                               # far below both: straight down to 0
+    assert all(p == ["claude_code"] for p in sums.providers)
+
+
+def test_a_failed_read_keeps_the_remembered_level(tmp_path):
+    sums = Sums()
+    g = UsageGauge(flat(tmp_path), sums)
+    sums.pct = 95
+    assert g.state(NOW).level == 2
+    sums.fail = True
+    err = g.state(NOW + 1)
+    assert err.level == 0 and err.error                                       # published as unavailable
+    sums.fail, sums.pct = False, 87
+    assert g.state(NOW + 2).level == 2                                        # the error did not reset the level
+
+
+def test_the_engine_notifies_once_per_real_level_change_and_never_on_a_failed_read(tmp_path):
+    from types import SimpleNamespace as NS
+    from tradingsystem.analysis.engine import Engine
+    sums, clock = Sums(), Clock()
+    g = UsageGauge(flat(tmp_path), sums, clock=clock)
+    sent = []
+    eng = NS(_gauge_state=g.state,
+             _notify=lambda level, title, text, key=None, pair=None: sent.append((level, key)))
+
+    def read(pct, fail=False):
+        sums.pct, sums.fail = pct, fail
+        clock.t += 61                                                         # past ai.usage.cache_s
+        return Engine._gauge_detail(eng)
+
+    for pct in (10, 71, 69, 72, 66):                                          # hovering at 70: one notification
+        read(pct)
+    d = read(0, fail=True)
+    assert d["level"] == 0 and d["error"] and eng._gauge_level == 1           # published, not a level change
+    for pct in (67, 64, 91, 86, 84):
+        read(pct)
+    assert sent == [("warn", "gauge:0>1"), ("info", "gauge:1>0"), ("warn", "gauge:0>2"), ("info", "gauge:2>1")]

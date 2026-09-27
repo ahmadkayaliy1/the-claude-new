@@ -2,7 +2,7 @@
 
     python tools/tune.py --pair BTCUSDT set min_confidence_floor 60 --reason "..." --evidence-json "{...}"
                          [--window-hours 168] [--review-id 2026-09-27_daily] [--expires-days 14]
-    python tools/tune.py --pair BTCUSDT playbook FILE|- [--text "..."] --reason "..." --evidence-json "{...}"
+    python tools/tune.py --pair BTCUSDT playbook --text "..." | FILE | - --reason "..." --evidence-json "{...}"
     python tools/tune.py --pair BTCUSDT revert KEY [--reason "..."]
     python tools/tune.py [--pair BTCUSDT] list [--json]
     --dry-run: check everything and print what would be done; nothing is written.   --actor NAME (default operator)
@@ -12,8 +12,16 @@ under the pair's lock, against the pair's own app.db: ``data/TUNING_FREEZE`` or 
 every change; at most ``adaptive.max_changes_per_day`` changes per pair and UTC day; ``adaptive.cooldown_days`` per
 key; enough resolved virtual outcomes of the pair in the window (strategy keys ``min_samples_strategy``, activity keys
 ``min_samples_activity``); no change when more than ``unhealthy_freeze_pct`` of the window's hours were unhealthy; the
-direction rule against the value in force now. ``revert`` is always allowed (logged; not a change of the day, no
+direction rule against the value in force now; a ``playbook.md`` the services would reject (missing, hash mismatch,
+lint) refuses every change until ``revert playbook``. ``revert`` is always allowed (logged; not a change of the day, no
 cooldown).
+
+What it reads: an operator session (``TS_OPERATOR_SESSION=1`` in its environment) passes the playbook only as
+``--text``; the FILE and ``-`` forms are for a human, and FILE must be a regular file under the data root or the
+checkout, reached without a symlink or junction, not named ``.env*`` or ``*credential*`` (the session's Read denials
+must not be bypassed through this tool). Every free text it stores (playbook, tp_hint, reason, evidence, review id,
+actor) is refused when it contains the value of a configured secret or a key/token shape the log redactor masks; the
+text is never echoed.
 
 Writes: only ``adaptive.yaml`` / ``playbook.md`` / ``changes.jsonl`` under ``data/adaptive/<PAIR>/`` (atomic replace),
 the ``tuning_changes`` table of the pair's app.db, and the lock file ``data/shared/locks/adaptive_<PAIR>.lock``.
@@ -28,16 +36,19 @@ import datetime as dt
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, TextIO
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+CHECKOUT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CHECKOUT / "src"))
 
 from tradingsystem.core import adaptive as ad  # noqa: E402
 from tradingsystem.core.filelock import FileLock  # noqa: E402
+from tradingsystem.core.logsetup import get_redactor  # noqa: E402
 from tradingsystem.core.playbook import lint, lint_hint  # noqa: E402
 from tradingsystem.core.settings import INSTANCE_ENV, Settings, load_settings  # noqa: E402
 from tradingsystem.core.timeutil import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, iso  # noqa: E402
@@ -55,6 +66,8 @@ WINDOW_HOURS = (24, 720)
 PAIR_RE = re.compile(r"^[A-Z0-9]{2,20}$")
 ACTOR_RE = re.compile(r"^[\w.@:+-]{1,40}$")
 MAX_SOURCE_BYTES = 64 * 1024
+SESSION_ENV = "TS_OPERATOR_SESSION"             # "1" in every operator session's environment (the session runner)
+MIN_SECRET_CHARS = 8                            # shorter secret values would match ordinary words and numbers
 EFFECTIVE_FIELD = {"min_confidence_floor": "min_confidence", "min_minutes_between_calls": "min_minutes_between_calls",
                    "max_idle_minutes": "max_idle_minutes", "review_floor_minutes": "review_floor_minutes",
                    "trigger.weak_min": "weak_min", "trigger.liquidity_atr": "liquidity_atr",
@@ -147,7 +160,10 @@ def _has_table(con: sqlite3.Connection, name: str) -> bool:
 
 def _current(t: Target, *, lenient: bool = False) -> tuple[ad.AdaptiveCfg, str]:
     """(overlay, playbook text). Invalid files refuse the change (they must be fixed by hand, never overwritten
-    blindly); ``lenient`` (revert) accepts entries up to the hard 30-day expiry (a lowered max_expiry_days)."""
+    blindly) — so does a ``playbook.md`` the services reject (missing, not matching its hash in ``adaptive.yaml``,
+    failing the lint): they then ignore the whole overlay, and a change "applied" on top of it would never be in force.
+    ``lenient`` (revert, which repairs such a pair) accepts all of that, and entries up to the hard 30-day expiry (a
+    lowered max_expiry_days)."""
     try:
         text = (t.dir / ad.YAML_FILE).read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -159,10 +175,18 @@ def _current(t: Target, *, lenient: bool = False) -> tuple[ad.AdaptiveCfg, str]:
         raise Refused(f"{t.dir / ad.YAML_FILE} is invalid ({ad._short(exc)}) - fix or delete it by hand") from None
     pb = ""
     if cfg.playbook is not None:
+        path = t.dir / ad.PLAYBOOK_FILE
         try:
-            pb = ad.normalize_text((t.dir / ad.PLAYBOOK_FILE).read_text(encoding="utf-8"))
+            pb = ad.normalize_text(path.read_text(encoding="utf-8"))
+            problem = ("does not match its hash in adaptive.yaml (edited by hand?)"
+                       if ad.text_hash(pb) != cfg.playbook.value else "fails the lint" if lint(pb) else None)
         except FileNotFoundError:
-            pb = ""
+            pb, problem = "", "is missing but adaptive.yaml references it"
+        except UnicodeDecodeError:
+            pb, problem = "", "is not UTF-8 text"
+        if problem is not None and not lenient:
+            raise Refused(f"{path} {problem}: the services ignore the whole overlay until it is repaired - "
+                          f"run: tune.py --pair {t.pair} revert playbook")
     return cfg, pb
 
 
@@ -287,7 +311,7 @@ def parse_value(spec: ad.KeySpec, raw: str, now: int) -> Any:
         return _parse_until(raw, now)
     if spec.kind == "text":
         return ad.normalize_text(raw)
-    raise Invalid("the playbook is set with: tune.py --pair P playbook FILE (or - for stdin)")
+    raise Invalid("the playbook is set with: tune.py --pair P playbook --text \"...\"")
 
 
 def _key(raw: str) -> ad.KeySpec:
@@ -297,18 +321,53 @@ def _key(raw: str) -> ad.KeySpec:
     return spec
 
 
+def _secret_values(s: Settings) -> set[str]:
+    """The values of the configured secrets (Settings.secret_env_names(): the environment, else ``.env``), at least
+    MIN_SECRET_CHARS long."""
+    try:
+        from tradingsystem.ai.providers.base import secret
+    except Exception:  # noqa: BLE001 — the environment alone then
+        secret = None
+    values: set[str] = set()
+    for name in s.secret_env_names():
+        for v in (os.environ.get(name, ""), (secret(name) if secret is not None else None) or ""):
+            if len(v.strip()) >= MIN_SECRET_CHARS:
+                values.add(v.strip())
+    return values
+
+
+def _guard(s: Settings, what: str, *texts: str | None) -> None:
+    """Refuse (exit 3) a free text tune.py would store — in adaptive.yaml, playbook.md, changes.jsonl, tuning_changes,
+    the trader prompt and the dashboard — when it holds a configured secret's value or a key / token shape the log
+    redactor masks. The text itself is never echoed."""
+    items = [x for x in texts if x]
+    if not items:
+        return
+    secrets, redact = _secret_values(s), get_redactor()
+    if any(v in x for x in items for v in secrets) or any(redact(x) != x for x in items):
+        raise Invalid(f"{what}: contains the value of a configured secret or a key / token-like string - not stored "
+                      "(the text is not shown)")
+
+
 def _change_args(a: argparse.Namespace, s: Settings) -> dict[str, Any]:
     reason = (a.reason or "").strip()
     if len(reason) < 3 or len(reason) > ad.MAX_REASON_CHARS:
         raise Invalid(f"--reason: 3..{ad.MAX_REASON_CHARS} characters")
+    _guard(s, "--reason", reason)
     if a.evidence_json is None:
         raise Invalid("--evidence-json is required (the numbers behind the change, as JSON)")
     try:
         evidence = json.loads(a.evidence_json)
     except ValueError as exc:
         raise Invalid(f"--evidence-json is not JSON: {exc}") from None
+    except RecursionError:
+        raise Invalid(f"--evidence-json: nested at most {ad.MAX_EVIDENCE_DEPTH} levels deep") from None
     if evidence is None or len(json.dumps(evidence)) > ad.MAX_EVIDENCE_CHARS:
         raise Invalid(f"--evidence-json: a JSON value of at most {ad.MAX_EVIDENCE_CHARS} characters")
+    if ad.json_depth(evidence) > ad.MAX_EVIDENCE_DEPTH:
+        raise Invalid(f"--evidence-json: nested at most {ad.MAX_EVIDENCE_DEPTH} levels deep "
+                      "(adaptive.yaml refuses deeper documents)")
+    _guard(s, "--evidence-json", a.evidence_json, json.dumps(evidence, ensure_ascii=False, default=str))
     wh = a.window_hours if a.window_hours is not None else s.adaptive.default_window_hours
     if not WINDOW_HOURS[0] <= wh <= WINDOW_HOURS[1]:
         raise Invalid(f"--window-hours {wh}: {WINDOW_HOURS[0]}..{WINDOW_HOURS[1]}")
@@ -318,14 +377,16 @@ def _change_args(a: argparse.Namespace, s: Settings) -> dict[str, Any]:
     rid = a.review_id.strip() if a.review_id else None
     if rid is not None and (len(rid) > 120 or any(ch.isspace() for ch in rid)):
         raise Invalid("--review-id: at most 120 characters, no spaces")
+    _guard(s, "--review-id", rid)
     return {"reason": reason, "evidence": evidence, "window_hours": int(wh), "expires_days": int(days),
             "review_id": rid}
 
 
-def _actor(a: argparse.Namespace) -> str:
+def _actor(a: argparse.Namespace, s: Settings) -> str:
     actor = (a.actor or "").strip()
     if not ACTOR_RE.fullmatch(actor):
         raise Invalid(f"--actor {a.actor!r}: 1..40 characters of letters, digits and . @ : + - _")
+    _guard(s, "--actor", actor)
     return actor
 
 
@@ -479,7 +540,7 @@ def _json(v: Any) -> str | None:
 
 def _set(a: argparse.Namespace, t: Target, spec: ad.KeySpec, value: Any, now: int, out: TextIO | None) -> int:
     """Shared by ``set`` and ``playbook`` (``value`` = the playbook text)."""
-    args, actor = _change_args(a, t.s), _actor(a)
+    args, actor = _change_args(a, t.s), _actor(a, t.s)
     with FileLock(ad.lock_path(t.s, t.pair)).hold(timeout=LOCK_TIMEOUT_S) as got:
         if not got:
             raise Refused(f"busy: another tune.py holds {ad.lock_path(t.s, t.pair)} - try again in a minute")
@@ -541,13 +602,52 @@ def _record(t: Target, record: dict) -> None:
 def cmd_set(a: argparse.Namespace, t: Target, now: int, out: TextIO | None) -> int:
     spec = _key(a.key)
     if spec.kind == "playbook":
-        raise Invalid("the playbook is set with: tune.py --pair P playbook FILE (or - for stdin)")
-    return _set(a, t, spec, parse_value(spec, a.value, now), now, out)
+        raise Invalid("the playbook is set with: tune.py --pair P playbook --text \"...\" (a human may also give a "
+                      "FILE or - for stdin)")
+    value = parse_value(spec, a.value, now)
+    if spec.kind == "text":
+        _guard(t.s, spec.key, value)
+    return _set(a, t, spec, value, now, out)
+
+
+def _playbook_file(t: Target, source: str) -> Path:
+    """The FILE form of ``playbook`` (a human's draft; a session never gets here): a regular file under the data root
+    or the checkout, reached without a symlink or junction below that root, whose name is not a secrets file's
+    (``.env*``, ``*credential*``). Anything else is refused (exit 3) before it is opened — no network or device path
+    is touched — and nothing of a file's content is ever echoed."""
+    if source.replace("\\", "/").startswith("//"):
+        raise Invalid(f"playbook {source}: network and device paths are refused")
+    path = Path(os.path.abspath(source))
+    if path.drive.startswith(("\\\\", "//")):
+        raise Invalid(f"playbook {source}: network and device paths are refused")
+    name = path.name.lower()
+    if name.startswith(".env") or "credential" in name:
+        raise Invalid(f"playbook {source}: a secrets file ({path.name}) is never read")
+    roots = (t.s.paths.data(), CHECKOUT)
+    for root in roots:
+        real_root = Path(os.path.realpath(root))
+        for base in dict.fromkeys((Path(os.path.abspath(root)), real_root)):
+            if base not in path.parents:
+                continue
+            try:
+                real = Path(os.path.realpath(path, strict=True))
+            except OSError:
+                raise Invalid(f"playbook {source}: cannot be read (not found)") from None
+            if real != real_root / path.relative_to(base) or path.is_symlink() or path.is_junction():
+                raise Invalid(f"playbook {source}: reached through a symlink or junction - refused")
+            if not real.is_file():
+                raise Invalid(f"playbook {source}: not a regular file")
+            return real
+    raise Invalid(f"playbook {source}: only a file under the data root or the checkout is read "
+                  f"({', '.join(str(r) for r in roots)})")
 
 
 def cmd_playbook(a: argparse.Namespace, t: Target, now: int, out: TextIO | None, stdin: TextIO | None) -> int:
     if (a.source is None) == (a.text is None):
-        raise Invalid("playbook: give a FILE, - (stdin) or --text")
+        raise Invalid("playbook: give --text, a FILE or - (stdin)")
+    if a.text is None and os.environ.get(SESSION_ENV) == "1":
+        # the session's Read denials (.env, ~/.claude, credential files) must not be bypassed through this tool
+        raise Invalid("playbook: FILE and - (stdin) are refused in an operator session - sessions use --text")
     if a.text is not None:
         # a session passes the playbook on ONE command line (the Bash allow-list matches the command text): the two
         # characters "\\n" (backslash, n) stand for a line break
@@ -556,20 +656,24 @@ def cmd_playbook(a: argparse.Namespace, t: Target, now: int, out: TextIO | None,
     elif a.source == "-":
         raw = (stdin or sys.stdin).read(MAX_SOURCE_BYTES + 1)
     else:
+        path = _playbook_file(t, a.source)
         try:
-            with open(a.source, encoding="utf-8") as fh:
+            with open(path, encoding="utf-8") as fh:
                 raw = fh.read(MAX_SOURCE_BYTES + 1)
         except (OSError, UnicodeDecodeError) as exc:
-            raise Invalid(f"playbook {a.source}: cannot be read ({exc})") from None
+            raise Invalid(f"playbook {a.source}: cannot be read ({type(exc).__name__})") from None
     if len(raw) > MAX_SOURCE_BYTES:
         raise Invalid(f"playbook: larger than {MAX_SOURCE_BYTES} bytes")
-    return _set(a, t, ad.KEYS["playbook"], ad.normalize_text(raw), now, out)
+    text = ad.normalize_text(raw)
+    _guard(t.s, "playbook", text)
+    return _set(a, t, ad.KEYS["playbook"], text, now, out)
 
 
 def cmd_revert(a: argparse.Namespace, t: Target, now: int, out: TextIO | None) -> int:
     """Always allowed (even frozen or disabled): back to the config value; logged, not a change of the day."""
-    spec, actor = _key(a.key), _actor(a)
+    spec, actor = _key(a.key), _actor(a, t.s)
     reason = (a.reason or "revert").strip()[:ad.MAX_REASON_CHARS] or "revert"
+    _guard(t.s, "--reason", reason)
     with FileLock(ad.lock_path(t.s, t.pair)).hold(timeout=LOCK_TIMEOUT_S) as got:
         if not got:
             raise Refused(f"busy: another tune.py holds {ad.lock_path(t.s, t.pair)} - try again in a minute")
@@ -648,7 +752,10 @@ def status(t: Target, now: int) -> dict[str, Any]:
     finally:
         if con is not None:
             con.close()
-    doc["recent_changes"] = ad.read_changes(t.s, t.pair, limit=5)
+    # a playbook change as its hash and length ("old" / "new"), never the text (defence in depth: `list` is what a
+    # session runs, and the text is in playbook.md and tuning_changes)
+    doc["recent_changes"] = [{k: v for k, v in r.items() if k != "text"}
+                             for r in ad.read_changes(t.s, t.pair, limit=5)]
     return doc
 
 
@@ -722,7 +829,8 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument("key")
     c.add_argument("value")
     _change_opts(c)
-    c = cmds.add_parser("playbook", help="replace the pair's playbook (FILE, - for stdin, or --text)")
+    c = cmds.add_parser("playbook", help="replace the pair's playbook (--text; outside a session also a FILE under "
+                                         "the data root or the checkout, or - for stdin)")
     _common(c, sub=True)
     c.add_argument("source", nargs="?")
     c.add_argument("--text")

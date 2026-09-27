@@ -350,7 +350,7 @@ notify:                                # Phase 4 (D-043): log line + Windows toa
   toast: true
   telegram: true                       # used only when TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set
   min_level: info                      # info | warn | critical
-  rate_per_hour: 20                    # per process
+  rate_per_hour: 20                    # per process, for info and for warn each (critical: no limit)
   dedupe_minutes: 30
 
 monitor:                               # Phase 4: tools/monitor.py every 15 min (Task Scheduler, H19), no Claude

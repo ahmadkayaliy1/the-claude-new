@@ -9,15 +9,19 @@ are file writes only: a pair's ``data/instances/<PAIR>/KILL_SWITCH`` (order burs
 ``data/KILL_SWITCH`` (equity drop between runs). It never restarts anything (an MT5 IPC hang stays a manual decision)
 and never turns a switch OFF (``scripts\\kill_switch_off.bat``). With at least one new warning and no diagnosis for
 ``monitor.diagnose_every_hours`` it starts one Claude diagnosis session (``tools/operator/run_session.py --kind
-diagnose --reason <the new findings>``, detached) unless ``monitor.diagnose_enabled`` is false or
-``TS_MONITOR_NO_DIAGNOSE`` is set.
+diagnose --reason <the new findings>``, detached) unless ``monitor.diagnose_enabled`` is false,
+``TS_MONITOR_NO_DIAGNOSE`` is set or an operator session (a review) holds the session lock.
 
 Suspend-aware: after a sleep, a reboot or a clock jump every wall-clock heartbeat looks stale by the time asleep.
 The age of a beat older than the supervisor's last suspend is corrected by the time asleep, and while a system is
 "settling" (booted, resumed or clock-jumped within the stale window, or the machine slept since the last run) a
-staleness finding must be seen on two consecutive runs at least 5 min apart before it is reported.
+staleness finding — and a "no supervisor runs" note — must be seen on two consecutive runs at least 5 min apart before
+it is reported.
 
-Exit code: 0 no warning, 1 a warning or worse (the task's "Last Result"). docs/monitoring.md has the full rule table.
+A notification that reached no sink (the flush timed out, every sink failed) is re-armed: the next run sends it again.
+
+Exit code: 0 no warning, 1 a warning or worse (the task's "Last Result"), 3 the config could not be read (nothing was
+checked; ``logs/monitor-config-error.log``). docs/monitoring.md has the full rule table.
 """
 # No ``from __future__ import annotations``: tools are loaded by file path without a sys.modules entry (tests,
 # review_pack), and dataclasses cannot resolve string annotations there.
@@ -30,6 +34,7 @@ import logging
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -40,6 +45,7 @@ import psutil
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from tradingsystem.core.filelock import FileLock, locks_dir  # noqa: E402
 from tradingsystem.core.instruments import InstrumentRegistry  # noqa: E402
 from tradingsystem.core.killswitch import kill_switch_path, set_kill_switch  # noqa: E402
 from tradingsystem.core.logsetup import setup_logging  # noqa: E402
@@ -59,9 +65,21 @@ ALL = "*"                                   # Finding.switch: the global data/KI
 SETTLE_MS = 5 * MS_PER_MINUTE               # while settling, a staleness must persist this long over two runs
 SLEPT_S = 60.0                              # wall minus awake time between two runs above this = the machine slept
 REMIND_MS = {"info": 0, "warn": 6 * MS_PER_HOUR, "critical": MS_PER_HOUR}    # a finding that persists is re-sent
+# a cleared alert is remembered this long: when it comes back it persists (a flapping condition is not new each time)
+COOL_MS = {"info": 2 * MS_PER_HOUR, "warn": REMIND_MS["warn"], "critical": 2 * MS_PER_HOUR}
+EVERY_MS = 15 * MS_PER_MINUTE               # the task's repetition (TradingSystemOps-Monitor)
+BASELINE_MAX_MS = max(3 * EVERY_MS, MS_PER_HOUR)    # an older equity baseline (plus the sleep since) only warns
+FLUSH_S = (15.0, 12.0, 240.0)               # notifier flush: base + per queued notification, capped
+SESSION_LOCK = "operator_session.lock"      # tools/operator/run_session.py LOCK_NAME: one operator session at a time
+WANTED_MS = 2 * MS_PER_HOUR                 # a diagnosis put off by a running review is retried this long
 IPC_RE = re.compile(r"IPC|-1000[45]")       # MT5 "No IPC connection" / IPC timeout / IPC recv failed
 GAP_EVENTS = ("system_suspend", "clock_jump", "stall")
 PAIR_RE = re.compile(r"[A-Z0-9]{3,20}")
+CONFIG_ERROR_EXIT = 3                       # load_settings() failed: nothing was checked
+CONFIG_ERROR_LOG = ROOT / "logs" / "monitor-config-error.log"     # fixed: without Settings there is no logs dir
+CONFIG_ERROR_LOG_MAX = 1_000_000            # bytes; then it is rotated once (.1)
+CONFIG_TOAST_TIMEOUT_S = 15.0
+_GONE = object()
 
 
 def _load_health_report():
@@ -104,17 +122,25 @@ def _spawn(cmd: list[str], cwd: Path):
     return winops.spawn_outside(cmd, cwd=cwd, console=True)
 
 
-def _notify(s: Settings, level: str, title: str, text: str, *, key: str, pair: str | None) -> None:
-    """core.notify (log line + toast + Telegram); a missing or failing notifier never stops the monitor."""
+def _notify(s: Settings, level: str, title: str, text: str, *, key: str, pair: str | None) -> dict | None:
+    """core.notify (log line + toast + Telegram); a missing or failing notifier never stops the monitor. Returns the
+    process notifier's result record (its worker fills in the sinks; :func:`_undelivered` reads it), None when there
+    is none."""
     try:
-        from tradingsystem.core.notify import notify
+        from tradingsystem.core import notify as nt
     except Exception:  # noqa: BLE001 — the notifier is optional for the monitor's own job
         log.warning("[notify unavailable] %s %s: %s", level, title, text)
-        return
+        return None
     try:
-        notify(s, level, title, text, key=key, pair=pair)
+        notifier = getattr(nt, "_DEFAULT", None)            # the one worker flush() waits for
+        if notifier is None or not hasattr(notifier, "submit"):
+            nt.notify(s, level, title, text, key=key, pair=pair)
+            return None
+        res = notifier.submit(s, level, title, text, key=key, pair=pair)
+        return res if isinstance(res, dict) else None
     except Exception:  # noqa: BLE001
         log.warning("notify failed for %s", key, exc_info=True)
+        return None
 
 
 def _flush_notify(timeout_s: float = 15.0) -> None:
@@ -124,6 +150,26 @@ def _flush_notify(timeout_s: float = 15.0) -> None:
         flush(timeout_s)
     except Exception:  # noqa: BLE001
         pass
+
+
+_SINK_OK = ("shown", "sent")
+_SINK_LOST = ("pending", "failed", "queue full", "not queued")     # prefixes: in flight, or no delivery
+
+
+def _undelivered(res: dict | None, *, retry: bool = False) -> bool:
+    """True when a notifier result record shows that the notification reached no sink: every sink in use is still
+    ``pending`` (a flush that timed out) or failed. A sink that is off or not configured does not count, so a
+    notification that is a log line only by configuration counts as delivered; so does one skipped by the rate
+    limit or the dedupe — except a ``retry`` (a re-armed alert) that the dedupe skipped: the earlier attempt claimed
+    the key and may never have arrived. Unknown (no record) counts as delivered."""
+    if not isinstance(res, dict):
+        return False
+    sinks = [v for v in (res.get("toast"), res.get("telegram")) if isinstance(v, str)]
+    if any(v in _SINK_OK for v in sinks):
+        return False
+    if retry and res.get("deduped"):
+        return True
+    return any(v.startswith(_SINK_LOST) for v in sinks)
 
 
 # --------------------------------------------------------------------------- state file
@@ -271,7 +317,10 @@ class Monitor:
         self.accounts: set[str] = set()
         self.tripped: dict[str, int] = {}
         self.awake, self.boot_ms = 0.0, 0
+        self.slept_s = 0.0                                # machine sleep since the previous run (0 = none/unknown)
         self.machine_settle: str | None = None
+        self._sent: list[tuple[Finding, dict | None, int, bool]] = []   # (finding, result, notified_ms before, retry)
+        self._undo: dict[str, list] = {}                  # finding key → what puts its event back if unsent
 
     # ---- bookkeeping
     def add(self, f: Finding) -> bool:
@@ -316,33 +365,64 @@ class Monitor:
             self.res.held.append(f"{name} {kind} {i}: {settle} — checked again on the next run")
         return keep
 
+    def _undo_on_unsent(self, key: str, d: dict, item: str, old=_GONE) -> None:  # noqa: ANN001
+        """Should finding ``key``'s notification reach no sink, put ``d[item]`` back to ``old`` (absent: removed) —
+        the bookkeeping that marks an event as handled (a burst counted, an equity baseline, a VPN state), so the
+        next run detects the same event again and sends it."""
+        def undo() -> None:
+            if old is _GONE:
+                d.pop(item, None)
+            else:
+                d[item] = old
+        self._undo.setdefault(key, []).append(undo)
+
     # ---- orchestration
     def run(self) -> Result:
         self.awake, self.boot_ms = _clock()
         self.state = {"version": 1, "first_run_ms": int(self.prev.get("first_run_ms") or self.now),
                       "ipc": {}, "seen": {}, "slow_build": {}}
+        self.slept_s = self._slept_s()
         self.machine_settle = self._machine_settle()
-        for n in self.notes:
-            text = n[3:] if n.startswith("!! ") else n
-            self.add(Finding("warn", "note:" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:12],
-                             "System not running" if "no supervisor runs" in text else "System check", text))
+        self._notes()
         for s in self.chosen:
             self._system(s)
         for name, fn in (("equity", self._equity), ("drawdown", self._drawdown), ("resources", self._resources),
                          ("vpn", self._vpn), ("reviews", self._reviews)):
             self._guard(None, name, fn)
         self._dispatch()
-        self.res.diagnose = self._diagnose()
+        self._deliver()
         self.state["run"] = {"ts": self.now, "awake_s": round(self.awake, 3), "boot_ms": self.boot_ms,
                              "exit": self.res.exit_code, "findings": [f.as_dict() for f in self.res.findings],
                              "held": self.res.held}
+        self.res.diagnose = self._diagnose()        # saves the state itself before it starts a session
         if not self.dry_run:
             try:
                 save_state(self.path, self.state)
             except OSError as exc:
                 self.res.state_error = f"{self.path} could not be written: {exc}"
                 log.warning("%s", self.res.state_error)
+                _notify(self.base, "critical", "Monitor: state file not saved",
+                        f"{self.res.state_error} — until it can be written every run re-sends its newer findings "
+                        "and may start a diagnosis again; check the file's attributes and permissions "
+                        "(docs/monitoring.md §8)", key="monitor:state_error", pair=None)
         return self.res
+
+    def _notes(self) -> None:
+        """health_report's notes become warnings. "No supervisor runs" waits for the two-run rule while the machine
+        settles (after a logon the keep-alive tasks start the supervisors 90-150 s late); other notes go at once."""
+        notes = {hashlib.sha1(t.encode("utf-8")).hexdigest()[:12]: t
+                 for t in (n[3:] if n.startswith("!! ") else n for n in self.notes)}
+        down: dict[str, str] = {}                               # hold id (the pair when it names one) → note id
+        for i, text in notes.items():
+            if "no supervisor runs" in text:
+                who = text.split(":", 1)[0].strip()
+                down[who if PAIR_RE.fullmatch(who) else i] = i
+        kept = self._hold("system", "not running", {h: notes[i] for h, i in down.items()}, self.machine_settle)
+        waiting = {i for h, i in down.items() if h not in kept}
+        for i, text in notes.items():
+            if i not in waiting:
+                self.add(Finding("warn", "note:" + i,
+                                 "System not running" if "no supervisor runs" in text else "System check", text))
 
     def _guard(self, name: str | None, check: str, fn, *args) -> None:  # noqa: ANN001
         try:
@@ -352,16 +432,21 @@ class Monitor:
             self.add(Finding("warn", f"check:{name or 'machine'}:{check}", f"Monitor check {check} failed",
                              f"{name or 'machine'}: {type(exc).__name__}: {str(exc)[:200]}", system=name))
 
+    def _slept_s(self) -> float:
+        """Seconds the machine slept since the previous run (wall minus awake time); 0 when unknown (no previous
+        run, another boot)."""
+        run = self.prev.get("run") or {}
+        same_boot = abs(int(run.get("boot_ms") or 0) - self.boot_ms) < 60_000
+        if run.get("ts") and run.get("awake_s") is not None and same_boot:
+            return (self.now - int(run["ts"])) / 1000 - (self.awake - float(run["awake_s"]))
+        return 0.0
+
     def _machine_settle(self) -> str | None:
         win = self.base.monitor.stale_heartbeat_min * MS_PER_MINUTE
         if self.boot_ms and self.now - self.boot_ms < win:
             return f"booted {_mins(self.now - self.boot_ms)} ago"
-        run = self.prev.get("run") or {}
-        same_boot = abs(int(run.get("boot_ms") or 0) - self.boot_ms) < 60_000
-        if run.get("ts") and run.get("awake_s") is not None and same_boot:
-            slept = (self.now - int(run["ts"])) / 1000 - (self.awake - float(run["awake_s"]))
-            if slept > SLEPT_S:
-                return f"the machine slept {slept / 60:.0f} min since the last run"
+        if self.slept_s > SLEPT_S:
+            return f"the machine slept {self.slept_s / 60:.0f} min since the last run"
         return None
 
     def _settling(self, s: Settings, name: str, con: sqlite3.Connection) -> str | None:
@@ -477,16 +562,19 @@ class Monitor:
             return
         d, mine = r.detail, s.paths.instance
         for x in d.get("exposure") or []:
-            if isinstance(x, dict) and x.get("kind") == "position" and not x.get("sl"):
+            # 'sl' is the first leg's; 'sl_missing' (exposure.aggregate) = any leg of the decision without one
+            if isinstance(x, dict) and x.get("kind") == "position" and (x.get("sl_missing") or not x.get("sl")):
                 p = x.get("pair") or mine
                 self.add(Finding("critical", f"nosl:{name}:{p}:{x.get('decision')}", f"{p}: position without SL",
                                  f"{x.get('side')} {x.get('volume')} @ {x.get('price')} (decision {x.get('decision')}) "
-                                 "has no stop-loss at the broker — set one in MetaTrader 5 now", system=name, pair=p,
+                                 + ("has a leg without a stop-loss" if x.get("sl") else "has no stop-loss")
+                                 + " at the broker — set one in MetaTrader 5 now", system=name, pair=p,
                                  remind_ms=MS_PER_HOUR))
         pnl = _num(d.get("today_pnl_pct"))
         if pnl is not None:
             mx = s.risk.max_daily_loss_pct
-            warn_at = -max(mx - s.monitor.daily_loss_warn_margin_pct, 0.0)
+            band = mx - s.monitor.daily_loss_warn_margin_pct
+            warn_at = -band if band > 0 else -0.8 * mx          # no band (margin ≥ limit): at 80 % of the limit
             day = time.strftime("%Y-%m-%d", time.gmtime(self.now / 1000))
             who = mine or "every pair (all-pairs system)"
             if pnl <= -mx:
@@ -559,6 +647,7 @@ class Monitor:
                            if ok_pair else "pair unknown: the global KILL_SWITCH"),
                         system=name, pair=p if ok_pair else None, switch=target)
             if self.add(f):
+                self._undo_on_unsent(f.key, keep, k, keep.get(k, _GONE))
                 keep[k] = max(new)
 
     def _restarts(self, s: Settings, name: str, con, status: dict[str, _Row], settle: str | None) -> None:
@@ -615,14 +704,21 @@ class Monitor:
 
     # ---- machine / account checks
     def _equity(self) -> None:
+        """Equity drop between two runs, per account. Only a drop of an identified MT5 account (``mt5:…``, not the
+        ``…:?`` fallback) against a baseline from the previous run or so (``BASELINE_MAX_MS`` plus the machine's
+        sleep since then) engages the global switch; a paper account, an unidentified one or an older baseline only
+        warns — the switch stops every system."""
         m = self.base.monitor
         prev = self.prev.get("equity") or {}
         keep = self.state.setdefault("equity", {})
         for acct, v in prev.items():                            # a baseline survives a run without that executor
             if isinstance(v, dict) and self.now - int(v.get("ts") or 0) < 7 * MS_PER_DAY:
                 keep[acct] = v
+        max_age = BASELINE_MAX_MS + int(max(self.slept_s, 0.0) * 1000)
         for acct, (eq, ts, name) in sorted(self.samples.items()):
             p = prev.get(acct) if isinstance(prev.get(acct), dict) else None
+            key = f"equity_drop:{acct}:{ts}"
+            self._undo_on_unsent(key, keep, acct, keep.get(acct, _GONE))
             keep[acct] = {"equity": eq, "ts": ts}
             old = _num((p or {}).get("equity"))
             if not old or ts <= int(p.get("ts") or 0):
@@ -631,12 +727,23 @@ class Monitor:
             if drop <= m.equity_drop_warn_pct:
                 continue
             kill = drop > m.equity_drop_kill_pct
-            self.add(Finding("critical" if kill else "warn", f"equity_drop:{acct}:{ts}", "Equity drop",
+            age = ts - int(p["ts"])
+            no_switch = None
+            if kill and acct.startswith("paper:"):
+                no_switch = "a paper account (simulated equity)"
+            elif kill and (not acct.startswith("mt5:") or acct.endswith(":?")):
+                no_switch = "the account is not identified (the executor row has no account_drawdown)"
+            elif kill and age > max_age:
+                no_switch = (f"the previous sample is {age / MS_PER_HOUR:.1f} h old — not a drop between two runs; "
+                             "check the account")
+            switch = kill and no_switch is None
+            self.add(Finding("critical" if switch else "warn", key, "Equity drop",
                              f"account {acct}: equity {old:.2f} → {eq:.2f} (−{drop:.1f} %) since {iso(int(p['ts']))}"
-                             + (f" — above {m.equity_drop_kill_pct} % → the global KILL_SWITCH" if kill else
+                             + (f" — above {m.equity_drop_kill_pct} % → the global KILL_SWITCH" if switch else
+                                f" — above {m.equity_drop_kill_pct} % but no switch: {no_switch}" if kill else
                                 f" (warning above {m.equity_drop_warn_pct} %, global switch above "
                                 f"{m.equity_drop_kill_pct} %)"),
-                             switch=ALL if kill else None))
+                             switch=ALL if switch else None))
 
     def _drawdown(self) -> None:
         try:
@@ -677,8 +784,9 @@ class Monitor:
             keep[n] = up
             if n in prev and bool(prev[n]) != up:
                 word = "up" if up else "down"
-                self.add(Finding("info", f"vpn:{n}:{word}:{self.now}", f"VPN {word}",
-                                 f"network adapter '{n}' is now {word}"))
+                key = f"vpn:{n}:{word}:{self.now}"
+                self._undo_on_unsent(key, keep, n, prev[n])
+                self.add(Finding("info", key, f"VPN {word}", f"network adapter '{n}' is now {word}"))
 
     def _reviews(self) -> None:
         b = self.base
@@ -704,15 +812,21 @@ class Monitor:
 
     # ---- notification, dedupe, diagnosis
     def _dispatch(self) -> None:
+        """Decide per finding whether it is due (new, level risen, reminder due, or re-armed after an undelivered
+        notification) and queue its notification, criticals first. A key that cleared within its cool-down
+        (``COOL_MS``) and comes back persists: not re-sent unless its level rose, and not new (no diagnosis)."""
         prev = self.prev.get("alerts") or {}
         once = {k: v for k, v in (self.prev.get("once") or {}).items() if self.now - int(v) < 30 * MS_PER_DAY}
         alerts: dict[str, dict] = {}
-        for f in self.res.findings:
+        for f in sorted(self.res.findings, key=lambda x: -LEVELS[x.level]):     # criticals are queued first
             a = prev.get(f.key) if isinstance(prev.get(f.key), dict) else None
+            if a is not None and a.get("cleared_ms") and not self._cooling(a):
+                a = None                                        # cleared longer than its cool-down: a new episode
             remind = f.remind_ms if f.remind_ms is not None else REMIND_MS[f.level]
+            retry = bool(a and a.get("unsent"))
             if f.once and f.key in once:
                 send = False
-            elif a is None or LEVELS[f.level] > LEVELS.get(a.get("level"), 0):
+            elif a is None or retry or LEVELS[f.level] > LEVELS.get(a.get("level"), 0):
                 send = True
             else:
                 send = bool(remind) and not f.once and self.now - int(a.get("notified_ms") or 0) >= remind
@@ -727,25 +841,81 @@ class Monitor:
             f.new = send
             if send and not self.dry_run:
                 f.notified = True
-                _notify(self.base, f.level, f"Monitor: {f.title}", f.text + (f"\n{f.action}" if f.action else ""),
-                        key=f"monitor:{f.key}", pair=f.pair)
+                res = _notify(self.base, f.level, f"Monitor: {f.title}",
+                              f.text + (f"\n{f.action}" if f.action else ""), key=f"monitor:{f.key}", pair=f.pair)
+                self._sent.append((f, res, before, retry))
+        for k, a in prev.items():                               # cleared: remembered for the cool-down
+            if k not in alerts and isinstance(a, dict) and self._cooling(a):
+                alerts[k] = {**a, "cleared_ms": int(a.get("cleared_ms") or self.now)}
         self.state["alerts"] = alerts
         self.state["once"] = once
         self.state["acted"] = {**{k: v for k, v in (self.prev.get("acted") or {}).items()
                                   if self.now - int(v) < 3 * MS_PER_DAY}, **(self.state.get("acted") or {})}
 
+    def _cooling(self, a: dict) -> bool:
+        """An alert last seen within its level's cool-down (``COOL_MS``)."""
+        return self.now - int(a.get("last_ms") or 0) < COOL_MS.get(a.get("level"), 2 * MS_PER_HOUR)
+
+    def _deliver(self) -> None:
+        """Wait for this run's notifications (``FLUSH_S``: the budget grows with the queue), then re-arm every finding
+        whose notification reached no sink (:func:`_undelivered`): its alert keeps the previous ``notified_ms`` and is
+        marked ``unsent``, a one-shot key is not recorded as sent, and an event's own bookkeeping is put back
+        (``_undo_on_unsent``) — the next run sends it again."""
+        queued = sum(1 for _, r, _, _ in self._sent if isinstance(r, dict) and not r.get("done"))
+        if queued:
+            base, per, cap = FLUSH_S
+            _flush_notify(min(base + per * queued, cap))
+        for f, r, before, retry in self._sent:
+            if not _undelivered(r, retry=retry):
+                continue
+            a = self.state["alerts"].get(f.key)
+            if a is not None:
+                a.update(notified_ms=before, unsent=True)
+            if f.once:
+                self.state["once"].pop(f.key, None)             # due this run = it was not recorded before
+            for undo in self._undo.pop(f.key, ()):
+                undo()
+            f.notified = False
+            log.warning("notification '%s' not delivered (toast: %s, Telegram: %s) — the next run sends it again",
+                        f.key, r.get("toast"), r.get("telegram"))
+
+    def _session_running(self) -> bool:
+        """An operator session (a review, another diagnosis) holds ``operator_session.lock`` — the one
+        tools/operator/run_session.py takes. Tried once and released at once; unknown (an OSError) = not running."""
+        lock = FileLock(locks_dir(self.base) / SESSION_LOCK)
+        try:
+            if not lock.acquire(timeout=0):
+                return True
+        except OSError:
+            return False
+        lock.release()
+        return False
+
     def _diagnose(self) -> dict:
+        """At most one Claude diagnosis per ``diagnose_every_hours``, for this run's new warnings. One put off because
+        an operator session holds the lock (or whose start failed) stays wanted (``diagnose_wanted``): the next runs
+        retry it for the findings that persist, for ``WANTED_MS``, although those are no longer new."""
         m = self.base.monitor
         last = int(self.prev.get("last_diagnose_ms") or 0)
         self.state["last_diagnose_ms"] = last or None
         if self.prev.get("diagnose"):
             self.state["diagnose"] = self.prev["diagnose"]
-        new = [f for f in self.res.findings if f.new and LEVELS[f.level] >= 1]
+        wanted = self.prev.get("diagnose_wanted") if isinstance(self.prev.get("diagnose_wanted"), dict) else {}
+        since = int(wanted.get("ts") or 0)
+        again = set(wanted.get("findings") or []) if self.now - since < WANTED_MS else set()
+        new = [f for f in self.res.findings if LEVELS[f.level] >= 1 and (f.new or f.key in again)]
+
+        def put_off(why: str) -> dict:
+            self.state["diagnose_wanted"] = {"ts": since if again else self.now, "findings": [f.key for f in new]}
+            return {"launched": False, "why": why}
+
         why = None
         if not new:
             why = "no new warning"
         elif not self.allow_diagnose:
             why = "not requested (--no-diagnose, --dry-run or a library call)"
+        elif self.dry_run:
+            why = "dry run"
         elif not m.diagnose_enabled:
             why = "monitor.diagnose_enabled is false"
         elif os.environ.get(NO_DIAGNOSE_ENV, "").strip() not in ("", "0"):
@@ -757,19 +927,30 @@ class Monitor:
                    f"(every {m.diagnose_every_hours:g} h at most)")
         elif not RUN_SESSION.exists():
             why = f"{RUN_SESSION} not found"
+        elif self._session_running():               # it would end 'busy' at once; the next run (15 min) retries
+            return put_off("a review session is running")
         if why:
             return {"launched": False, "why": why}
         reason = "; ".join(f"{f.level}: {f.title} — {f.text}" + (f" ({f.action})" if f.action else "") for f in new)
         cmd = [control.console_python(), str(RUN_SESSION), "--kind", "diagnose", "--reason",
                " ".join(reason.split())[:1500]]          # one line (a command-line argument), never empty
+        # persisted BEFORE the start: a state that cannot be saved would start a session on every run
+        kept = (self.state.get("last_diagnose_ms"), self.state.get("diagnose"))
+        self.state["last_diagnose_ms"] = self.now
+        self.state["diagnose"] = {"ts": self.now, "pid": None, "findings": [f.key for f in new]}
+        try:
+            save_state(self.path, self.state)
+        except OSError as exc:
+            self.state["last_diagnose_ms"], self.state["diagnose"] = kept
+            log.warning("diagnosis session not started: %s could not be written: %s", self.path, exc)
+            return {"launched": False, "why": "state not persisted"}
         try:
             proc = _spawn(cmd, ROOT)
         except OSError as exc:
+            self.state["last_diagnose_ms"], self.state["diagnose"] = kept     # the next run tries again
             log.warning("diagnosis session could not be started: %s", exc)
-            return {"launched": False, "why": f"start failed: {exc}"}
-        self.state["last_diagnose_ms"] = self.now
-        self.state["diagnose"] = {"ts": self.now, "pid": getattr(proc, "pid", None),
-                                  "findings": [f.key for f in new]}
+            return put_off(f"start failed: {exc}")
+        self.state["diagnose"]["pid"] = getattr(proc, "pid", None)
         log.info("diagnosis session started (pid %s) for %s", getattr(proc, "pid", None), ", ".join(f.key for f in new))
         return {"launched": True, "pid": getattr(proc, "pid", None), "cmd": cmd}
 
@@ -810,9 +991,47 @@ def _utf8() -> None:
                 pass
 
 
+def _config_error(exc: Exception, *, quiet: bool) -> int:
+    """load_settings() failed (e.g. a bad ``config.local.yaml``): there are no Settings, so no normal log, no
+    notifier and no data root. One timestamped line goes to ``CONFIG_ERROR_LOG``, a best-effort toast is shown
+    (skipped under ``TS_NOTIFY_DISABLE``), the error is printed unless ``quiet``; exit ``CONFIG_ERROR_EXIT``. Never
+    raises: this is the only trace the scheduled task leaves."""
+    short = " ".join(f"{type(exc).__name__}: {exc}".split())
+    try:
+        from tradingsystem.core.logsetup import get_redactor
+        short = get_redactor()(short)
+    except Exception:  # noqa: BLE001
+        pass
+    line = f"{iso(now_ms())} monitor cannot read its config: {short[:4000]}"
+    try:
+        CONFIG_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        if CONFIG_ERROR_LOG.exists() and CONFIG_ERROR_LOG.stat().st_size > CONFIG_ERROR_LOG_MAX:
+            CONFIG_ERROR_LOG.replace(CONFIG_ERROR_LOG.with_name(CONFIG_ERROR_LOG.name + ".1"))
+        with open(CONFIG_ERROR_LOG, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+    try:
+        from tradingsystem.core import notify as nt
+        if not nt.disabled():
+            subprocess.run(nt.toast_command("critical", "Monitor cannot read its config",
+                                            f"{short[:300]} — nothing is checked until it is fixed "
+                                            f"({CONFIG_ERROR_LOG})"),
+                           capture_output=True, timeout=CONFIG_TOAST_TIMEOUT_S,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:  # noqa: BLE001 — best effort (no powershell, a timeout, …)
+        pass
+    if not quiet and sys.stderr is not None:
+        try:
+            print(f"!! {line}", file=sys.stderr)
+        except (OSError, ValueError):
+            pass
+    return CONFIG_ERROR_EXIT
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Pure-Python production monitor (docs/monitoring.md). "
-                                             "Exit 0 ok, 1 problems.")
+                                             "Exit 0 ok, 1 problems, 3 the config cannot be read.")
     ap.add_argument("--quiet", action="store_true", help="no console output (Task Scheduler runs it under pythonw)")
     ap.add_argument("--json", action="store_true", help="print the result as JSON")
     ap.add_argument("--dry-run", action="store_true",
@@ -822,7 +1041,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--all-pairs-system", action="store_true", help="only the single all-pairs system")
     a = ap.parse_args(argv)
     _utf8()
-    base = load_settings()
+    try:
+        base = load_settings()
+    except Exception as exc:  # noqa: BLE001 — a bad config.local.yaml must not silence the watchdog
+        return _config_error(exc, quiet=a.quiet)
     setup_logging("monitor", logs_dir=base.paths.logs(), level=base.logging.level, max_bytes=base.logging.max_bytes,
                   backups=base.logging.backups, console=False, secret_env_names=base.secret_env_names())
 

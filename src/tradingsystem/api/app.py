@@ -42,6 +42,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..ai.budget import usage_db
 from ..analysis.registry import capability_matrix
+from ..core.adaptive import MAX_YAML_CHARS, has_alias
 from ..core.instruments import InstrumentRegistry
 from ..core.killswitch import read_reason, set_kill_switch
 from ..core.settings import PROJECT_ROOT, Settings, load_settings
@@ -57,7 +58,7 @@ log = logging.getLogger("api")
 REVIEW_NAME_RE = re.compile(r"\d{8}T\d{6}Z?_(daily|weekly|diagnose|adhoc)(\.session)?\.(md|json)")
 MAX_REVIEW_BYTES = 512 * 1024          # a session.json with the CLI's result can be large
 MAX_REVIEWS_LISTED = 500
-MAX_YAML_BYTES = 256 * 1024
+MAX_YAML_BYTES = 4 * MAX_YAML_CHARS    # UTF-8: a file past this surely has more characters than the services accept
 MAX_PLAYBOOK_BYTES = 64 * 1024
 MAX_JSONL_BYTES = 2 * 1024 * 1024      # changes.jsonl / proposals.jsonl: only the tail beyond this
 MAX_JSON_NODES = 200_000               # _plain(): YAML aliases can describe exponentially large documents
@@ -148,10 +149,12 @@ def _read_capped(path: Path, cap: int, *, tail: bool = False) -> tuple[str | Non
 
 
 def _jsonl(path: Path) -> list[dict]:
-    """An append-only jsonl file, oldest first; a partial last line (a writer mid-append) and bad lines are skipped."""
+    """An append-only jsonl file, oldest first; a partial last line (a writer mid-append) and bad lines are skipped.
+    Records are split on ``\\n`` only (not ``splitlines()``: a raw U+2028 / U+2029 / U+0085 inside a JSON string of an
+    older line is part of the record, not a line break)."""
     text, _ = _read_capped(path, MAX_JSONL_BYTES, tail=True)
     out = []
-    for line in (text or "").splitlines():
+    for line in (text or "").split("\n"):
         try:
             rec = json.loads(line)
         except ValueError:
@@ -700,7 +703,7 @@ def _adaptive_check(s: Settings, pair: str, now: int) -> dict:
         store = ad.AdaptiveStore(s, pair)             # plain attributes, no I/O
         try:
             cfg, playbook = store._read()             # noqa: SLF001 — the exact validation the services apply
-        except (ValueError, yaml.YAMLError) as exc:
+        except (ValueError, yaml.YAMLError, RecursionError) as exc:
             return {"valid": False, "problem": " ".join(str(exc).split())[:600], "effective": None}
         return {"valid": True, "problem": None, "effective": ad.compute_effective(s, cfg, playbook, now).as_detail()}
     except Exception as exc:  # noqa: BLE001 — display only: the raw file is still shown
@@ -708,12 +711,7 @@ def _adaptive_check(s: Settings, pair: str, now: int) -> dict:
         return {"valid": None, "problem": f"validator unavailable: {type(exc).__name__}", "effective": None}
 
 
-def _has_alias(text: str) -> bool:
-    """Whether a YAML text uses an alias (``*name``) — found on the event stream, nothing is constructed."""
-    try:
-        return any(isinstance(ev, yaml.AliasEvent) for ev in yaml.parse(text, Loader=yaml.SafeLoader))
-    except yaml.YAMLError:
-        return False                   # not YAML at all: the validator refuses it quickly
+ALIAS_PROBLEM = "adaptive.yaml uses YAML anchors/aliases (never written by tools/tune.py)"
 
 
 def _adaptive_pair(s: Settings, pair: str, now: int) -> dict:
@@ -722,24 +720,33 @@ def _adaptive_pair(s: Settings, pair: str, now: int) -> dict:
     playbook, pb_truncated = _read_capped(d / "playbook.md", MAX_PLAYBOOK_BYTES)
     out: dict[str, Any] = {"dir": str(d), "file": text is not None, "yaml_error": None, "entries": [],
                            "playbook": playbook, "playbook_truncated": pb_truncated}
-    if truncated:
-        out["yaml_error"] = f"adaptive.yaml larger than {MAX_YAML_BYTES} bytes — not shown"
+    # size and alias guards BEFORE any parsing, in the services' order (core.adaptive.load_cfg_text): safe_load
+    # copies merge keys eagerly (``<<: [*a, *a, …]`` over 7 levels, ~500 bytes: minutes and gigabytes in a worker
+    # thread nobody can cancel), while the alias check only reads the event stream (nothing is constructed)
+    alias = False
+    if text is not None and (truncated or len(text) > MAX_YAML_CHARS):
+        out["yaml_error"] = f"adaptive.yaml larger than {MAX_YAML_CHARS} characters — not parsed"
     elif text is not None:
         try:
-            doc = yaml.safe_load(text)
-        except yaml.YAMLError as exc:
+            alias = has_alias(text)
+            doc = None if alias else yaml.safe_load(text)
+        except RecursionError:                           # the composer recurses: deep nesting, not a YAMLError
+            out["yaml_error"] = "adaptive.yaml is nested too deeply"
+        except (yaml.YAMLError, ValueError) as exc:      # ValueError: e.g. an impossible date (2001-13-01)
             out["yaml_error"] = " ".join(str(exc).split())[:400]
         else:
-            if doc is not None and not isinstance(doc, dict):
-                out["yaml_error"] = "adaptive.yaml is not a mapping"
-            # its own budget: a hand-made document cannot crowd the flags below out of the response
-            out["entries"] = _plain(_overlay_entries(doc, now), MAX_JSON_NODES // 10)
-    if text is not None and _has_alias(text):
-        # tune.py never writes anchors/aliases, and the validator expands them (an alias bomb stalls it for minutes)
-        out.update(valid=False, effective=None,
-                   problem="adaptive.yaml uses YAML anchors/aliases (never written by tools/tune.py) — not validated")
-    else:
-        out.update(_adaptive_check(s, pair, now))      # no files at all → valid, the config defaults
+            if alias:
+                out["yaml_error"] = f"{ALIAS_PROBLEM} — not parsed"
+            else:
+                if doc is not None and not isinstance(doc, dict):
+                    out["yaml_error"] = "adaptive.yaml is not a mapping"
+                # its own budget: a hand-made document cannot crowd the flags below out of the response
+                out["entries"] = _plain(_overlay_entries(doc, now), MAX_JSON_NODES // 10)
+    if alias:
+        # the services refuse it the same way (load_cfg_text): not handed to the validator at all
+        out.update(valid=False, effective=None, problem=f"{ALIAS_PROBLEM} — not validated")
+    else:           # no files at all → valid, the config defaults; an oversized file is refused before any parse
+        out.update(_adaptive_check(s, pair, now))
     eff = out.get("effective") or {}
     # a playbook.md that adaptive.yaml does not reference (or that expired) is not in the prompt
     out["playbook_in_force"] = bool(eff.get("playbook_chars")) if out.get("valid") else None

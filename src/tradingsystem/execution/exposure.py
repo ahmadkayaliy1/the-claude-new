@@ -21,7 +21,8 @@ def leg(*, pair: str, decision: str, kind: str, side: str, order_type: str, volu
 
 
 def aggregate(legs: list[dict]) -> list[dict]:
-    """Legs → one row per (decision, kind): volume summed, price volume-weighted, every TP listed, profit summed."""
+    """Legs → one row per (decision, kind): volume summed, price volume-weighted, every TP listed, profit summed.
+    ``sl`` is the first leg's (for display); ``sl_missing`` is True when ANY leg has none (the monitor's critical)."""
     groups: dict[tuple, list[dict]] = {}
     for x in legs:
         groups.setdefault((x["pair"], x["decision"], x["kind"], x["side"]), []).append(x)
@@ -34,7 +35,8 @@ def aggregate(legs: list[dict]) -> list[dict]:
         exp = max((x["expires_ms"] for x in xs if x["expires_ms"]), default=None)
         out.append({"pair": pair, "decision": decision[:8], "kind": kind, "side": side,
                     "order_type": xs[0]["order_type"], "volume": round(vol, 8), "price": round(price, 8),
-                    "sl": xs[0]["sl"], "tps": sorted({x["tp"] for x in xs if x["tp"]}),
+                    "sl": xs[0]["sl"], "sl_missing": any(not x["sl"] for x in xs),
+                    "tps": sorted({x["tp"] for x in xs if x["tp"]}),
                     "profit_usd": round(sum(profits), 2) if profits else None,
                     "since": iso(since) if since else None, "expires": iso(exp) if exp else None})
     out.sort(key=lambda r: (r["pair"], r["since"] or ""))

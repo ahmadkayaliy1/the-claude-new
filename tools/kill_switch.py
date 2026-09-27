@@ -10,13 +10,17 @@ who and why in the file; an existing switch is kept as it is. Open positions kee
 protective actions keep running. The owner switches it off with ``scripts\\kill_switch_off.bat [PAIR]`` — never from
 here (deliberate friction). A notification (critical) says what was engaged.
 
-The global switch needs ``--all`` explicitly: a forgotten ``--pair`` must never stop every system.
-Exit codes: 0 engaged (or already on; --status), 1 the file could not be written, 3 invalid request.
+The global switch needs ``--all`` explicitly: a forgotten ``--pair`` must never stop every system. An operator session
+(``TS_OPERATOR_SESSION=1`` in its environment, set by the session runner) may engage one pair's switch only: ``--all``
+is refused there — the global switch is the monitor's decision (§3.8) or the owner's.
+Exit codes: 0 engaged (or already on; --status), 1 the file could not be written, 2 refused (``--all`` in a session),
+3 invalid request.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -26,10 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from tradingsystem.core.killswitch import kill_switch_path, read_reason, set_kill_switch  # noqa: E402
 from tradingsystem.core.settings import Settings, load_settings  # noqa: E402
 
-EXIT_OK, EXIT_ERROR, EXIT_INVALID = 0, 1, 3
+EXIT_OK, EXIT_ERROR, EXIT_REFUSED, EXIT_INVALID = 0, 1, 2, 3
 PAIR_RE = re.compile(r"^[A-Z0-9]{2,20}$")
 ACTOR_RE = re.compile(r"^[\w.@:+-]{1,40}$")
 MAX_REASON = 500
+SESSION_ENV = "TS_OPERATOR_SESSION"             # "1" in every operator session's environment (the session runner)
 
 
 class Invalid(Exception):
@@ -81,6 +86,10 @@ def main(argv: list[str] | None = None, *, settings: Settings | None = None) -> 
     ap.add_argument("--actor", default="operator", help="who (default operator)")
     try:
         a = ap.parse_args(argv)
+        if a.all and os.environ.get(SESSION_ENV) == "1":
+            print("refused: a session may engage one pair's switch only (--pair PAIR); the global switch is the "
+                  "monitor's decision or the owner's")
+            return EXIT_REFUSED
         s = settings or load_settings()
         if a.status:
             print(json.dumps(status(s), indent=1, ensure_ascii=False))

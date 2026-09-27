@@ -468,7 +468,7 @@ class NotifyCfg(_Model):
     telegram: bool = True
     min_level: Literal["info", "warn", "critical"] = "info"
     toast_min_level: Literal["info", "warn", "critical"] = "info"
-    rate_per_hour: int = Field(20, ge=1, le=500)         # per process
+    rate_per_hour: int = Field(20, ge=1, le=500)         # per process, info and warn each (critical: no limit)
     dedupe_minutes: int = Field(30, ge=0, le=1440)       # same key → one message (shared by every system)
     timeout_s: float = Field(10.0, ge=1, le=60)
 

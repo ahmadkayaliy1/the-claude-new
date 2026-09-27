@@ -14,6 +14,7 @@ import pytest
 from tradingsystem.ai.budget import UsageStore
 from tradingsystem.ai.providers.base import LLMResult
 from tradingsystem.ai.store import DecisionRecord, DecisionStore
+from tradingsystem.core.adaptive import text_hash
 from tradingsystem.core.settings import INSTANCE_ENV, load_settings
 from tradingsystem.core.timeutil import MS_PER_HOUR, MS_PER_MINUTE, iso, now_ms
 from tradingsystem.execution import management
@@ -131,17 +132,21 @@ def seed(s, now: int, n_ideas: int = 30) -> dict:
                                cached_input_tokens=15_000), provider="claude_code", model="sonnet",
                      purpose="agent_per_pair", pair=pair, ok=True, role=role)
     u.close()
-    # adaptive files: one entry in force, one expired, a playbook, changes with a torn last line
+    # adaptive files: one entry in force, one expired, a playbook referenced by its live entry, changes with a torn
+    # last line
     ad = s.paths.data() / "adaptive" / PAIR
     ad.mkdir(parents=True)
+    playbook = ("- London open sweeps of the Asia range reverse more often than they run\n"
+                "- Skip the first 15 min after 13:30 UTC data\n")
     (ad / "adaptive.yaml").write_text(
         "version: 1\n"
         f"min_confidence_floor: {{value: 60, set_ms: {now - 30 * MS_PER_HOUR}, expires_ms: {now + 10 * 24 * MS_PER_HOUR},"
         " reason: low-confidence ideas lose, window_hours: 168}\n"
         f"trigger:\n  weak_min: {{value: 3, set_ms: {now - 20 * 24 * MS_PER_HOUR}, expires_ms: {now - 6 * 24 * MS_PER_HOUR},"
-        " reason: too many weak calls, window_hours: 168}\n", encoding="utf-8")
-    (ad / "playbook.md").write_text("- London open sweeps of the Asia range reverse more often than they run\n"
-                                    "- Skip the first 15 min after 13:30 UTC data\n", encoding="utf-8")
+        " reason: too many weak calls, window_hours: 168}\n"
+        f"playbook: {{value: {text_hash(playbook)}, set_ms: {now - 30 * MS_PER_HOUR}, "
+        f"expires_ms: {now + 10 * 24 * MS_PER_HOUR}, reason: session notes, window_hours: 168}}\n", encoding="utf-8")
+    (ad / "playbook.md").write_text(playbook, encoding="utf-8")
     (ad / "changes.jsonl").write_text(json.dumps({"ts": now - 30 * MS_PER_HOUR, "op": "set", "key": "min_confidence_floor",
                                                   "new": 60}) + "\n{\"ts\": 1, \"op\": \"se", encoding="utf-8")
     # the engine's screen log + one ERROR line
@@ -196,8 +201,11 @@ def test_seeded_pair_gives_a_bounded_pack_with_every_section(rp, tmp_path):
     assert data["per_pair"][PAIR]["rule_executions"]["applied"] == 1
     assert data["per_pair"][PAIR]["escalations"]["verdicts"] == {"downgrade": 1}
     ad = data["per_pair"][PAIR]["adaptive"]
-    assert [(e["key"], e["in_force"]) for e in ad["entries"]] == [("min_confidence_floor", True), ("trigger.weak_min", False)]
-    assert ad["playbook"]["chars"] > 0 and len(ad["changes"]) == 1                   # the torn line is skipped
+    assert [(e["key"], e["in_force"]) for e in ad["entries"]] == [("min_confidence_floor", True), ("playbook", True),
+                                                                  ("trigger.weak_min", False)]
+    assert "error" not in ad and ad["effective"]["min_confidence"] == max(60, s.risk.min_confidence)
+    assert ad["playbook"]["in_force"] is True and ad["playbook"]["chars"] > 0
+    assert len(ad["changes"]) == 1                                                   # the torn line is skipped
     assert data["per_pair"][PAIR]["tuning_changes"][0]["key"] == "min_confidence_floor"
     assert data["log_errors"] == {f"{PAIR}/engine.jsonl": 1}
     assert data["hashes"]["config"] == s.config_hash and data["hashes"]["git"] == "abc1234"
@@ -206,7 +214,8 @@ def test_seeded_pair_gives_a_bounded_pack_with_every_section(rp, tmp_path):
     assert len(data["ideas"]) == rp.IDEAS and data["ideas_in_window"] == 30
     assert data["ideas"][0]["ts"] >= data["ideas"][-1]["ts"]                       # latest first
     for text in ("## Versions and hashes", "## AI usage", "## Health", f"## {PAIR}", "gate failures by check: "
-                 "rr_after_costs 10", "min_confidence_floor=60 (until", "trigger.weak_min=3 (EXPIRED", "London open sweeps",
+                 "rr_after_costs 10", "min_confidence_floor=60 (until", "trigger.weak_min=3 (EXPIRED",
+                 "playbook in force (", "London open sweeps", "effective values (config + overlay in force)",
                  "## Operator context", "## Last 25 trade ideas", "git abc1234", "watch the Asia range"):
         assert text in md, text
     assert md.count(f"| {PAIR} |") == rp.IDEAS

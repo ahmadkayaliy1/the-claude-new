@@ -95,13 +95,18 @@ def render(role: str, system_vars: dict[str, object], user_vars: dict[str, objec
 
 
 def register_versions(store, rendered: RenderedPrompt, role: str, *, lib_hash: str | None = None) -> None:
-    """Record ``rendered``'s prompt hash with the versions of the files it used in ``prompt_versions`` (first
-    sighting, :meth:`..store.DecisionStore.register_prompt`). One database write per new system prompt per process;
-    never raises — a registry problem must not fail a cycle. ``lib_hash`` defaults to the library as it is now."""
+    """Record ``rendered``'s prompt hash and the library hash with the versions of the files it used in
+    ``prompt_versions`` (first sighting, :meth:`..store.DecisionStore.register_prompt`). The system prompt's hash alone
+    does not identify a version — an edit of the user template (``instructions.md``) leaves it unchanged — so the
+    registry is keyed on both. One database write per new (system prompt, library) per process; never raises — a
+    registry problem must not fail a cycle. ``lib_hash`` defaults to the library as it is now."""
     try:
-        if store is None or store.prompt_known(rendered.prompt_hash):
+        if store is None:
             return
-        store.register_prompt(rendered.prompt_hash, role, lib_hash or library_hash(), dict(rendered.versions))
+        lib = lib_hash or library_hash()
+        if store.prompt_known(rendered.prompt_hash, lib):
+            return
+        store.register_prompt(rendered.prompt_hash, role, lib, dict(rendered.versions))
     except Exception:  # noqa: BLE001
         log.warning("prompt versions of %s (%s) not registered", role, rendered.prompt_hash, exc_info=True)
 

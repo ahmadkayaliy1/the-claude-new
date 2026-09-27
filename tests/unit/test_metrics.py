@@ -143,6 +143,27 @@ def test_pending_order_never_triggered(env):
     assert m["mfe_r"] is None and m["mae_r"] is None and m["tp1_hit"] is None
 
 
+def test_virtual_trade_stopped_on_its_fill_bar_keeps_both_excursions(env):
+    """BUY MARKET at bar 570's open 104647.30, SL 104547.30 (R 100): bar 570's low 104450.00 stops it on the fill bar.
+    Its high does not count (the order inside the bar is unknown) → the fill price is the favourable extreme: MFE 0,
+    MAE (104647.30 − 104450)/100 = 1.973 — stored, not NULL. A BUY_LIMIT 104600 in the zone [104580, 104620] (R =
+    104620 − 104500 = 120) filled and stopped on the same bar: MFE (104600 − 104620)/120 = −0.167, MAE 1.417."""
+    e = 104647.30
+    rec = trade("BUY", "MARKET", {"price": e}, e - 100, [e + 150], ot(570))
+    rid = save(env, rec, record_ts=ot(571), state="rejected", detail={"reason": "x"}, virtual=("sl_first", -1.0))
+    assert env.job.run(FAR) == 1
+    m = env.store.metrics_of(rid)
+    assert (m["mfe_r"], m["mae_r"]) == (0.0, 1.973)
+    assert (m["tp1_hit"], m["exit_reason"], m["minutes_to_resolve"]) == (0, "sl", 0)
+    lv = levels_of(trade("BUY", "BUY_LIMIT", {"price": 104600.0, "range_min": 104580.0, "range_max": 104620.0},
+                         104500.0, [104800.0], ot(570)))
+    c = env.reader(env.inst.key).read_range(spec_for(env.inst, "candles", Timeframe.M1), ot(570), ot(600),
+                                            ["open_time", "high", "low"])
+    vt = virtual_trade(lv, ot(570), c["open_time"], c["high"], c["low"])
+    assert (vt.outcome, vt.fill_ms, vt.end_ms, vt.best, vt.worst) == ("sl_first", ot(570), ot(570), 104600.0, 104450.0)
+    assert mx.excursions_r(lv, vt.best, vt.worst) == (-0.167, 1.417)
+
+
 def test_walk_agrees_with_evaluate_virtual(env, monkeypatch):
     """The metrics walk decides exactly what executor.evaluate_virtual decided, on the same bars."""
     from tradingsystem.execution.executor import evaluate_virtual
@@ -268,6 +289,46 @@ def test_not_filled_trade(env):
     assert m["mfe_r"] is None and m["tp1_hit"] is None and m["slippage"] is None
 
 
+def _settle_mt5(e, rid, open_ms, close_ms, reason):
+    r = {"filled": True, "commission": 0.0, "swap": 0.0, "fee": 0.0, "open_ms": open_ms, "close_ms": close_ms,
+         "exits": [{"leg": "6001", "tp_index": 1, "filled": True, "reason": reason, "open_ms": open_ms,
+                    "close_ms": close_ms}]}
+    e.store.set_outcome(rid, "closed_profit", 1.0, 1.0, 150.0, detail=mt5_outcome_detail(r))
+
+
+def test_executed_trade_waits_for_the_bar_it_closed_in(env):
+    """SELL MARKET at bar 777's open 104690.38, SL +200, one TP 104540.38 — reached in bar 782 (low 104536.85), closed
+    by the broker 5 s into it. The housekeeping pass right after the settlement (close + 50 s, bar 782 still forming)
+    writes nothing: scored then, the TP bar would be missing for good (a written row is final). Once bar 782 has
+    closed: window 777…782 (6 bars), TP1 hit, MFE (104690.38 − 104536.85)/200 = 0.768, MAE (104696.01 − 104690.38)/200
+    = 0.028 (bar 781's high)."""
+    e = 104690.38
+    rid = save(env, trade("SELL", "MARKET", {"price": e}, e + 200, [e - 150], ot(777)), record_ts=ot(778),
+               state="executed", detail={"mode": "demo", "backend": {"ok": True}})
+    close = ot(782) + 5_000
+    _settle_mt5(env, rid, ot(777) + 2_000, close, "tp")
+    assert env.job.run(close + 50_000) == 0 and env.store.metrics_of(rid) is None
+    assert env.job.run(close + 50_000 + mx.NOT_READY_RETRY_MS) == 1
+    m = env.store.metrics_of(rid)
+    assert (m["tp1_hit"], m["mfe_r"], m["mae_r"], m["exit_reason"]) == (1, 0.768, 0.028, "tp")
+    assert m["detail"]["bars"] == 6 and "partial" not in m["detail"]
+
+
+def test_executed_trade_close_bar_not_stored_waits_then_scores_partial(env):
+    """A trade closed in bar 3001, past the fixture's last stored bar (2999): bar 3001 has closed but is not stored
+    (ingestion behind) → waits; still missing MISSING_BARS_GRACE_MS after the close → scored on bars 2990…2999, flagged."""
+    e = 104956.77                                                    # bar 2990's open
+    rid = save(env, trade("BUY", "MARKET", {"price": e}, e - 200, [e + 300], ot(2990)), record_ts=ot(2991),
+               state="executed", detail={"mode": "demo", "backend": {"ok": True}})
+    close = ot(3001) + 5_000
+    _settle_mt5(env, rid, ot(2990) + 1_000, close, "sl")
+    assert env.job.run(close + 2 * MIN) == 0
+    assert env.job.run(close + mx.MISSING_BARS_GRACE_MS) == 1
+    m = env.store.metrics_of(rid)
+    assert m["detail"]["partial"].startswith("bars missing") and m["detail"]["bars"] == 10
+    assert m["mfe_r"] == 0.381 and m["tp1_hit"] == 0                # bar 2993's high 105032.91
+
+
 # --------------------------------------------------------------------------- NO_TRADE counterfactual
 def test_no_trade_counterfactual_in_decision_atr(env):
     """Cycle at bar 1010 (03:30 UTC, a 15m close): the next four 15m bars are 1m bars 1010…1069. Price at the cycle =
@@ -323,6 +384,47 @@ def test_missing_bars_wait_then_score_what_exists(env):
     assert env.job.run(end + 7 * 3_600_000) == 1
     d = env.store.metrics_of(rid)["detail"]
     assert d["bars"] == 20 and d["partial"].startswith("bars missing")
+
+
+def _drop_bars(e, first: int, last: int) -> None:
+    """Bars first…last (fixture indexes) removed from the hot store — not ingested yet, or never there."""
+    con = sqlite3.connect(e.inst.hot_db_path(e.s.paths.data()))
+    con.execute(f"DELETE FROM {spec_for(e.inst, 'candles', Timeframe.M1).name} WHERE open_time BETWEEN ? AND ?",
+                (ot(first), ot(last)))
+    con.commit()
+    con.close()
+
+
+def _restore_bars(e) -> None:
+    spec = spec_for(e.inst, "candles", Timeframe.M1)
+    with SQLiteHotStore(e.inst.hot_db_path(e.s.paths.data())) as st:
+        st.upsert(spec, list(zip(*(e.t[c].to_pylist() for c in spec.column_names))))
+
+
+def test_no_trade_waits_for_the_window_last_bar(env):
+    """The window of the cycle at bar 1010 ends with bar 1069; bars 1065…1069 not ingested yet 2 min after the end →
+    waits (the old 10-min tolerance scored 55 bars for good); ingested → the full 60-bar window (2.884 ATR)."""
+    env.store.save_payload("ph-7", PAIR, {"timeframes": {"15m": {"indicators": {"atr14": 120.0}}}})
+    rid = save(env, no_trade(ot(1010)), record_ts=ot(1011), payload_hash="ph-7")
+    _drop_bars(env, 1065, 1069)
+    assert env.job.run(ot(1072)) == 0
+    _restore_bars(env)
+    assert env.job.run(ot(1072) + mx.NOT_READY_RETRY_MS) == 1
+    m = env.store.metrics_of(rid)
+    assert m["detail"]["bars"] == 60 and m["no_trade_counterfactual_atr"] == 2.884 and "partial" not in m["detail"]
+
+
+def test_no_trade_short_gap_at_the_window_end_is_accepted_after_the_tolerance(env):
+    """Bars 1065…1069 never arrive (a quiet market, a session break): scored COVER_TOL_MS after the window's end on the
+    55 bars there are, as a complete window — no 6-hour wait for bars that do not exist."""
+    env.store.save_payload("ph-8", PAIR, {"timeframes": {"15m": {"indicators": {"atr14": 120.0}}}})
+    rid = save(env, no_trade(ot(1010)), record_ts=ot(1011), payload_hash="ph-8")
+    _drop_bars(env, 1065, 1069)
+    assert env.job.run(ot(1072)) == 0
+    assert env.job.run(ot(1072) + mx.NOT_READY_RETRY_MS) == 0                  # 7 min after the end: still waiting
+    assert env.job.run(ot(1072) + 2 * mx.NOT_READY_RETRY_MS) == 1              # 12 min ≥ COVER_TOL_MS
+    d = env.store.metrics_of(rid)["detail"]
+    assert d["bars"] == 55 and "partial" not in d
 
 
 def test_forming_bar_is_never_scored(env):

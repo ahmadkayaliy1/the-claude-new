@@ -51,6 +51,10 @@ apostrophes. Read files with the Read tool (Grep/Glob to search), not with Bash.
 `tune.py` and `propose.py` accept `--dry-run` to check a request without writing. `review_pack.py --print` shows a
 narrower slice (one pair, fewer hours) when the pack in your first message is not enough.
 
+In a session the tools refuse what only the owner may do, so do not try it: a playbook goes only with `--text` (the
+FILE and `-` forms are refused); the kill switch is `--pair` only (the global switch is the monitor's decision, or the
+owner's); a proposal is always from `main` - never pass `--base` or `--body-file` (the body goes in `--body`).
+
 Never read `.env`, credential files or anything under a user profile, and never print a token, password or key. The
 files you may read are the project's code, configuration and docs, and the data root named in the pack.
 

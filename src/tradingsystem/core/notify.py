@@ -8,19 +8,24 @@ start or a file lock:
 
 * **Windows toast** through ``scripts/notify.ps1`` (WinRT ``ToastNotificationManager`` under Windows PowerShell 5.1, no
   extra module). Title and text travel base64-encoded (PS 5.1 mangles native arguments with quotes, newlines or
-  non-ASCII); the process gets no window (``CREATE_NO_WINDOW``) and a timeout.
+  non-ASCII); the process gets no window (``CREATE_NO_WINDOW``) and a timeout. It goes first: a network stall on the
+  Telegram side never holds back the local sink (a short-lived tool's flush may end before Telegram does).
 * **Telegram** ``sendMessage`` via ``httpx`` when ``TELEGRAM_BOT_TOKEN`` and ``TELEGRAM_CHAT_ID`` are set (H18, the
-  owner's action) — read with ``secret()``, which re-reads ``.env`` at most once a minute, so adding them needs no
-  restart; skipped silently while either is missing. The token sits in the request URL and so in httpx's exception
-  texts and its INFO log line; both are redacted here (the token and the chat id are replaced before anything is
-  logged — the process redactor only knows values that were in ``os.environ`` at start-up).
+  owner's action) — read from ``.env`` (re-read at most once a minute) when the file has the line, an empty value
+  meaning off, else from the process environment. ``load_settings()`` copies ``.env`` into ``os.environ`` at start-up,
+  so the file has to win: adding, changing (a revoked token) or emptying them takes effect within a minute, without a
+  restart (deleting the lines too, in a process that has read them since its start — :meth:`Notifier._telegram_creds`).
+  Skipped silently while either is missing. The token sits in the request URL and so in httpx's exception texts and
+  its INFO log line; both are redacted here (the token and the chat id are replaced before anything is logged — the
+  process redactor only knows values that were in ``os.environ`` at start-up).
 
 Rules, in this order: ``TS_NOTIFY_DISABLE=1`` (the unit suite, dry runs) or ``notify.enabled: false`` → the log line
 only; a level below ``notify.min_level`` → the log line only; no usable sink → done; more than
-``notify.rate_per_hour`` sent by this process in the last hour → the log line only (one warning per hour); the same
-``key`` sent by ANY system within ``notify.dedupe_minutes`` → skipped (``data/shared/notify_state.json`` under a file
-lock — the three pair systems share one account and one owner). A sink failure is one warning per hour and sink in the
-process log; nothing here ever raises into the caller.
+``notify.rate_per_hour`` of the same level sent by this process in the last hour → the log line only (one warning per
+hour and level; info and warn have a budget each, so a stream of info events never silences a warning, and a critical
+one is never limited); the same ``key`` sent by ANY system within ``notify.dedupe_minutes`` → skipped
+(``data/shared/notify_state.json`` under a file lock — the three pair systems share one account and one owner). A sink
+failure is one warning per hour and sink in the process log; nothing here ever raises into the caller.
 
 Short-lived tools (``tools/notify.py``, the monitor, the session runner) call :func:`flush` before exiting: the worker
 is a daemon thread and dies with the interpreter.
@@ -43,6 +48,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import httpx
+from dotenv import dotenv_values
 
 from .filelock import FileLock, locks_dir
 from .logsetup import get_redactor
@@ -67,6 +73,7 @@ STATE_KEEP_MS = 1440 * MS_PER_MINUTE    # the longest dedupe window settings all
 STATE_MAX_KEYS = 1000
 RATE_WINDOW_S = 3600.0
 SINK_WARN_EVERY_S = 3600.0
+DOTENV_TTL_S = 60.0                     # the Telegram values: .env re-read at most this often (as secret())
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BOT_URL_RE = re.compile(r"/bot[^/\s\"'<>]+")
@@ -200,7 +207,7 @@ class _Item:
 class Notifier:
     """One per process in production (:func:`notify` uses the module's); tests build their own with an
     ``httpx.MockTransport`` and fake clocks. ``clock`` = wall clock in ms (dedupe, shared by processes),
-    ``monotonic`` = seconds (the per-process rate limit and the sink-warning throttle)."""
+    ``monotonic`` = seconds (the per-process rate limit, the sink-warning throttle and the ``.env`` re-read)."""
 
     def __init__(self, *, transport: httpx.BaseTransport | None = None, clock: Callable[[], int] = now_ms,
                  monotonic: Callable[[], float] = time.monotonic, queue_size: int = QUEUE_SIZE) -> None:
@@ -212,8 +219,11 @@ class Notifier:
         self._thread: threading.Thread | None = None
         self._start_lock = threading.Lock()
         self._rate_lock = threading.Lock()
-        self._sent: collections.deque[float] = collections.deque()
+        self._sent: dict[str, collections.deque[float]] = {"info": collections.deque(),
+                                                           "warn": collections.deque()}   # critical has no budget
         self._warned: dict[str, float] = {}
+        self._env: tuple[float, Path | None, dict[str, str]] = (float("-inf"), None, {})   # (read at, file, values)
+        self._env_named: set[str] = set()             # Telegram names .env has defined while this process ran
         self.results: collections.deque[dict[str, Any]] = collections.deque(maxlen=50)
 
     # ---- caller's thread
@@ -344,23 +354,25 @@ class Notifier:
                          else "skipped (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set)")
         if not (toast_ok or (token and chat)):
             return r
-        if item.level != "critical" and not self._rate_room(cfg.rate_per_hour):    # a critical one always goes out
+        lvl = item.level
+        if lvl != "critical" and not self._rate_room(cfg.rate_per_hour, lvl):    # a critical one always goes out
             r["rate_limited"] = True
-            self._skip(r, f"rate limit {cfg.rate_per_hour}/hour: log only")
-            self._note("rate", f"notification rate limit ({cfg.rate_per_hour}/hour in this process) reached - "
-                               f"'{item.title}' and the next ones this hour go to the log only")
+            self._skip(r, f"rate limit {cfg.rate_per_hour} {lvl}/hour: log only")
+            self._note(f"rate:{lvl}", f"notification rate limit ({cfg.rate_per_hour} {lvl}/hour in this process) "
+                                      f"reached - '{item.title}' and the next {lvl} ones this hour go to the log only")
             return r
         if item.key and cfg.dedupe_minutes > 0 and not self._claim(s, item.key, item.ts, cfg.dedupe_minutes):
             r["deduped"] = True
             self._skip(r, f"deduped (key sent within {cfg.dedupe_minutes} min)")
             log.debug("notification '%s' deduped (key %s)", item.title, item.key)
             return r
-        with self._rate_lock:
-            self._sent.append(self.monotonic())
+        if lvl != "critical":
+            with self._rate_lock:
+                self._sent.setdefault(lvl, collections.deque()).append(self.monotonic())
+        if toast_ok:                                  # the local sink first: a network stall never holds it back
+            r["toast"] = self._toast(item)
         if token and chat:
             r["telegram"] = self._telegram(item, token, chat)
-        if toast_ok:
-            r["toast"] = self._toast(item)
         return r
 
     @staticmethod
@@ -369,12 +381,15 @@ class Notifier:
             if r.get(sink) == "pending":
                 r[sink] = why
 
-    def _rate_room(self, per_hour: int) -> bool:
+    def _rate_room(self, per_hour: int, level: str = "info") -> bool:
+        """Room in ``level``'s budget: info and warn are counted apart, so info traffic (fills, trailing stops) can
+        never use up what the warnings need."""
         with self._rate_lock:
+            sent = self._sent.setdefault(norm_level(level), collections.deque())
             now = self.monotonic()
-            while self._sent and now - self._sent[0] >= RATE_WINDOW_S:
-                self._sent.popleft()
-            return len(self._sent) < per_hour
+            while sent and now - sent[0] >= RATE_WINDOW_S:
+                sent.popleft()
+            return len(sent) < per_hour
 
     def _note(self, kind: str, msg: str) -> None:
         """A sink / limit problem: a warning at most once an hour per kind, debug otherwise (never a flood)."""
@@ -444,13 +459,44 @@ class Notifier:
         self._note("toast", f"toast failed: {why}")
         return f"failed: {why}"
 
-    @staticmethod
-    def _telegram_creds() -> tuple[str | None, str | None]:
+    def _telegram_creds(self) -> tuple[str | None, str | None]:
+        """``TELEGRAM_BOT_TOKEN`` / ``TELEGRAM_CHAT_ID``: the ``.env`` value when the file has the line (empty = off),
+        else the process environment. ``secret()`` asks the environment first, but ``load_settings()`` copied the
+        start-up ``.env`` into it (and the supervisor passes that copy on), so a rotated or removed value would never
+        reach a running service. Once this process has seen ``.env`` define a name, the environment's value for it
+        is that copy: a line removed later means off, not the start-up value."""
         try:
-            from ..ai.providers import base
-            return base.secret(TELEGRAM_SECRET_ENV[0]), base.secret(TELEGRAM_SECRET_ENV[1])
+            vals = self._dotenv()
+            out: list[str | None] = []
+            for name in TELEGRAM_SECRET_ENV:
+                if name in vals:
+                    self._env_named.add(name)
+                    v = vals[name]
+                elif name in self._env_named:
+                    v = ""                            # the line was removed from .env: off (not the start-up copy)
+                else:
+                    v = os.environ.get(name, "")
+                out.append(v.strip() or None)
+            return out[0], out[1]
         except Exception:  # noqa: BLE001
             return None, None
+
+    def _dotenv(self) -> dict[str, str]:
+        """``.env`` (the file ``secret()`` reads), re-read at most every ``DOTENV_TTL_S``; a line without a value is
+        an empty string. A read error keeps the previous values (a file being saved must not switch Telegram to the
+        start-up copy)."""
+        from ..ai.providers import base
+        path = Path(base.ENV_FILE)
+        t, cached_path, vals = self._env
+        now = self.monotonic()
+        if cached_path == path and now - t < DOTENV_TTL_S:
+            return vals
+        try:
+            vals = {k: (v or "") for k, v in dotenv_values(path).items()} if path.exists() else {}
+        except (OSError, ValueError):
+            vals = vals if cached_path == path else {}
+        self._env = (now, path, vals)
+        return vals
 
     @staticmethod
     def _scope(item: _Item) -> str:

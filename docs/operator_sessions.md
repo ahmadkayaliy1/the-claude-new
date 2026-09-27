@@ -24,8 +24,19 @@ scripts\install_operator_tasks.bat -Uninstall   remove the three tasks again
 ```
 
 * `TradingSystemOps-Monitor` — every 15 min: `pythonw tools\monitor.py --quiet` (limit 10 min);
-* `TradingSystemOps-ReviewDaily` — 04:30 UTC: `powershell -File tools\operator\run_session.ps1 -Kind daily` (limit 20 min);
-* `TradingSystemOps-ReviewWeekly` — Sunday 06:00 UTC: `… -Kind weekly` (limit 40 min).
+* `TradingSystemOps-ReviewDaily` — 04:30 UTC: `powershell -File tools\operator\run_session.ps1 -Kind daily` (limit 130 min);
+* `TradingSystemOps-ReviewWeekly` — Sunday 06:00 UTC: `… -Kind weekly` (limit 190 min).
+
+**Time limits.** The session runner ends a review itself at `operator.daily_timeout_min` / `weekly_timeout_min`
+(config; 20 / 40 by default, see §2 step 5). The tasks' `ExecutionTimeLimit` is only a backstop for a hung runner:
+130 / 190 min = the largest value the settings accept (`OperatorCfg`: 120 / 180) + 10 min. So the config's deadline
+always governs, and raising `*_timeout_min` (within its bounds) needs no re-install. Task Scheduler's limit ends the
+task's whole job — PowerShell, Python and the CLI — before the runner can write its session file, ledger row or
+notification, which is why it must never be the one that fires (pinned by
+`test_review_task_limits_are_a_backstop_beyond_every_config_value`). `-DailyLimitMinutes` / `-WeeklyLimitMinutes`
+override the backstop; a value below 130 / 190 is reported as a `WARNING` with the largest `*_timeout_min` it leaves
+room for. A diagnosis is not a task: the monitor starts it outside its own job, and `diagnose_timeout_min` alone
+limits it.
 
 Same principal and settings as `install_autostart.ps1`: your account, "run only when user is logged on" (the Claude
 CLI sign-in lives in your user profile), not elevated, on battery too, a missed run starts as soon as possible, a
@@ -54,7 +65,8 @@ output with the OEM code page); the work is Python:
    `CLAUDE_CODE_OAUTH_TOKEN` is configured (as the provider does).
 5. **The session**: `claude -p` (command line below), working directory = the checkout, stdout/stderr to files under
    `data/reviews/`, a deadline that ends the whole run `KILL_MARGIN_S` (90 s) before `operator.<kind>_timeout_min`
-   — on the deadline the process **tree** is killed (the model's tool children too), status `timeout`.
+   — on the deadline the process **tree** is killed (the model's tool children too), status `timeout`. This deadline
+   is the one that governs; the scheduled task's limit lies beyond every value the config accepts (§1).
 6. **The result**: `success` → `ok`; `error_max_turns` → `max_turns` — both are a normal end (the second has no
    summary). Errors are classified from the error text only (`not_signed_in`, `usage_limit`, `sign_in_transient`,
    `other`) — never from a successful answer that mentions a "usage limit".
@@ -74,7 +86,10 @@ output with the OEM code page); the work is Python:
 
 Exit codes (Task Scheduler's "Last Result"): 0 finished (`ok` or `max_turns`) or dry run, 1 failed (`pack_failed`,
 `cli_missing`, `venv_missing`, `not_signed_in`, `no_time`, `error`, `timeout`), 2 not run (`disabled`, `busy`,
-`gauge_paused`). The log is `logs/operator-session.jsonl`.
+`gauge_paused`), 3 the config cannot be read (`load_settings` failed, e.g. a bad `config\config.local.yaml`): one
+timestamped line in `logs\operator-session-config-error.log` of the checkout, a best-effort critical toast "Operator
+session cannot read its config", the error on stderr — nothing runs until the config is fixed (`check_ops.bat` points
+there). The log is `logs/operator-session.jsonl`.
 
 ### Files in `data/reviews/` (shared by every system; the dashboard's Reviews tab)
 
@@ -98,17 +113,20 @@ claude -p --model <m> --effort <e> --output-format json --no-session-persistence
   --system-prompt-file <checkout>\tools\operator\prompts\_system.md [--add-dir <data root>]
   --tools Read,Grep,Glob,Bash
   --disallowedTools Edit Write NotebookEdit WebFetch WebSearch "Read(**/.env)" "Read(.env)" "Read(**/.env.*)"
+    "Read(~/.claude/**)" "Read(~/.ssh/**)" "Read(~/.aws/**)" "Read(~/.config/**)" "Read(**/.credentials.json)"
   --allowedTools Read Grep Glob
     "Bash(.venv/Scripts/python.exe tools/health_report.py*)" "Bash(.venv/Scripts/python.exe tools/review_pack.py*)"
     "Bash(.venv/Scripts/python.exe tools/tune.py*)" "Bash(.venv/Scripts/python.exe tools/propose.py*)"
     "Bash(.venv/Scripts/python.exe tools/notify.py*)"
-    [diagnose only] "Bash(.venv/Scripts/python.exe tools/kill_switch.py*)"
+    [diagnose only] "Bash(.venv/Scripts/python.exe tools/kill_switch.py --pair *)"
 ```
 
 * `dontAsk` + `--permission-prompts none`: anything not allowed is denied, never asked; the denials are in the
   session file (`result.permission_denials`) — a denied command costs a turn, which is why `_system.md` spells out
   the exact command forms.
 * `--setting-sources=` (equals form, one argument): no settings, hooks or CLAUDE.md; `--strict-mcp-config`: no MCP.
+* The diagnosis' kill-switch rule names `--pair`: one pair's switch only. `--all` (every system) is the monitor's
+  decision (§3.8) or the owner's; `kill_switch.py` refuses it in a session as well (below).
 * **No git rule** (a deviation from the §3.8 text): the pack carries the git facts (sha, branch, last 5 commits,
   dirty flag and files), and `git diff` / `git log` accept `--output=<file>` — a file write through a read-only-looking
   prefix. `demo_order_test.py`, `migrate_instance.py` and every script are not reachable.
@@ -124,6 +142,12 @@ root), `CLAUDE_CODE_GIT_BASH_PATH` when you set it, the subscription token when 
 `PYTHONIOENCODING=utf-8`, `PYTHONUTF8=1` (tool output has "≥", "→"), `MSYS_NO_PATHCONV=1` (Git Bash would turn
 `/nopause`-style arguments into paths). Never `CLAUDECODE`, other `CLAUDE_CODE_*`, `CLAUDE_EFFORT`, `ANTHROPIC_*`
 (an inherited API key would bill per token) or any secret from `.env`.
+
+**The session marker `TS_OPERATOR_SESSION=1`** is added too, so every command the session runs inherits it. The
+allow-listed tools refuse what only the owner may do while it is set: `tune.py … playbook` takes `--text` only (a
+FILE or `-` is refused — a file the tool opened would get around the session's Read denials); `propose.py` refuses
+`--body-file` and any `--base` other than `main`; `kill_switch.py` refuses `--all`. The prompts say so
+(`_system.md`, `diagnose.md`), so a session does not waste a turn on them.
 
 ## 4. The review pack (`tools/review_pack.py`)
 
@@ -141,11 +165,15 @@ ledger calls by role → stored answers by status and trigger strength → decis
 failures by check → placed → broker outcomes with P&L, virtual outcomes, mean R → decision-metric means: MFE/MAE in
 R, TP1/2/3 hit shares, minutes to resolve, exit reasons, rejected-but-virtual-win, spread at the gate, slippage,
 commission, swap, NO_TRADE counterfactual), attribution by session / regime / setup kind, position actions and rule
-executions, escalation verdicts, the adaptive entries with their expiry (read from `data/adaptive/<PAIR>/` directly),
-the playbook, the recent `changes.jsonl` lines and `tuning_changes` rows, the pair's kill switch, the last operator
+executions, escalation verdicts, the adaptive overlay as the services read it (`core.adaptive.read_files` +
+`compute_effective`: an invalid file is reported and its entries listed NOT APPLIED, expired entries and a disabled
+overlay are not in force, one line of effective values per pair), the playbook (shown as in force only when the
+services use it, else labelled "on disk, NOT in force"), the recent `changes.jsonl` lines and `tuning_changes` rows, the pair's kill switch, the last operator
 notes; the operator context (open proposals, the last sessions' summaries, the monitor's state); the last 25 trade
 ideas of the window. The markdown is cut to ≤ 40 k characters (fewer ideas and detail rows first; the JSON keeps
-everything). `--kind` only names the files (`adhoc` by default).
+everything). `--kind` only names the files (`adhoc` by default); `--out` must be `data\reviews` or a folder under
+it (anything else, UNC and `//` paths included, exits 3). The usage section counts operator sessions whose usage is
+unknown (timed out or crashed before the CLI printed its result).
 
 ## 5. Proposals (`tools/propose.py`)
 
@@ -155,16 +183,35 @@ python tools\propose.py --slug xau-asia-filter --title "Skip the Asia session fo
                         ... ## Risk ... ## Test plan ..."   [--body-file F] [--dry-run]
 ```
 
-`git worktree add -b proposal/<date>-<slug> C:\the_claude_new_wt\proposal-<date>-<slug> main` (next to the other
-worktrees, derived from the repository's main checkout), then there: `docs/proposals/<date>-<slug>.md` and a row in
-`PROJECT_STATUS.md` ("Human actions pending"), committed on the branch; one line in `data/shared/proposals.jsonl`
-(`status: awaiting_user`, the dashboard's Proposals tab) and a notification. The production working tree is never
-written. An existing worktree or branch of that name is refused (exit 2); a body without the five sections, a bad
-slug (3-40 lowercase letters, digits, hyphens) or an unknown pair is invalid (exit 3); a git failure after the
-worktree was created removes that worktree and branch again (exit 1).
+`git worktree add -b proposal/<date>-<slug> C:\the_claude_new_wt\proposal-<date>-<slug> <main's sha>` (next to the
+other worktrees, derived from the repository's main checkout; from the base's commit as it was counted, so the base
+cannot move in between), then there: `docs/proposals/<date>-<slug>.md` and a row in `PROJECT_STATUS.md` ("Human
+actions pending"), committed on the branch; one line in `data/shared/proposals.jsonl` (`status: awaiting_user`, the
+dashboard's Proposals tab) and a notification. The production working tree is never written. An existing worktree or
+branch of that name is refused (exit 2); a body without the five sections, a bad slug (3-40 lowercase letters,
+digits, hyphens) or an unknown pair is invalid (exit 3); a git failure after the worktree was created removes that
+worktree and branch again (exit 1).
+
+**What a merge brings in is always stated.** The document header, the notification and the `proposals.jsonl` record
+(`base`, `base_sha`, `commits_not_in_main`) name the base, its short sha and the number of commits on the branch
+that are not in main (`git rev-list --count main..<branch>`). From `main` that is 1 — the document's own commit. A
+human may pass `--base <branch>`; the extra commits are then spelled out ("merging brings ALL of them into main") and
+the notification is a warning. An operator session (`TS_OPERATOR_SESSION=1`) proposes from `main` only: another
+`--base` is invalid (exit 3), and a branch that ends up with anything but its one commit not in main is removed again
+and refused (exit 2).
+
+**`--body-file`** is for humans: a session passes `--body` (the tool refuses `--body-file` there — a file it opened
+would get around the session's Read denials), and a file named `.env*` or `*credential*` is refused before it is
+opened.
+
+**A missing record.** When the `proposals.jsonl` append fails after the commit (a disk or permission error), the
+branch is still the proposal: the failure is logged, the notification (a warning) says the record is missing, the
+success line is printed with a `warning:` line, and the exit code is 0 — a retry would only create a second branch.
+The dashboard and the next review pack do not list such a proposal; add the line by hand or delete the branch.
 
 **Accept**: `git merge --ff-only proposal/<date>-<slug>` in `C:\the_claude_new` (the document becomes a pending task
-in PROJECT_STATUS.md; implementing it is a normal change). **Reject**: `git worktree remove
+in PROJECT_STATUS.md; implementing it is a normal change) — first check the header's "commits not in main"
+(`git log main..proposal/<date>-<slug>`). **Reject**: `git worktree remove
 C:\the_claude_new_wt\proposal-<date>-<slug>` then `git branch -D proposal/<date>-<slug>`.
 
 ## 6. The kill switch in a diagnosis (`tools/kill_switch.py`)
@@ -180,6 +227,11 @@ ON only (OFF stays `scripts\kill_switch_off.bat [PAIR]` — deliberate friction)
 never reaches production) with who and why; an existing switch is kept as it is; a critical notification. Replaces
 `kill_switch_on.bat /nopause` for sessions: the .bat writes relative to its own checkout and Git Bash turns `/nopause`
 into a path.
+
+A diagnosis may engage **one pair's** switch only: its allow-list rule is `kill_switch.py --pair *`, and with
+`TS_OPERATOR_SESSION=1` the tool refuses `--all` (exit 2, "a session may engage one pair's switch only"). The global
+switch is the monitor's decision (the equity drop) or the owner's (`--all` by hand, or `kill_switch_on.bat`). Exit
+codes: 0 engaged (or already on; `--status`), 1 not written, 2 refused, 3 invalid.
 
 ## 7. By hand
 
@@ -207,7 +259,7 @@ tokens (`result.usage`, target ≤ 30 k), turns, `permission_denials`, whether t
 |---|---|
 | `not_signed_in` | `claude auth login` once in a terminal (H11); an API-key sign-in is refused on purpose |
 | `max_turns` | the session used all its turns without a summary — read `result.permission_denials` (denied commands cost turns) and the prompt/checklist |
-| `timeout` | the deadline killed the CLI tree; the usage row may be empty (the CLI printed nothing) |
+| `timeout` | the deadline killed the CLI tree; there is no result document, so the usage is unknown: the ledger row holds 0 tokens and its `error` starts with `usage_unknown: ` (with the elapsed seconds); the review pack counts such sessions. The same holds for an `error` without a result document |
 | `busy` | another session held the lock (or the CLI start stagger did not clear) — the next scheduled run tries again |
 | `gauge_paused` | the usage gauge is enforcing at level 2 (`ai.usage`); diagnoses still run |
 | `venv_missing` | the checkout has no `.venv\Scripts\python.exe` (a worktree) — create the junction |

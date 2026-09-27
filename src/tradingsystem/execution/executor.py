@@ -729,8 +729,14 @@ class Executor:
             level, title = NOTIFY_EVENTS[kind]
             pair = payload.get("pair")
             ident = payload.get("leg") or payload.get("decision") or ""
+            if kind == "mgmt_applied":
+                # no new stop value in the key: a trailing rule moves the stop on every decision bar, and those moves
+                # collapse into one notification per notify.dedupe_minutes (the log and the events keep each one)
+                key = f"{kind}:{payload.get('decision')}:{payload.get('leg')}:{payload.get('rule')}"
+            else:
+                key = f"{kind}:{payload.get('decision')}:{ident}:{payload.get('text', '')[:60]}"
             self._notify(level, f"{pair or ''} {title}".strip(), str(payload.get("text") or payload)[:400],
-                         key=f"{kind}:{payload.get('decision')}:{ident}:{payload.get('text', '')[:60]}", pair=pair)
+                         key=key, pair=pair)
 
     def _leg_quote(self, key: str) -> Tick | None:
         return self.latest_quote(key)
