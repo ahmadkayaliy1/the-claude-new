@@ -458,14 +458,20 @@ Four parts, each with its own page:
   system, oldest first (a few hours of background work with a long history; it never delays an order).
 - **Dashboard tabs:** Operator (Claude's notes, position actions and management per pair), Tuning (values in force,
   expiry, change log, playbook, freeze flag), Proposals, Reviews (the packs and the session results).
-- **The kill-switch button** (dashboard header, "Engage kill switch…", disabled while a switch is on; the red
-  "KILL SWITCH ON" badge is the state) turns the switch **on** only; off stays
+- **The kill-switch button** (dashboard header, "Engage kill switch…"; the red "KILL SWITCH ON" badge is the
+  state) turns the switch **on** only. It is disabled while the switch it would write (this system's own, or the
+  global one) is on — in the all-pairs system a pair's switch alone leaves it usable, because it writes the global
+  one. Off stays
   `scripts\kill_switch_off.bat [PAIR]` on purpose. In a pair's system (`8766`/`8767`/`8768`) it stops that pair only;
   in the all-pairs system it writes the **global** `data\KILL_SWITCH` and every system stops opening trades. Open
   trades keep their SL/TP and protective management either way.
 - **The usage gauge** (dashboard status, health report, review pack) compares the last 7 days and 5 hours of Claude
-  tokens in the shared ledger (rows of the `claude_code` providers only — a fallback provider does not count; a level
-  steps down only 5 points below its threshold) with `ai.usage.weekly_token_budget` / `five_hour_token_budget`. It only **observes**
+  tokens in the shared ledger (rows of the `claude_code` providers only — a fallback provider does not count) with
+  `ai.usage.weekly_token_budget` / `five_hour_token_budget`. Only a running engine's gauge (dashboard status, engine
+  rationing) steps a level down 5 points below its threshold; the health report, the review pack and the session gate
+  use the thresholds as they are, so after a peak they can show one level lower than the dashboard. A timed-out or
+  crashed operator session has unknown usage (0 tokens recorded): the gauge's reason adds "+ N session(s) with unknown
+  usage in 7 d" and the health report flags its gauge line with `!!`. It only **observes**
   (`ai.usage.enforce: false`) until you calibrate the budgets after a week (H21); enforced, level 1 (≥ 70 %) keeps only
   review and event calls and level 2 (≥ 90 %) only event calls.
 - **Snapshot build time:** the monitor and the health report show `snapshot_build_ms` (median of the last builds) and

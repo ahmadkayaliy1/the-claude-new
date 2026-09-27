@@ -15,6 +15,8 @@ start or a file lock:
   meaning off, else from the process environment. ``load_settings()`` copies ``.env`` into ``os.environ`` at start-up,
   so the file has to win: adding, changing (a revoked token) or emptying them takes effect within a minute, without a
   restart (deleting the lines too, in a process that has read them since its start — :meth:`Notifier._telegram_creds`).
+  A change, an empty value or a deletion is taken only when a second read ``DOTENV_RECHECK_S`` later agrees, so a
+  ``.env`` caught half-saved by an editor never switches Telegram off or to a cut-off token (:meth:`Notifier._dotenv`).
   Skipped silently while either is missing. The token sits in the request URL and so in httpx's exception texts and
   its INFO log line; both are redacted here (the token and the chat id are replaced before anything is logged — the
   process redactor only knows values that were in ``os.environ`` at start-up).
@@ -74,6 +76,7 @@ STATE_MAX_KEYS = 1000
 RATE_WINDOW_S = 3600.0
 SINK_WARN_EVERY_S = 3600.0
 DOTENV_TTL_S = 60.0                     # the Telegram values: .env re-read at most this often (as secret())
+DOTENV_RECHECK_S = 2.0                  # a .env read that may be a file caught mid-save is re-read this soon
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BOT_URL_RE = re.compile(r"/bot[^/\s\"'<>]+")
@@ -170,6 +173,15 @@ def _write_state(path: Path, keys: dict[str, int], now: int) -> None:
             time.sleep(0.05 * (attempt + 1))
 
 
+# --------------------------------------------------------------------------- the Telegram values in .env
+def _maybe_mid_save(last: dict[str, str], new: dict[str, str]) -> bool:
+    """A ``.env`` read that may have caught the file while an editor saves it: empty (or missing) while the last read
+    was not, or a Telegram name the last read had is gone or has another value (a cut-off line reads as a changed
+    token). Such a read needs a second one that agrees (:meth:`Notifier._dotenv`); adding a name does not."""
+    return (bool(last) and not new) or any(name in last and new.get(name) != last[name]
+                                           for name in TELEGRAM_SECRET_ENV)
+
+
 # --------------------------------------------------------------------------- toast
 def _powershell() -> str:
     exe = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32" / "WindowsPowerShell" / "v1.0" \
@@ -223,6 +235,7 @@ class Notifier:
                                                            "warn": collections.deque()}   # critical has no budget
         self._warned: dict[str, float] = {}
         self._env: tuple[float, Path | None, dict[str, str]] = (float("-inf"), None, {})   # (read at, file, values)
+        self._env_unconfirmed: dict[str, str] | None = None   # a .env read not accepted yet (see _dotenv)
         self._env_named: set[str] = set()             # Telegram names .env has defined while this process ran
         self.results: collections.deque[dict[str, Any]] = collections.deque(maxlen=50)
 
@@ -464,7 +477,8 @@ class Notifier:
         else the process environment. ``secret()`` asks the environment first, but ``load_settings()`` copied the
         start-up ``.env`` into it (and the supervisor passes that copy on), so a rotated or removed value would never
         reach a running service. Once this process has seen ``.env`` define a name, the environment's value for it
-        is that copy: a line removed later means off, not the start-up value."""
+        is that copy: a line removed later (confirmed by a second read, :meth:`_dotenv`) means off, not the start-up
+        value."""
         try:
             vals = self._dotenv()
             out: list[str | None] = []
@@ -483,8 +497,11 @@ class Notifier:
 
     def _dotenv(self) -> dict[str, str]:
         """``.env`` (the file ``secret()`` reads), re-read at most every ``DOTENV_TTL_S``; a line without a value is
-        an empty string. A read error keeps the previous values (a file being saved must not switch Telegram to the
-        start-up copy)."""
+        an empty string. A file being saved must not switch Telegram off, to a cut-off value or to the start-up copy:
+        a read error keeps the previous values, and a read that may have caught the file mid-save (empty or missing
+        while the last one was not, or a Telegram name of the last read gone or changed — an editor truncates the
+        file, or deletes and renames it, before it writes) is not accepted at once. The previous values stay and the
+        file is re-read after ``DOTENV_RECHECK_S``; the change is taken only when that read agrees with it."""
         from ..ai.providers import base
         path = Path(base.ENV_FILE)
         t, cached_path, vals = self._env
@@ -492,11 +509,18 @@ class Notifier:
         if cached_path == path and now - t < DOTENV_TTL_S:
             return vals
         try:
-            vals = {k: (v or "") for k, v in dotenv_values(path).items()} if path.exists() else {}
+            new = {k: (v or "") for k, v in dotenv_values(path).items()} if path.exists() else {}
         except (OSError, ValueError):
             vals = vals if cached_path == path else {}
-        self._env = (now, path, vals)
-        return vals
+            self._env = (now, path, vals)
+            return vals
+        if cached_path == path and _maybe_mid_save(vals, new) and new != self._env_unconfirmed:
+            self._env_unconfirmed = new                   # not confirmed yet: keep the last values, re-read soon
+            self._env = (now - DOTENV_TTL_S + DOTENV_RECHECK_S, path, vals)
+            return vals
+        self._env_unconfirmed = None
+        self._env = (now, path, new)
+        return new
 
     @staticmethod
     def _scope(item: _Item) -> str:

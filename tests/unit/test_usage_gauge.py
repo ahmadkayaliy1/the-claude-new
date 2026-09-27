@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tradingsystem.ai.budget import UsageStore
+from tradingsystem.ai.budget import USAGE_UNKNOWN_PREFIX, UsageStore
 from tradingsystem.ai.usage_gauge import GaugeState, UsageGauge, claude_providers, effective_tokens
 from tradingsystem.core.settings import INSTANCE_ENV, PathsCfg, load_settings
 from tradingsystem.core.timeutil import MS_PER_DAY, MS_PER_HOUR
@@ -35,11 +35,11 @@ def ledger(tmp_path):
     store = UsageStore(db)
 
     def add(ts: int, inp: int, out: int = 0, cached: int = 0, pair: str | None = "BTCUSDT", ok: int = 1,
-            provider: str = "claude_code", role: str | None = None) -> None:
+            provider: str = "claude_code", role: str | None = None, error: str | None = None) -> None:
         con = sqlite3.connect(db)
         con.execute("INSERT INTO ai_usage(ts, provider, model, purpose, pair, input_tokens, output_tokens, "
-                    "cached_tokens, cost_usd, latency_ms, ok, role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (ts, provider, "sonnet", "decision", pair, inp, out, cached, 0.0, 1000, ok, role))
+                    "cached_tokens, cost_usd, latency_ms, ok, role, error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (ts, provider, "sonnet", "decision", pair, inp, out, cached, 0.0, 1000, ok, role, error))
         con.commit()
         con.close()
 
@@ -91,6 +91,32 @@ def test_the_gauge_counts_only_the_claude_subscription_providers(tmp_path, ledge
     ledger.add(NOW - MS_PER_HOUR, 25_000, provider="cc2")                     # a second claude_code provider counts
     assert UsageGauge(two, ledger).state(NOW).five_h_tokens == 75_000
     assert sorted(claude_providers(two)) == ["cc2", "claude_code"] and claude_providers(s) == ["claude_code"]
+
+
+def test_sessions_with_unknown_usage_are_counted_not_read_as_free(tmp_path, ledger):
+    """A timed-out or crashed operator session leaves a 0-token row whose error starts with USAGE_UNKNOWN_PREFIX: the
+    gauge counts those rows per window (claude_code providers only) and says so in its reason and detail."""
+    unknown = f"{USAGE_UNKNOWN_PREFIX}no result document after 2280 s (timeout): -"
+    assert UsageGauge(settings(tmp_path), ledger).state(NOW).reason == "within budget"
+    ledger.add(NOW - 2 * MS_PER_DAY, 0, pair=None, ok=0, role="review", error=unknown)      # 7 d only
+    ledger.add(NOW - MS_PER_HOUR, 0, pair=None, ok=0, role="review", error=unknown)          # both windows
+    ledger.add(NOW - MS_PER_HOUR, 0, pair=None, ok=0, role="review", error="usage_limit")    # another failure
+    ledger.add(NOW - MS_PER_HOUR, 0, pair=None, ok=0, error=f"x {unknown}")                  # not at the start
+    ledger.add(NOW - MS_PER_HOUR, 0, pair=None, ok=0, provider="gemini", error=unknown)      # not the subscription
+    ledger.add(NOW - 8 * MS_PER_DAY, 0, pair=None, ok=0, role="review", error=unknown)       # outside both windows
+    assert ledger.unknown_since(NOW - 7 * MS_PER_DAY) == 3
+    assert ledger.unknown_since(NOW - 7 * MS_PER_DAY, providers=["claude_code"]) == 2
+    assert ledger.unknown_since(NOW - 5 * MS_PER_HOUR, providers=("claude_code",)) == 1
+    assert ledger.unknown_since(NOW - 7 * MS_PER_DAY, providers=[]) == 0
+    st = UsageGauge(settings(tmp_path), ledger).state(NOW)
+    assert (st.level, st.unknown_7d, st.unknown_5h) == (0, 2, 1)
+    assert st.reason == "within budget + 2 session(s) with unknown usage in 7 d"
+    d = st.as_detail()
+    assert (d["unknown_7d"], d["unknown_5h"]) == (2, 1) and json.loads(json.dumps(d)) == d
+    ledger.add(NOW - MS_PER_HOUR, 95_000)                                     # level 2 by the 5-hour window
+    st = UsageGauge(settings(tmp_path), ledger).state(NOW)
+    assert st.level == 2 and st.reason.startswith("5 h ") and st.reason.endswith(
+        "→ events only) + 2 session(s) with unknown usage in 7 d")
 
 
 def test_cache_reads_count_their_weight():
@@ -204,6 +230,9 @@ class Sums:
             raise sqlite3.OperationalError("database is locked")
         return {"input": int(self.pct * 10_000), "cached": 0, "output": 0, "calls": 1}
 
+    def unknown_since(self, since_ms, providers=None):
+        return 0
+
 
 def flat(tmp_path):
     return settings(tmp_path, weekly_token_budget=1_000_000, five_hour_token_budget=1_000_000, cache_s=60)
@@ -229,6 +258,20 @@ def test_a_level_steps_down_only_five_points_below_its_threshold(tmp_path):
     assert level(90).level == 2
     assert level(50).level == 0                                               # far below both: straight down to 0
     assert all(p == ["claude_code"] for p in sums.providers)
+
+
+def test_the_step_down_margin_lives_only_in_a_long_lived_gauge(tmp_path):
+    """As documented: a running engine's gauge remembers its level (the dashboard status, the engine's rationing); a
+    fresh gauge — the health report, the review pack and the session gate build one per call — uses the plain
+    thresholds, so after a 92 % peak it reads level 1 at 87 % while the engine holds level 2."""
+    sums = Sums()
+    engine = UsageGauge(flat(tmp_path), sums)
+    sums.pct = 92
+    assert engine.state(NOW).level == 2
+    sums.pct = 87
+    held, fresh = engine.state(NOW + 1), UsageGauge(flat(tmp_path), sums).state(NOW + 1)
+    assert held.level == 2 and "held until ≤ 85 %" in held.reason
+    assert fresh.level == 1 and "≥ 70 % → reviews and events only" in fresh.reason
 
 
 def test_a_failed_read_keeps_the_remembered_level(tmp_path):

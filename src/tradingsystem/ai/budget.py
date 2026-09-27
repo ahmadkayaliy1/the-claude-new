@@ -53,6 +53,10 @@ def usage_db(settings) -> Path:
 EXTRA_COLUMNS = (("api_equivalent_usd", "REAL"), ("num_turns", "INTEGER"), ("cache_creation_tokens", "INTEGER"),
                  # Phase 3: which role made the call, and the chart images it carried (estimated tokens)
                  ("role", "TEXT"), ("images", "INTEGER"), ("image_tokens_est", "INTEGER"))
+# the ``error`` prefix of an operator session's ledger row when the session ended without a result document (time
+# limit, crash): its tokens are unknown, not zero (tools/operator/run_session.py writes it; the usage gauge, the health
+# report and the review pack count such rows)
+USAGE_UNKNOWN_PREFIX = "usage_unknown: "
 
 
 class UsageStore:
@@ -128,6 +132,19 @@ class UsageStore:
         with self._lock:
             inp, cached, out, calls = self._con.execute(sql, args).fetchone()
         return {"input": int(inp), "cached": int(cached), "output": int(out), "calls": int(calls)}
+
+    def unknown_since(self, since_ms: int, providers: list[str] | tuple[str, ...] | None = None) -> int:
+        """Ledger rows since ``since_ms`` whose ``error`` starts with ``USAGE_UNKNOWN_PREFIX``: operator sessions
+        that ended without a result document, so their 0 tokens are not the real spend (the usage gauge reports the
+        count next to its sums). ``providers`` as in :meth:`tokens_since`."""
+        sql = "SELECT count(*) FROM ai_usage WHERE ts>=? AND substr(error, 1, ?)=?"
+        args: list = [since_ms, len(USAGE_UNKNOWN_PREFIX), USAGE_UNKNOWN_PREFIX]
+        if providers is not None:
+            if not providers:
+                return 0
+            sql, args = sql + f" AND provider IN ({','.join('?' * len(providers))})", args + list(providers)
+        with self._lock:
+            return int(self._con.execute(sql, args).fetchone()[0])
 
     def close(self) -> None:
         with self._lock:
@@ -258,4 +275,4 @@ def is_budget_error(exc: BaseException) -> bool:
 
 
 __all__ = ["BudgetExceeded", "UsageStore", "RateLimiter", "CostGovernor", "GovernorState", "LEVELS",
-           "is_budget_error", "sqlite3"]
+           "USAGE_UNKNOWN_PREFIX", "is_budget_error", "sqlite3"]

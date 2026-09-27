@@ -1024,8 +1024,8 @@ class PositionManager:
             rec("applied", **extra)
             self._finish(did, p, key, det, now, wrote=True)
             self._emit("mgmt_applied", {"pair": pair, "decision": did, "leg": key, "tp_index": lg.tp_index,
-                                        "rule": p.rule, "op": p.action, "value": p.value, "volume": p.volume,
-                                        "reason": p.reason, "text": _applied_text(pair, p, lg)})
+                                        "rule_idx": p.rule_idx, "rule": p.rule, "op": p.action, "value": p.value,
+                                        "volume": p.volume, "reason": p.reason, "text": _applied_text(pair, p, lg)})
             return True
         if res.status == "unknown":                  # sent, no confirmation: stays 'pending', re-read before a resend
             self._report(ekey, f"outcome unknown: {res.detail}", now,

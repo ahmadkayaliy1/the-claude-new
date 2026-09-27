@@ -730,9 +730,12 @@ class Executor:
             pair = payload.get("pair")
             ident = payload.get("leg") or payload.get("decision") or ""
             if kind == "mgmt_applied":
-                # no new stop value in the key: a trailing rule moves the stop on every decision bar, and those moves
-                # collapse into one notification per notify.dedupe_minutes (the log and the events keep each one)
-                key = f"{kind}:{payload.get('decision')}:{payload.get('leg')}:{payload.get('rule')}"
+                # one key per rule of the plan (its index) and leg, without the new stop value: a trailing rule moves
+                # the stop on every decision bar, and those moves collapse into one notification per
+                # notify.dedupe_minutes (the log and the events keep each one); two rules of the same action (two
+                # partial closes) stay two notifications. A payload without the index falls back to the action.
+                rule = payload.get("rule_idx", payload.get("rule"))
+                key = f"{kind}:{payload.get('decision')}:{payload.get('leg')}:{rule}"
             else:
                 key = f"{kind}:{payload.get('decision')}:{ident}:{payload.get('text', '')[:60]}"
             self._notify(level, f"{pair or ''} {title}".strip(), str(payload.get("text") or payload)[:400],

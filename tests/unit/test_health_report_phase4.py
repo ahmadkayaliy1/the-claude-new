@@ -138,6 +138,36 @@ def test_the_usage_gauge_is_printed_from_the_shared_ledger(hr, btc, monkeypatch)
     assert hr.usage_gauge_line(btc).startswith("!! usage gauge: level 1") and "enforced" in hr.usage_gauge_line(btc)
 
 
+def test_sessions_with_unknown_usage_make_the_gauge_line_a_problem_line(hr, btc, monkeypatch):
+    """A timed-out or crashed operator session (0 tokens recorded, error 'usage_unknown: …') is flagged with '!!' on
+    the gauge line even at level 0: the sums undercount, they are not the real spend."""
+    from tradingsystem.ai.budget import USAGE_UNKNOWN_PREFIX, UsageStore
+    btc.paths.shared().mkdir(parents=True)
+    ledger = btc.paths.shared() / "ai_usage.db"
+    UsageStore(ledger).close()
+    assert hr.usage_gauge_line(btc).startswith("   usage gauge: level 0")
+    con = sqlite3.connect(ledger)
+    con.execute("INSERT INTO ai_usage(ts, provider, model, purpose, pair, input_tokens, output_tokens, cached_tokens, "
+                "cost_usd, latency_ms, ok, error, role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (int(time.time() * 1000) - 3_600_000, "claude_code", "opus", "operator_weekly", None, 0, 0, 0, 0.0,
+                 2_280_000, 0, f"{USAGE_UNKNOWN_PREFIX}no result document after 2280 s (timeout): -", "review"))
+    con.commit()
+    con.close()
+    line = hr.usage_gauge_line(btc)
+    assert line.startswith("!! usage gauge: level 0") and line.endswith(
+        "— within budget + 1 session(s) with unknown usage in 7 d")
+    assert line.count("unknown usage") == 1                                   # said once, by the gauge's reason
+
+    @dataclass
+    class _Older(_Gauge):                                                     # a reason that does not name them
+        unknown_7d: int = 0
+
+    monkeypatch.setitem(sys.modules, "tradingsystem.ai.usage_gauge", types.SimpleNamespace(
+        UsageGauge=lambda s, usage: types.SimpleNamespace(state=lambda: _Older(0, 0, 0, 0, 0, False, "ok", 3))))
+    assert hr.usage_gauge_line(btc).startswith("!! usage gauge: level 0") and hr.usage_gauge_line(btc).endswith(
+        "— ok + 3 session(s) with unknown usage in 7 d")
+
+
 def test_a_broken_gauge_does_not_break_the_report(hr, btc, monkeypatch):
     class Boom:
         def __init__(self, s, usage):

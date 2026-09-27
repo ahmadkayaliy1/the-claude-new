@@ -168,7 +168,8 @@ NEW_TOKEN = "2222222222:AAHrotatedTokenNotReal_zyxwvutsrqpon"
 
 def test_telegram_values_follow_the_env_file_without_a_restart(tmp_path, monkeypatch, isolated):
     """A running service: load_settings() copied the start-up .env into os.environ (the supervisor passes it on).
-    Adding, rotating, emptying and removing the lines in .env must all reach it within a minute."""
+    Adding, rotating, emptying and removing the lines in .env must all reach it within a minute (a change, an empty
+    value and a removal once a second read DOTENV_RECHECK_S later agrees)."""
     monkeypatch.delenv(nt.DISABLE_ENV, raising=False)
     env = tmp_path / "user.env"
     monkeypatch.setattr(base, "ENV_FILE", env)
@@ -189,23 +190,89 @@ def test_telegram_values_follow_the_env_file_without_a_restart(tmp_path, monkeyp
     assert send() == skipped                                         # no .env yet
     env.write_text(f"TELEGRAM_BOT_TOKEN={TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n", encoding="utf-8")        # add
     clock["t"] += 61
-    assert send() == "sent" and token_used() == TOKEN
+    assert send() == "sent" and token_used() == TOKEN                # a new name is taken at once
     monkeypatch.setenv(TELEGRAM_SECRET_ENV[0], TOKEN)                # the start-up copy load_env() makes
     monkeypatch.setenv(TELEGRAM_SECRET_ENV[1], CHAT)
     env.write_text(f"TELEGRAM_BOT_TOKEN={NEW_TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n", encoding="utf-8")    # rotate
     assert send() == "sent" and token_used() == TOKEN                # the file is re-read at most once a minute
     clock["t"] += 61
-    assert send() == "sent" and token_used() == NEW_TOKEN            # the revoked token is no longer used
+    assert send() == "sent" and token_used() == TOKEN                # the first read of a change: not yet
+    clock["t"] += nt.DOTENV_RECHECK_S
+    assert send() == "sent" and token_used() == NEW_TOKEN            # confirmed: the revoked token is no longer used
     env.write_text("TELEGRAM_BOT_TOKEN=\nTELEGRAM_CHAT_ID=\n", encoding="utf-8")                     # empty = off
     clock["t"] += 61
+    assert send() == "sent"
+    clock["t"] += nt.DOTENV_RECHECK_S
     assert send() == skipped
     env.write_text(f"TELEGRAM_BOT_TOKEN={NEW_TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n", encoding="utf-8")
     clock["t"] += 61
+    assert send() == skipped
+    clock["t"] += nt.DOTENV_RECHECK_S
     assert send() == "sent"
     env.write_text("OTHER=1\n", encoding="utf-8")                   # the lines removed: off, not the start-up copy
     clock["t"] += 61
+    assert send() == "sent"
+    clock["t"] += nt.DOTENV_RECHECK_S
     assert send() == skipped
-    assert len(reqs) == 4
+    assert len(reqs) == 7
+
+
+@pytest.mark.parametrize("mid_save", ["", f"TELEGRAM_BOT_TOKEN={NEW_TOKEN[:12]}", None],
+                         ids=["empty", "truncated", "missing"])
+def test_a_env_file_caught_mid_save_keeps_the_last_telegram_values(tmp_path, monkeypatch, isolated, mid_save):
+    """An editor truncates .env (or deletes and renames it) before it writes: a read in that moment is not taken as
+    the truth. The last values stay and the file is re-read DOTENV_RECHECK_S later; the complete file is back by then,
+    so Telegram never goes off, never uses a cut-off token and never falls back to the start-up copy."""
+    monkeypatch.delenv(nt.DISABLE_ENV, raising=False)
+    env = tmp_path / "user.env"
+    full = f"GOOGLE_API_KEY=x\nTELEGRAM_BOT_TOKEN={NEW_TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n"
+    env.write_text(full, encoding="utf-8")
+    monkeypatch.setattr(base, "ENV_FILE", env)
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[0], TOKEN)                # the start-up copy
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[1], CHAT)
+    clock = {"t": 1000.0}
+    n = nt.Notifier(transport=recorder()[0], monotonic=lambda: clock["t"])
+    assert n._telegram_creds() == (NEW_TOKEN, CHAT)
+    if mid_save is None:
+        env.unlink()
+    else:
+        env.write_text(mid_save, encoding="utf-8")
+    clock["t"] += 61
+    assert n._telegram_creds() == (NEW_TOKEN, CHAT)                  # first read: not confirmed, the last values
+    clock["t"] += 1
+    assert n._telegram_creds() == (NEW_TOKEN, CHAT)                  # no re-read before DOTENV_RECHECK_S
+    env.write_text(full, encoding="utf-8")                           # the editor finished writing
+    clock["t"] += nt.DOTENV_RECHECK_S
+    assert n._telegram_creds() == (NEW_TOKEN, CHAT)
+    clock["t"] += 61
+    assert n._telegram_creds() == (NEW_TOKEN, CHAT)                  # nothing left pending from the half-saved read
+
+
+@pytest.mark.parametrize("change, want", [
+    (f"TELEGRAM_BOT_TOKEN={TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n", (TOKEN, CHAT)),          # rotated
+    ("TELEGRAM_CHAT_ID=\n", (None, None)),                                               # token removed, chat emptied
+    ("", (None, None)),                                                                   # the file emptied
+    (None, (None, None))], ids=["rotated", "token-removed", "emptied", "deleted"])      # the file deleted
+def test_a_confirmed_env_change_takes_effect_on_the_second_read(tmp_path, monkeypatch, isolated, change, want):
+    monkeypatch.delenv(nt.DISABLE_ENV, raising=False)
+    env = tmp_path / "user.env"
+    env.write_text(f"TELEGRAM_BOT_TOKEN={NEW_TOKEN}\nTELEGRAM_CHAT_ID={CHAT}\n", encoding="utf-8")
+    monkeypatch.setattr(base, "ENV_FILE", env)
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[0], NEW_TOKEN)            # the start-up copy
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[1], CHAT)
+    clock = {"t": 1000.0}
+    n = nt.Notifier(transport=recorder()[0], monotonic=lambda: clock["t"])
+    assert n._telegram_creds() == (NEW_TOKEN, CHAT)
+    if change is None:
+        env.unlink()
+    else:
+        env.write_text(change, encoding="utf-8")
+    clock["t"] += 61
+    assert n._telegram_creds() == (NEW_TOKEN, CHAT)                  # one read is not enough
+    clock["t"] += nt.DOTENV_RECHECK_S
+    assert n._telegram_creds() == want                               # the second read agrees: taken
+    clock["t"] += 61
+    assert n._telegram_creds() == want                               # and kept (never the start-up copy)
 
 
 def test_environment_values_are_used_while_the_env_file_has_no_line(tmp_path, monkeypatch, isolated):
@@ -401,22 +468,68 @@ def test_trailing_stop_moves_collapse_into_one_notification(tmp_path, live, isol
                            _notify=lambda level, title, text, *, key=None, pair=None: results.append(
                                n.submit(s, level, title, text, key=key, pair=pair)))
 
-    def applied(leg: str, rule: str, value: float) -> dict:
-        return {"pair": "BTCUSDT", "decision": "d1", "leg": leg, "tp_index": 1, "rule": rule, "op": "set_sl",
-                "value": value, "text": f"BTCUSDT leg 1: stop → {value} ({rule})"}
+    def applied(leg: str, idx: int, rule: str, value: float) -> dict:
+        return {"pair": "BTCUSDT", "decision": "d1", "leg": leg, "tp_index": 1, "rule_idx": idx, "rule": rule,
+                "op": "set_sl", "value": value, "text": f"BTCUSDT leg 1: stop → {value} ({rule})"}
 
-    for payload in (applied("L1", "trail_atr", 65000.0), applied("L1", "trail_atr", 65100.0),
-                    applied("L1", "trail_atr", 65200.0), applied("L2", "trail_atr", 65100.0),
-                    applied("L1", "move_sl_to_breakeven", 64900.0)):
+    for payload in (applied("L1", 1, "trail_atr", 65000.0), applied("L1", 1, "trail_atr", 65100.0),
+                    applied("L1", 1, "trail_atr", 65200.0), applied("L2", 1, "trail_atr", 65100.0),
+                    applied("L1", 0, "move_sl_to_breakeven", 64900.0)):
         Executor._emit(fake, "mgmt_applied", payload)
     Executor._emit(fake, "mgmt_error", {"pair": "BTCUSDT", "decision": "d1", "leg": "L1", "rule": "trail_atr",
                                         "text": "BTCUSDT trail_atr failed 3×: retcode 10016"})
+    old = {k: v for k, v in applied("L3", 1, "trail_atr", 65000.0).items() if k != "rule_idx"}
+    Executor._emit(fake, "mgmt_applied", old)                        # a payload without the index: keyed on the rule
     assert n.flush(5)
-    assert [r["key"] for r in results[:3]] == ["mgmt_applied:d1:L1:trail_atr"] * 3
-    assert [r["deduped"] for r in results] == [False, True, True, False, False, False]
-    assert len(reqs) == 4 and events == ["mgmt_applied"] * 5 + ["mgmt_error"]      # every move is still an event
+    assert [r["key"] for r in results[:3]] == ["mgmt_applied:d1:L1:1"] * 3
+    assert results[-1]["key"] == "mgmt_applied:d1:L3:trail_atr"
+    assert [r["deduped"] for r in results] == [False, True, True, False, False, False, False]
+    assert len(reqs) == 5 and events == ["mgmt_applied"] * 5 + ["mgmt_error", "mgmt_applied"]   # every move is an event
     assert "65000.0" in json.loads(reqs[0].content)["text"]
-    assert results[-1]["key"].startswith("mgmt_error:d1:L1:BTCUSDT trail_atr failed")
+    assert results[5]["key"].startswith("mgmt_error:d1:L1:BTCUSDT trail_atr failed")
+
+
+def test_two_partial_closes_of_one_leg_are_two_notifications(tmp_path, live, isolated):
+    """Two partial_close rules of one plan firing on the same leg are two real volume reductions: management puts the
+    rule's index in the mgmt_applied payload and executor._emit keys on it, so neither is deduped — while the moves of
+    one trailing rule on that leg still collapse into one notification."""
+    from types import SimpleNamespace
+
+    from tradingsystem.execution.executor import Executor
+    from tradingsystem.execution.management import ActionLog, PositionManager
+    from tests.unit.test_management import MIN, FixedMarket, SimLegs, decision, pos, rule, with_mgmt
+
+    transport, reqs = recorder()
+    n = nt.Notifier(transport=transport, clock=lambda: T0)
+    s = settings(tmp_path, toast=False)
+    payloads: list[dict] = []
+    results: list[dict] = []
+    fake = SimpleNamespace(appdb=SimpleNamespace(add_event=lambda src, kind, detail: None),
+                           _notify=lambda level, title, text, *, key=None, pair=None: results.append(
+                               n.submit(s, level, title, text, key=key, pair=pair)))
+
+    def emit(kind: str, payload: dict) -> None:                     # the executor's hook, rule executions only
+        if kind == "mgmt_applied":
+            payloads.append(payload)
+            Executor._emit(fake, kind, payload)
+
+    sim = SimLegs([pos(vol=0.04, opened=0)], 103.0, 103.2)
+    rules = [rule("partial_close", "minutes_elapsed", 5, fraction=0.5),
+             rule("partial_close", "minutes_elapsed", 6, fraction=0.5)]
+    pm = PositionManager(with_mgmt(s, dry_run=False), ActionLog(tmp_path / "app.db"), sim, FixedMarket(), emit)
+    pm.manage([decision(rules)], 20 * MIN)
+    assert [c[2] for c in sim.calls] == [0.02, 0.01]                # both rules closed volume on leg d:2
+    assert [(p["leg"], p["rule"], p["rule_idx"]) for p in payloads] == [("d:2", "partial_close", 0),
+                                                                        ("d:2", "partial_close", 1)]
+    trail = dict(payloads[0], rule_idx=2, rule="trail_atr", op="set_sl", text="XAUUSD leg 2: stop → 101.0")
+    for value in (101.0, 101.5):                                    # one trailing rule moving the stop twice
+        emit("mgmt_applied", dict(trail, value=value, text=f"XAUUSD leg 2: stop → {value}"))
+    assert n.flush(5)
+    assert [r["key"] for r in results] == ["mgmt_applied:d:d:2:0", "mgmt_applied:d:d:2:1", "mgmt_applied:d:d:2:2",
+                                           "mgmt_applied:d:d:2:2"]
+    assert [r["deduped"] for r in results] == [False, False, False, True]
+    assert len(reqs) == 3
+
 
 # --------------------------------------------------------------------------- toast
 @pytest.mark.skipif(os.name != "nt", reason="the toast is Windows-only")

@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import yaml  # noqa: E402
 
+from tradingsystem.ai.budget import USAGE_UNKNOWN_PREFIX  # noqa: E402
 from tradingsystem.core.settings import INSTANCE_ENV, PROJECT_ROOT, Settings, load_settings  # noqa: E402
 from tradingsystem.core.timeutil import MS_PER_HOUR, iso  # noqa: E402
 from tradingsystem.core.timeutil import now_ms as _now_ms  # noqa: E402
@@ -64,9 +65,6 @@ ADAPTIVE_GROUPS = ("trigger", "pair")   # nested groups of adaptive.yaml (trigge
 ADAPTIVE_INVALID = "adaptive.yaml invalid (services keep the last good values; config defaults after a restart): "
 PLAYBOOK_NOT_IN_FORCE = "on disk, NOT in force (expired / unreferenced / hash mismatch)"
 PLAYBOOK_MAX_BYTES = 256 * 1024  # tune.py writes ≤ 1500 characters; a larger playbook.md is reported, not read
-# the ledger ``error`` prefix of an operator session that ended without a result document (time limit, crash): its
-# tokens are unknown, not zero (tools/operator/run_session.py writes it; the usage section counts these rows)
-USAGE_UNKNOWN_PREFIX = "usage_unknown: "
 ENTRY_STATES = {"expired": "EXPIRED", "disabled": "NOT APPLIED: adaptive.enabled is false",
                 "not_applied": "NOT APPLIED: the file is invalid"}
 

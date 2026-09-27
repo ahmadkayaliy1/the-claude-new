@@ -325,6 +325,14 @@ def test_a_session_without_a_result_document_is_recorded_as_usage_unknown(rs, tm
     assert rows[0][4].startswith(rp_.USAGE_UNKNOWN_PREFIX + "no result document after 2280 s (")
     assert "usage unknown" in sent[-1][2] and "0 tokens" not in sent[-1][2]
     assert rp_.usage_section(Path(rec["ledger"]["path"]), 0)["usage_unknown_sessions"] == 1
+    # the gauge (the pack's, which the next session's gate reads) and the health report count it too
+    from tradingsystem.ai.budget import USAGE_UNKNOWN_PREFIX
+    assert rp_.USAGE_UNKNOWN_PREFIX is USAGE_UNKNOWN_PREFIX
+    g = rp_.gauge_state(s, Path(rec["ledger"]["path"]), now_ms())
+    assert (g["unknown_7d"], g["unknown_5h"]) == (1, 1) and g["reason"].endswith(
+        " + 1 session(s) with unknown usage in 7 d")
+    line = rp_.health_module().usage_gauge_line(s)
+    assert line.startswith("!! usage gauge: level 0") and "1 session(s) with unknown usage" in line
 
 
 def test_a_result_document_is_never_marked_usage_unknown(rs):

@@ -164,6 +164,25 @@ def test_virtual_trade_stopped_on_its_fill_bar_keeps_both_excursions(env):
     assert mx.excursions_r(lv, vt.best, vt.worst) == (-0.167, 1.417)
 
 
+@pytest.mark.parametrize("lv, high, low, want", [
+    # BUY MARKET at 100, SL 99: the first bar after the cycle lies entirely below the entry and reaches the stop
+    (mx.Levels(True, "MARKET", 100.0, 100.0, 99.0, (102.0,), FAR), 99.5, 98.8, (99.5, (-0.5, 1.2))),
+    # SELL_LIMIT 100, SL 101: the fill bar gaps up through the limit and the stop (a Monday open, a news gap)
+    (mx.Levels(False, "SELL_LIMIT", 100.0, 100.0, 101.0, (98.0,), FAR), 101.8, 101.2, (101.2, (-1.2, 1.8)))],
+    ids=["buy-market-gap-down", "sell-limit-gap-up"])
+def test_a_fill_bar_stop_after_a_gap_keeps_the_favourable_extreme_inside_the_bar(lv, high, low, want):
+    """A fill bar that gapped through the fill price never traded it: the favourable extreme of a trade stopped on its
+    fill bar is bounded by that bar (BUY ≤ its high, SELL ≥ its low), so mfe_r < 0 — the price never came back to the
+    worst entry edge — instead of 0. The same bar without a stop hit reads the same favourable extreme."""
+    t, h, l = np.array([ot(10)]), np.array([high]), np.array([low])
+    vt = virtual_trade(lv, ot(10), t, h, l)
+    assert (vt.outcome, vt.fill_ms, vt.end_ms) == ("sl_first", ot(10), ot(10))
+    assert (vt.best, mx.excursions_r(lv, vt.best, vt.worst)) == want
+    wide = mx.Levels(lv.buy, lv.order_type, lv.entry, lv.trigger, lv.stop + (-5.0 if lv.buy else 5.0), lv.targets,
+                     lv.valid_until)
+    assert virtual_trade(wide, ot(10), t, h, l).best == want[0]           # not stopped: the bar's own extreme
+
+
 def test_walk_agrees_with_evaluate_virtual(env, monkeypatch):
     """The metrics walk decides exactly what executor.evaluate_virtual decided, on the same bars."""
     from tradingsystem.execution.executor import evaluate_virtual

@@ -84,11 +84,16 @@ The two hashes are stored with every decision, so the review can tell which over
   while `tune.py` holds the lock — has only the config values as a placeholder, so it tries again on its next call
   instead of waiting for the next check.
 - **Missing file** = config values. **`adaptive.enabled: false`** = config values, whatever the files say.
-- **Invalid file** (bad YAML, YAML aliases, larger than 256 kB, nested too deeply, a value out of bounds, an unknown
-  key, an expiry beyond the limit, a hint or playbook that fails the lint, a `playbook.md` that is missing or whose
-  hash does not match — i.e. edited by hand): the last good values stay in force and the process records one
-  `adaptive_invalid` event (one per invalid version of the file). A service that starts with an invalid file uses the
-  config values.
+- **Invalid file** (bad YAML, YAML aliases, larger than 256 kB, more than 20 000 values, nested more than 32 deep, a
+  key that is not a plain string — e.g. an unquoted date in `evidence` —, a value out of bounds, an unknown key, an
+  expiry beyond the limit, a hint or playbook that fails the lint, a `playbook.md` that is missing or whose hash does
+  not match — i.e. edited by hand —, or any other error while reading or parsing it): the last good values stay in
+  force and the process records one `adaptive_invalid` event (one per invalid version of the file; that version is not
+  read again). A service that starts with an invalid file uses the config values.
+- The file is parsed with libyaml when PyYAML has it (the size, value and depth limits are checked on its event
+  stream first, nothing constructed), so even a hand-made file at the limits costs a reader well under a second
+  inside the engine tick; the largest file `tune.py` can write (every key, 500-character reasons, the densest
+  4000-character evidence) holds about 12 000 values.
 - **Expired entry**: absent from then on; exactly one `expired` line in `changes.jsonl` (de-duplicated across
   processes under the lock), `tuning_changes.reverted_ms` set by the process that was given the pair's `app_db`
   (the engine), and one `adaptive_expired` event.
@@ -162,9 +167,11 @@ A change is refused (exit 2) when any of these holds; every reason is printed.
 1. `data/TUNING_FREEZE` exists, or `adaptive.enabled` is false for the pair's system.
 2. The pair's files are in a state the services reject: `adaptive.yaml` is invalid, or `playbook.md` is missing, does
    not match its hash in `adaptive.yaml`, or fails the lint (§3). The services then ignore the whole overlay, so a
-   change "applied" on top would never be in force. `revert playbook` repairs a playbook (revert accepts that state);
-   an invalid `adaptive.yaml` must be fixed or deleted by hand. `list` shows such a pair as `valid: false` with the
-   reason.
+   change "applied" on top would never be in force. `revert playbook` repairs a playbook (revert accepts that state).
+   revert also accepts a `tp_hint` that today's lint refuses (written under an older lint: it makes the whole file
+   invalid for the services) and entries up to the hard 30-day expiry, so `revert tp_hint` repairs that and every
+   other revert still works; the refusal then says `run: tune.py --pair <PAIR> revert KEY`. Any other invalid
+   `adaptive.yaml` must be fixed or deleted by hand. `list` shows such a pair as `valid: false` with the reason.
 3. The value is out of bounds, or the tp_hint / playbook fails the lint (§6).
 4. **Direction** — against the value in force now (config + overlay): a raise-only key may not go below it, a
    lower-only key may not go above it. The same value is accepted only as a renewal of an entry that is in force;
@@ -203,22 +210,33 @@ original set still counts for both (a set, revert and set again on the same key 
 - Denylist (both) — the spec's regex, widened to the usual phrasings and made robust: `risk per`, `lot`/`lots`
   (also right after a number, "0.05lots"; not "slot", "pilot", "plot"; "a lot" *is* refused), `leverage`,
   `stop loss distance|closer`, `ignore`, `override`, `disregard`, `always buy|sell|trade|long|short`,
-  `never no_trade` and `never / don't / do not / avoid` up to three words before `NO_TRADE` in the same clause
-  ("never answer NO_TRADE"; "avoid chasing: no trade after …" passes), and a confidence of 80–99 (or 0.8–0.99) up to
-  three words after or two words before the word `confidence` on the same line ("confidence above 85", "confidence
-  (85-90)", "85+ confidence"; "confidence 70, target 1.85" passes), `daily loss`, `kill switch`, `min_rr`. Matched
-  case-insensitively after Unicode normalisation (NFKC: full-width letters), with zero-width characters removed, with
-  markdown emphasis inside words removed, and across line breaks for the adjacent forms.
-- No word that mixes Latin with Cyrillic or Greek letters ("іgnore" with a Cyrillic "і"): NFKC does not fold such
-  homoglyphs, so the denylist would not see the word. A word wholly in another script is fine.
+  `never no_trade` and `never / don't / do not / avoid` up to three words before `NO_TRADE` in the same clause — a
+  `. , ; : ! ?` or a dash starts a new one ("never answer NO_TRADE"; "avoid chasing: no trade after …" and "do not
+  chase — no trade after …" pass) —, and a confidence of 80–99 (or 0.8–0.99) up to three words after or two words
+  before the word `confidence` in the same clause (`. , ; : ! ?` and line breaks end it): "confidence above 85",
+  "confidence (85-90)", "85+ confidence", "85% confidence", "confidence: 0.85" are refused; "confidence 70, target
+  1.85", "Win rate 85%: keep confidence moderate" pass. A price is not a confidence (95,000 / 90,500 / 95k / 85.5k),
+  nor is a number with a unit (the 80 EMA, 0.8 ATR, 0.8R, 85 pips / points, 2x) or a share ("85% of the sweeps").
+  Also `daily loss`, `kill switch`, `min_rr`. Matched case-insensitively on a normalised copy of the text: NFKD,
+  every combining mark and format character removed (accents, the combining grapheme joiner, variation selectors,
+  zero-width space / joiner, BOM, soft hyphen), NFKC (full-width and mathematical letters), a few Latin letters that
+  look like ASCII ones folded ("ı" → i, "ł" → l, "ø" → o, …), markdown emphasis inside words removed, and across
+  line breaks for the adjacent forms.
+- No word that has ASCII letters and also a letter outside Latin-1 / Latin Extended-A (U+00C0–U+017F): look-alikes
+  that NFKC does not fold — Cyrillic "іgnore", Greek "οverride", Armenian "cօnfidence", Coptic, Cherokee, an IPA "ɡ"
+  in "iɡnore", a small capital "ᴏ" in "cᴏnfidence" — so the denylist would not see the word. Allowed inside such a
+  word: the Greek letters used as math symbols that look like no Latin letter (Δ δ Σ σ Π π Ω ω Φ φ Ψ ψ Λ λ Θ θ β μ ξ ζ
+  Γ Ξ, e.g. "ΔOI"). A word wholly in another script ("Вход") is fine.
 - No control characters, no Unicode line / paragraph separators (U+2028 / U+2029: they are line breaks to some
   readers) and no code fences (the payload follows the playbook in a fenced block).
-- A denylist is never complete: it is a backstop. The bound is that the overlay has no risk keys and the gate's other
-  checks (SL, RR, spread, risk per trade, drawdown, kill switch) stay in force.
+- A denylist is never complete: it is a backstop — a rephrasing passes, and so does a word spelled wholly in
+  look-alike letters of one other script. The bound is that the overlay has no risk keys and the gate's other checks
+  (SL, RR, spread, risk per trade, drawdown, kill switch) stay in force.
 - `$` is allowed. The spec asked for `$$`, but `prompts._fill` checks only the template and inserts values verbatim,
   so `$$` would reach the model literally. Only template text needs `$$`.
 
-The lint runs when tune.py writes and again when a service reads (a hand edit that fails it makes the file invalid).
+The lint runs when tune.py writes and again when a service reads (a hand edit that fails it makes the file invalid;
+revert alone skips the tp_hint lint, §5). `--dry-run` shows what the lint refuses without writing anything.
 
 ## 7. `tuning_changes`
 

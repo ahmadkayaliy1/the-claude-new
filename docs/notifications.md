@@ -45,7 +45,9 @@ Without Telegram you get the log line and the toast only. Everything else works 
 
    **No restart is needed:** every running system reads the two lines from `.env` again at most once a minute and
    uses them from then on. A value in `.env` always wins over the copy a system took when it started, so a changed
-   token is used within a minute too.
+   token is used within a minute too. A change, an empty value or a deleted line is taken only when a second read
+   about 2 seconds later shows the same: an editor empties the file for a moment while it saves, and a read that
+   catches that moment must not switch Telegram off or send with half a token.
 5. **Test it:**
 
    ```
@@ -69,9 +71,10 @@ text goes through the same masking as the logs before it is sent.
 
 The level decides how loud a notification is: `info` (something happened), `warn` (look at it soon), `critical`
 (act now). The list follows §3.8. Where a notification has a dedupe key, the same key is sent only once in 30 minutes
-by all systems together (§3). "Management rule applied" is keyed by the trade, the leg and the rule, not by the new
-stop: a trailing stop that moves on every 15-minute bar is one notification per 30 minutes for that leg. Every move is
-still a log line and an event on the dashboard.
+by all systems together (§3). "Management rule applied" is keyed by the trade, the leg and the rule (its place in the
+trade's plan), not by the new stop: a trailing stop that moves on every 15-minute bar is one notification per 30
+minutes for that leg, while two separate rules of the same kind (two partial closes) are two notifications. Every move
+is still a log line and an event on the dashboard.
 
 | Source | Notifications | Level |
 |---|---|---|
@@ -146,7 +149,8 @@ notify:
 **Telegram off: empty the values rather than delete the lines.** A system copies `.env` into its environment when it
 starts, and the supervisor passes that copy on to the systems it restarts. A `TELEGRAM_*` line in `.env` always wins
 over that copy, and an empty value means off. A deleted line means off only to a system that has seen the line since
-it started (a system reads `.env` when it sends a notification, at most once a minute); one that sent nothing while the
+it started (a system reads `.env` when it sends a notification, at most once a minute, and takes a change only when a
+read about 2 seconds later agrees); one that sent nothing while the
 line was there keeps its start-up copy until `scripts\restart_all.bat`. To turn Telegram back on, put the values back;
 that also needs no restart.
 

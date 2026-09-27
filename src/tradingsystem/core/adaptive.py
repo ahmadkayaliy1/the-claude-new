@@ -11,8 +11,9 @@ Files (``data/adaptive/<PAIR>/``, shared by every system of the data root; nothi
 
 ``tools/tune.py`` is the only writer of the first two (under ``FileLock(data/shared/locks/adaptive_<PAIR>.lock)``,
 atomic replace) and of ``tuning_changes`` in the pair's app.db. The services read through :class:`AdaptiveStore`:
-re-read on a file change (checked at most every ``adaptive.reload_check_s``), validated; an invalid file keeps the last
-good values; an expired entry is simply absent (the config default applies again).
+re-read on a file change (checked at most every ``adaptive.reload_check_s``), validated; an invalid file (any error
+reading or parsing it) keeps the last good values; an expired entry is simply absent (the config default applies
+again).
 
 The overlay can only make the system more selective and slower (the direction column of §3.8), and every consumer
 applies that direction again (:class:`Effective`: ``max``/``min`` against the config), so a hand-edited file cannot
@@ -37,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationIn
 
 from .filelock import FileLock, locks_dir
 from .playbook import MAX_HINT_CHARS, lint, lint_hint
-from .settings import Settings, _UniqueKeyLoader
+from .settings import Settings, _construct_unique, _UniqueKeyLoader
 from . import timeutil
 from .timeutil import MS_PER_DAY, iso
 
@@ -122,7 +123,8 @@ class _Strict(BaseModel):
 
 class Entry(_Strict):
     """One tuned value. Validate with ``context={"max_expiry_days": s.adaptive.max_expiry_days}`` (without it the hard
-    maximum of 30 days applies)."""
+    maximum of 30 days applies); ``"lenient": True`` in the context skips the text lint (revert only: an entry
+    written under an older, looser lint must stay removable)."""
     value: Any
     set_ms: int = Field(ge=0, strict=True)
     expires_ms: int = Field(ge=0, strict=True)
@@ -138,7 +140,11 @@ class Entry(_Strict):
             raise ValueError("expires_ms must be after set_ms")
         if self.expires_ms > self.set_ms + days * MS_PER_DAY:
             raise ValueError(f"expires_ms more than {days} days after set_ms")
-        if len(json.dumps(self.evidence, default=str)) > MAX_EVIDENCE_CHARS:
+        try:
+            size = len(json.dumps(self.evidence, default=str))
+        except TypeError:           # a hand-written key that is not a plain string (an unquoted date, 2026-09-20: 3)
+            raise ValueError("evidence must be JSON data (keys plain strings)") from None
+        if size > MAX_EVIDENCE_CHARS:
             raise ValueError(f"evidence longer than {MAX_EVIDENCE_CHARS} characters")
         if json_depth(self.evidence) > MAX_EVIDENCE_DEPTH:
             raise ValueError(f"evidence nested deeper than {MAX_EVIDENCE_DEPTH} levels")
@@ -205,7 +211,9 @@ class HintEntry(Entry):
 
     @field_validator("value")
     @classmethod
-    def _lint(cls, v: str) -> str:
+    def _lint(cls, v: str, info: ValidationInfo) -> str:
+        if (info.context or {}).get("lenient"):
+            return v                 # revert: a hint a later, stricter lint refuses must not block its own removal
         problems = lint_hint(v)
         if problems:
             raise ValueError("; ".join(problems))
@@ -269,8 +277,9 @@ class AdaptiveCfg(_Strict):
             node[parts[-1]] = {k: v for k, v in e.model_dump().items() if v is not None}
         return doc
 
-    def with_entry(self, key: str, entry: dict[str, Any] | Entry | None, *, max_expiry_days: int) -> "AdaptiveCfg":
-        """A new overlay with ``key`` set (or removed with ``None``), validated."""
+    def with_entry(self, key: str, entry: dict[str, Any] | Entry | None, *, max_expiry_days: int,
+                   lenient: bool = False) -> "AdaptiveCfg":
+        """A new overlay with ``key`` set (or removed with ``None``), validated (``lenient``: see :func:`parse_cfg`)."""
         if key not in KEYS:
             raise KeyError(key)
         doc = self.dump()
@@ -282,46 +291,78 @@ class AdaptiveCfg(_Strict):
             node.pop(parts[-1], None)
         else:
             node[parts[-1]] = entry.model_dump() if isinstance(entry, Entry) else dict(entry)
-        return parse_cfg(doc, max_expiry_days=max_expiry_days)
+        return parse_cfg(doc, max_expiry_days=max_expiry_days, lenient=lenient)
 
 
-def parse_cfg(doc: Any, *, max_expiry_days: int) -> AdaptiveCfg:
-    """Validate a loaded YAML document (None / empty = no overlay). Raises ValueError (pydantic's ValidationError)."""
+def parse_cfg(doc: Any, *, max_expiry_days: int, lenient: bool = False) -> AdaptiveCfg:
+    """Validate a loaded YAML document (None / empty = no overlay). Raises ValueError (pydantic's ValidationError).
+    ``lenient`` skips the tp_hint lint — for ``tune.py revert`` only; the services, ``set`` and ``list`` stay
+    strict."""
     if doc is None:
         doc = {}
     if not isinstance(doc, dict):
         raise ValueError("adaptive.yaml must be a mapping")
-    return AdaptiveCfg.model_validate(doc, context={"max_expiry_days": max_expiry_days})
+    return AdaptiveCfg.model_validate(doc, context={"max_expiry_days": max_expiry_days, "lenient": lenient})
 
 
 MAX_YAML_CHARS = 256 * 1024              # tune.py writes a few kB; anything larger is not ours
+MAX_YAML_NODES = 20_000                  # a valid file holds ≤ ~12 K: 9 entries × (evidence ≤ 4000 JSON characters,
+                                         # ≤ 1334 values, + ~15); bounds the parse time far below the size cap
+
+# libyaml (C scanner and parser) when PyYAML has it: the event walk and the load of a document at the size cap take a
+# tenth of the pure-Python time. Both use the same flavour, so the walk sees exactly the events the load will.
+_LIBYAML = bool(getattr(yaml, "__with_libyaml__", False))
+if _LIBYAML:
+    class _UniqueKeyCLoader(yaml.CSafeLoader):
+        """libyaml's safe loader refusing a repeated key, like ``settings._UniqueKeyLoader``."""
+
+    _UniqueKeyCLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique)
+    _EVENT_LOADER: type = yaml.CSafeLoader
+    _LOADER: type = _UniqueKeyCLoader
+else:                                    # pragma: no cover - PyYAML built without libyaml
+    _EVENT_LOADER, _LOADER = yaml.SafeLoader, _UniqueKeyLoader
 
 
 def has_alias(text: str) -> bool:
     """Whether a YAML text uses an alias (``*name``), found on the event stream — nothing is constructed, so an
     alias bomb ("billion laughs") costs nothing to detect. Raises ValueError for a document nested deeper than
-    ``MAX_YAML_DEPTH``: PyYAML's scanner slows down quadratically on deep flow nesting (one line of 256 K ``[`` would
-    stall the engine loop for minutes), so the walk stops at the first level beyond the limit."""
-    depth = 0
-    try:
-        for ev in yaml.parse(text, Loader=yaml.SafeLoader):
-            if isinstance(ev, yaml.AliasEvent):
-                return True
-            if isinstance(ev, (yaml.SequenceStartEvent, yaml.MappingStartEvent)):
-                depth += 1
-                if depth > MAX_YAML_DEPTH:
-                    raise ValueError("adaptive.yaml is nested too deeply")
-            elif isinstance(ev, (yaml.SequenceEndEvent, yaml.MappingEndEvent)):
-                depth -= 1
-    except yaml.YAMLError:
-        return False                           # not YAML at all: the loader refuses it quickly
+    ``MAX_YAML_DEPTH`` or holding more than ``MAX_YAML_NODES`` values (scalars and collections): PyYAML's scanner
+    slows down quadratically on deep flow nesting (one line of 256 K ``[`` would stall the engine loop for minutes),
+    and constructing a document of the maximal size costs seconds even when it is flat, so the walk stops at the first
+    node beyond either limit. It uses libyaml when installed, like :func:`load_cfg_text`; a text libyaml rejects is
+    walked by the pure-Python parser too (the dashboard and the review pack load with ``yaml.safe_load``: a text only
+    libyaml refuses must not reach it unchecked)."""
+    for loader in dict.fromkeys((_EVENT_LOADER, yaml.SafeLoader)):
+        try:
+            return _walk_events(text, loader)
+        except yaml.YAMLError:
+            continue
+    return False                               # not YAML at all: the loader refuses it quickly
+
+
+def _walk_events(text: str, loader: type) -> bool:
+    depth = nodes = 0
+    for ev in yaml.parse(text, Loader=loader):
+        if isinstance(ev, yaml.AliasEvent):
+            return True
+        if isinstance(ev, (yaml.ScalarEvent, yaml.SequenceStartEvent, yaml.MappingStartEvent)):
+            nodes += 1
+            if nodes > MAX_YAML_NODES:
+                raise ValueError(f"adaptive.yaml holds more than {MAX_YAML_NODES} values")
+        if isinstance(ev, (yaml.SequenceStartEvent, yaml.MappingStartEvent)):
+            depth += 1
+            if depth > MAX_YAML_DEPTH:
+                raise ValueError("adaptive.yaml is nested too deeply")
+        elif isinstance(ev, (yaml.SequenceEndEvent, yaml.MappingEndEvent)):
+            depth -= 1
     return False
 
 
-def load_cfg_text(text: str | None, *, max_expiry_days: int) -> AdaptiveCfg:
-    """Parse ``adaptive.yaml`` text (duplicate keys, aliases and oversized files refused — the engine reads it on
-    its loop: a hand-made alias bomb must never stall a tick). Raises ValueError or yaml.YAMLError — also for a
-    document nested so deeply that the (recursive) YAML composer hits the recursion limit."""
+def load_cfg_text(text: str | None, *, max_expiry_days: int, lenient: bool = False) -> AdaptiveCfg:
+    """Parse ``adaptive.yaml`` text (duplicate keys, aliases, oversized files and too many values refused — the
+    engine reads it on its loop: a hand-made alias bomb must never stall a tick). Raises ValueError or yaml.YAMLError
+    — also for a document nested so deeply that the (recursive) YAML composer hits the recursion limit, and for a key
+    that is not a plain string (``? [a]``: unhashable). ``lenient``: see :func:`parse_cfg`."""
     if text is None or not text.strip():
         return AdaptiveCfg()
     if len(text) > MAX_YAML_CHARS:
@@ -329,9 +370,11 @@ def load_cfg_text(text: str | None, *, max_expiry_days: int) -> AdaptiveCfg:
     if has_alias(text):
         raise ValueError("adaptive.yaml must not use YAML aliases (*name)")
     try:
-        return parse_cfg(yaml.load(text, Loader=_UniqueKeyLoader), max_expiry_days=max_expiry_days)
+        return parse_cfg(yaml.load(text, Loader=_LOADER), max_expiry_days=max_expiry_days, lenient=lenient)
     except RecursionError:
         raise ValueError("adaptive.yaml is nested too deeply") from None
+    except TypeError as exc:
+        raise ValueError(f"adaptive.yaml: unsupported key or value, keys must be plain strings ({exc})") from None
 
 
 def dump_cfg(cfg: AdaptiveCfg) -> str:
@@ -599,12 +642,15 @@ class AdaptiveStore:
                 log.debug("%s: adaptive files not readable yet: %s", self.pair, exc)
                 self._checked = t
                 return
-            except (ValueError, yaml.YAMLError, RecursionError) as exc:
+            except Exception as exc:  # noqa: BLE001 — ValueError / YAMLError, or anything else a hand edit provokes
+                # the invalid branch for every error: never the config values in place of the last good ones, and
+                # never a re-read on every call (the signature is remembered)
                 self._sig, self._checked, self._seen = sig, t, True
                 if sig != self._invalid_sig:
                     self._invalid_sig = sig
-                    text = (f"{self.pair}: adaptive overlay invalid - keeping the last good values: "
-                            f"{_short(exc)}")
+                    why = _short(exc) if isinstance(exc, (ValueError, yaml.YAMLError)) else \
+                        f"{type(exc).__name__}: {_short(exc)}"
+                    text = f"{self.pair}: adaptive overlay invalid - keeping the last good values: {why}"
                     log.warning(text)
                     self._emit("adaptive_invalid", {"pair": self.pair, "text": text})
                 return

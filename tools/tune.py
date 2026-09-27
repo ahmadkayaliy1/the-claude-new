@@ -162,17 +162,24 @@ def _current(t: Target, *, lenient: bool = False) -> tuple[ad.AdaptiveCfg, str]:
     """(overlay, playbook text). Invalid files refuse the change (they must be fixed by hand, never overwritten
     blindly) — so does a ``playbook.md`` the services reject (missing, not matching its hash in ``adaptive.yaml``,
     failing the lint): they then ignore the whole overlay, and a change "applied" on top of it would never be in force.
-    ``lenient`` (revert, which repairs such a pair) accepts all of that, and entries up to the hard 30-day expiry (a
-    lowered max_expiry_days)."""
+    ``lenient`` (revert, which repairs such a pair) accepts all of that, entries up to the hard 30-day expiry (a
+    lowered max_expiry_days) and a tp_hint that today's lint refuses (written under an older one)."""
     try:
         text = (t.dir / ad.YAML_FILE).read_text(encoding="utf-8")
     except FileNotFoundError:
         text = None
     days = ad.HARD_MAX_EXPIRY_DAYS if lenient else t.s.adaptive.max_expiry_days
     try:
-        cfg = ad.load_cfg_text(text, max_expiry_days=days)
+        cfg = ad.load_cfg_text(text, max_expiry_days=days, lenient=lenient)
     except Exception as exc:  # noqa: BLE001 — ValidationError / YAMLError
-        raise Refused(f"{t.dir / ad.YAML_FILE} is invalid ({ad._short(exc)}) - fix or delete it by hand") from None
+        todo = "fix or delete it by hand"
+        if not lenient:
+            try:                                        # would revert accept it? then that is the repair
+                ad.load_cfg_text(text, max_expiry_days=ad.HARD_MAX_EXPIRY_DAYS, lenient=True)
+                todo = f"run: tune.py --pair {t.pair} revert KEY (the entry it names), or fix it by hand"
+            except Exception:  # noqa: BLE001
+                pass
+        raise Refused(f"{t.dir / ad.YAML_FILE} is invalid ({ad._short(exc)}) - {todo}") from None
     pb = ""
     if cfg.playbook is not None:
         path = t.dir / ad.PLAYBOOK_FILE
@@ -687,7 +694,7 @@ def cmd_revert(a: argparse.Namespace, t: Target, now: int, out: TextIO | None) -
         if a.dry_run:
             _say(out, f"dry-run: would revert: {what}")
             return EXIT_OK
-        new_cfg = cfg.with_entry(spec.key, None, max_expiry_days=ad.HARD_MAX_EXPIRY_DAYS)
+        new_cfg = cfg.with_entry(spec.key, None, max_expiry_days=ad.HARD_MAX_EXPIRY_DAYS, lenient=True)
         con = _db(t)
         cid: int | None = None
         try:

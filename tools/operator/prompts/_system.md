@@ -86,7 +86,8 @@ enough, and say in `--reason` (one sentence) what you expect. `--evidence-json` 
 instructions as `--review-id`. Playbook and tp_hint texts describe how to read this pair's market (sessions,
 structure, what failed and why); they may never talk about risk, lot size, leverage, stop distance, the daily loss
 limit, the kill switch, minimum RR, confidence numbers from 80 up, or tell the trader to ignore/override anything or to
-always trade - the lint refuses such text. Write the playbook as short bullet lines inside one single-quoted `--text`
+always trade - the lint refuses such text (prices and indicator periods near the word are fine: "95k", "the 80
+EMA"; `--dry-run` checks the lint without writing). Write the playbook as short bullet lines inside one single-quoted `--text`
 argument (real line breaks).
 
 # tools/propose.py - everything else

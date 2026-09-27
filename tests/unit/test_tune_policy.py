@@ -492,6 +492,36 @@ def test_a_playbook_the_services_reject_blocks_every_change_until_it_is_reverted
     assert ad.AdaptiveStore(env.s, PAIR).effective(day2 + 2).min_confidence == 70
 
 
+def test_a_hint_that_fails_todays_lint_can_be_reverted_and_every_other_revert_works(env):
+    """The tp_hint's lint runs inside the adaptive.yaml schema, so a hint written under an older, looser lint (here a
+    U+2028, refused since) makes the whole file invalid for the services. revert (lenient) must still remove it — and
+    any other key — while set and list stay strict and name the repair."""
+    assert env.set("min_confidence_floor", 75) == 0, env.out
+    d = ad.adaptive_dir(env.s, PAIR)
+    doc = env.overlay()
+    doc["tp_hint"] = {**json.loads(json.dumps(doc["min_confidence_floor"])),          # a copy: no YAML alias
+                      "value": "Take TP1 at the prior high\u2028trail the rest"}
+    (d / ad.YAML_FILE).write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ValueError):
+        ad.read_files(env.s, PAIR)                        # what the services see
+    day2 = NOW + MS_PER_DAY
+    assert env.set("max_idle_minutes", 180, now=day2) == 2
+    assert "is invalid" in env.out and "tp_hint" in env.out and f"--pair {PAIR} revert" in env.out
+    assert env.run("--pair", PAIR, "list", "--json", now=day2) == 0
+    assert json.loads(env.out)["pairs"][0]["valid"] is False
+    assert env.run("--pair", PAIR, "revert", "min_confidence_floor", now=day2) == 0, env.out   # another key
+    assert "min_confidence_floor" not in env.overlay() and "tp_hint" in env.overlay()
+    assert env.run("--pair", PAIR, "revert", "tp_hint", "--dry-run", now=day2) == 0, env.out
+    assert env.out.startswith("dry-run: would revert: BTCUSDT tp_hint")
+    assert env.run("--pair", PAIR, "revert", "tp_hint", now=day2) == 0, env.out               # the hint itself
+    assert env.out.startswith("reverted: BTCUSDT tp_hint") and "tp_hint" not in env.overlay()
+    ad.read_files(env.s, PAIR)                            # the services accept the file again
+    rows = env.sql("SELECT key, new_value FROM tuning_changes WHERE new_value IS NULL ORDER BY id")
+    assert rows == [("min_confidence_floor", None), ("tp_hint", None)]
+    assert env.set("max_idle_minutes", 180, now=day2 + 1) == 0, env.out
+    assert ad.AdaptiveStore(env.s, PAIR).effective(day2 + 2).max_idle_minutes == 180
+
+
 def test_an_operator_session_sets_the_playbook_only_with_text(env, monkeypatch):
     """FILE and '-' would let a session read what its Read denials forbid (.env, ~/.claude, credential files)."""
     monkeypatch.setenv(tune.SESSION_ENV, "1")

@@ -15,10 +15,12 @@ diagnose --reason <the new findings>``, detached) unless ``monitor.diagnose_enab
 Suspend-aware: after a sleep, a reboot or a clock jump every wall-clock heartbeat looks stale by the time asleep.
 The age of a beat older than the supervisor's last suspend is corrected by the time asleep, and while a system is
 "settling" (booted, resumed or clock-jumped within the stale window, or the machine slept since the last run) a
-staleness finding — and a "no supervisor runs" note — must be seen on two consecutive runs at least 5 min apart before
-it is reported.
+staleness finding must be seen on two consecutive runs at least 5 min apart before it is reported; a "no supervisor
+runs" note always must (after any logon the keep-alive tasks start the supervisors 90-150 s late).
 
-A notification that reached no sink (the flush timed out, every sink failed) is re-armed: the next run sends it again.
+An event is handled once whatever the notification did (a burst counted, the equity baseline moved on). A notification
+that reached no sink (the last flush timed out, every sink failed) is kept in ``pending_notify`` and re-sent by the
+next runs under a ``:retry<n>`` key, at most ``NOTIFY_TRIES`` attempts in all; a re-send is never a new finding.
 
 Exit code: 0 no warning, 1 a warning or worse (the task's "Last Result"), 3 the config could not be read (nothing was
 checked; ``logs/monitor-config-error.log``). docs/monitoring.md has the full rule table.
@@ -69,7 +71,9 @@ REMIND_MS = {"info": 0, "warn": 6 * MS_PER_HOUR, "critical": MS_PER_HOUR}    # a
 COOL_MS = {"info": 2 * MS_PER_HOUR, "warn": REMIND_MS["warn"], "critical": 2 * MS_PER_HOUR}
 EVERY_MS = 15 * MS_PER_MINUTE               # the task's repetition (TradingSystemOps-Monitor)
 BASELINE_MAX_MS = max(3 * EVERY_MS, MS_PER_HOUR)    # an older equity baseline (plus the sleep since) only warns
+SAME_BOOT_MS = 60_000                       # two boot times this close are the same boot
 FLUSH_S = (15.0, 12.0, 240.0)               # notifier flush: base + per queued notification, capped
+NOTIFY_TRIES = 3                            # attempts per undelivered notification: the first one + 2 re-sends
 SESSION_LOCK = "operator_session.lock"      # tools/operator/run_session.py LOCK_NAME: one operator session at a time
 WANTED_MS = 2 * MS_PER_HOUR                 # a diagnosis put off by a running review is retried this long
 IPC_RE = re.compile(r"IPC|-1000[45]")       # MT5 "No IPC connection" / IPC timeout / IPC recv failed
@@ -79,7 +83,6 @@ CONFIG_ERROR_EXIT = 3                       # load_settings() failed: nothing wa
 CONFIG_ERROR_LOG = ROOT / "logs" / "monitor-config-error.log"     # fixed: without Settings there is no logs dir
 CONFIG_ERROR_LOG_MAX = 1_000_000            # bytes; then it is rotated once (.1)
 CONFIG_TOAST_TIMEOUT_S = 15.0
-_GONE = object()
 
 
 def _load_health_report():
@@ -156,19 +159,16 @@ _SINK_OK = ("shown", "sent")
 _SINK_LOST = ("pending", "failed", "queue full", "not queued")     # prefixes: in flight, or no delivery
 
 
-def _undelivered(res: dict | None, *, retry: bool = False) -> bool:
+def _undelivered(res: dict | None) -> bool:
     """True when a notifier result record shows that the notification reached no sink: every sink in use is still
     ``pending`` (a flush that timed out) or failed. A sink that is off or not configured does not count, so a
     notification that is a log line only by configuration counts as delivered; so does one skipped by the rate
-    limit or the dedupe — except a ``retry`` (a re-armed alert) that the dedupe skipped: the earlier attempt claimed
-    the key and may never have arrived. Unknown (no record) counts as delivered."""
+    limit or the dedupe (a re-send has a key of its own, ``:retry<n>``). Unknown (no record) counts as delivered."""
     if not isinstance(res, dict):
         return False
     sinks = [v for v in (res.get("toast"), res.get("telegram")) if isinstance(v, str)]
     if any(v in _SINK_OK for v in sinks):
         return False
-    if retry and res.get("deduped"):
-        return True
     return any(v.startswith(_SINK_LOST) for v in sinks)
 
 
@@ -319,8 +319,8 @@ class Monitor:
         self.awake, self.boot_ms = 0.0, 0
         self.slept_s = 0.0                                # machine sleep since the previous run (0 = none/unknown)
         self.machine_settle: str | None = None
-        self._sent: list[tuple[Finding, dict | None, int, bool]] = []   # (finding, result, notified_ms before, retry)
-        self._undo: dict[str, list] = {}                  # finding key → what puts its event back if unsent
+        # (finding key, its pending_notify entry, the notifier's result, the finding — None for a re-send)
+        self._sent: list[tuple[str, dict, dict | None, Finding | None]] = []
 
     # ---- bookkeeping
     def add(self, f: Finding) -> bool:
@@ -365,17 +365,6 @@ class Monitor:
             self.res.held.append(f"{name} {kind} {i}: {settle} — checked again on the next run")
         return keep
 
-    def _undo_on_unsent(self, key: str, d: dict, item: str, old=_GONE) -> None:  # noqa: ANN001
-        """Should finding ``key``'s notification reach no sink, put ``d[item]`` back to ``old`` (absent: removed) —
-        the bookkeeping that marks an event as handled (a burst counted, an equity baseline, a VPN state), so the
-        next run detects the same event again and sends it."""
-        def undo() -> None:
-            if old is _GONE:
-                d.pop(item, None)
-            else:
-                d[item] = old
-        self._undo.setdefault(key, []).append(undo)
-
     # ---- orchestration
     def run(self) -> Result:
         self.awake, self.boot_ms = _clock()
@@ -408,8 +397,10 @@ class Monitor:
         return self.res
 
     def _notes(self) -> None:
-        """health_report's notes become warnings. "No supervisor runs" waits for the two-run rule while the machine
-        settles (after a logon the keep-alive tasks start the supervisors 90-150 s late); other notes go at once."""
+        """health_report's notes become warnings. "No supervisor runs" always waits for the two-run rule: after any
+        logon (a prompt one after a boot, one hours after an overnight update restart, a logoff/logon) the keep-alive
+        tasks start the supervisors 90-150 s late, and the monitor cannot tell when the user logged on — a system that
+        is really down is reported one run (15 min) later. Other notes go at once."""
         notes = {hashlib.sha1(t.encode("utf-8")).hexdigest()[:12]: t
                  for t in (n[3:] if n.startswith("!! ") else n for n in self.notes)}
         down: dict[str, str] = {}                               # hold id (the pair when it names one) → note id
@@ -417,7 +408,9 @@ class Monitor:
             if "no supervisor runs" in text:
                 who = text.split(":", 1)[0].strip()
                 down[who if PAIR_RE.fullmatch(who) else i] = i
-        kept = self._hold("system", "not running", {h: notes[i] for h, i in down.items()}, self.machine_settle)
+        kept = self._hold("system", "not running", {h: notes[i] for h, i in down.items()},
+                          self.machine_settle or "first seen on this run (the keep-alive starts a supervisor 90-150 s "
+                                                 "after a logon)")
         waiting = {i for h, i in down.items() if h not in kept}
         for i, text in notes.items():
             if i not in waiting:
@@ -436,7 +429,7 @@ class Monitor:
         """Seconds the machine slept since the previous run (wall minus awake time); 0 when unknown (no previous
         run, another boot)."""
         run = self.prev.get("run") or {}
-        same_boot = abs(int(run.get("boot_ms") or 0) - self.boot_ms) < 60_000
+        same_boot = abs(int(run.get("boot_ms") or 0) - self.boot_ms) < SAME_BOOT_MS
         if run.get("ts") and run.get("awake_s") is not None and same_boot:
             return (self.now - int(run["ts"])) / 1000 - (self.awake - float(run["awake_s"]))
         return 0.0
@@ -646,8 +639,7 @@ class Monitor:
                         + (f"{p}'s KILL_SWITCH; once the orders are reviewed: scripts\\kill_switch_off.bat {p}"
                            if ok_pair else "pair unknown: the global KILL_SWITCH"),
                         system=name, pair=p if ok_pair else None, switch=target)
-            if self.add(f):
-                self._undo_on_unsent(f.key, keep, k, keep.get(k, _GONE))
+            if self.add(f):                 # counted whatever its notification does: never engaged twice
                 keep[k] = max(new)
 
     def _restarts(self, s: Settings, name: str, con, status: dict[str, _Row], settle: str | None) -> None:
@@ -703,39 +695,53 @@ class Monitor:
                              + "; ".join(items.values()), system=name, pair=s.paths.instance))
 
     # ---- machine / account checks
+    def _gap_ms(self, v: dict) -> int:
+        """The time the machine slept or was off since equity baseline ``v`` was sampled, as of this run: the sleep
+        the runs that carried it counted (``slept_ms``) plus the sleep since the previous run; after a reboot since
+        the run that last carried it (``boot_ms``), everything from the sample to this boot."""
+        gap = int(_num(v.get("slept_ms")) or 0)
+        boot = int(_num(v.get("boot_ms")) or 0)
+        if boot and self.boot_ms and abs(boot - self.boot_ms) >= SAME_BOOT_MS:
+            return max(gap, self.boot_ms - int(_num(v.get("ts")) or 0), 0)
+        return gap + round(max(self.slept_s, 0.0) * 1000)
+
     def _equity(self) -> None:
-        """Equity drop between two runs, per account. Only a drop of an identified MT5 account (``mt5:…``, not the
-        ``…:?`` fallback) against a baseline from the previous run or so (``BASELINE_MAX_MS`` plus the machine's
-        sleep since then) engages the global switch; a paper account, an unidentified one or an older baseline only
-        warns — the switch stops every system."""
+        """Equity drop between two samples, per account. Only a drop of an identified MT5 account (``mt5:…``, not the
+        ``…:?`` fallback) against a recent baseline engages the global switch: at most ``BASELINE_MAX_MS`` old, not
+        counting the time the machine slept or was off since that sample (:meth:`_gap_ms`). A paper account, an
+        unidentified one or an older baseline (no sample for over an hour while the machine was up: the monitor did
+        not run, or its runs found no equity in the executor row) only warns — the switch stops every system. The
+        baseline moves on whatever the finding's notification does."""
         m = self.base.monitor
         prev = self.prev.get("equity") or {}
         keep = self.state.setdefault("equity", {})
-        for acct, v in prev.items():                            # a baseline survives a run without that executor
+        for acct, v in prev.items():                            # a baseline survives a run without a newer sample
             if isinstance(v, dict) and self.now - int(v.get("ts") or 0) < 7 * MS_PER_DAY:
-                keep[acct] = v
-        max_age = BASELINE_MAX_MS + int(max(self.slept_s, 0.0) * 1000)
+                keep[acct] = {**v, "slept_ms": self._gap_ms(v), "boot_ms": self.boot_ms}
         for acct, (eq, ts, name) in sorted(self.samples.items()):
             p = prev.get(acct) if isinstance(prev.get(acct), dict) else None
-            key = f"equity_drop:{acct}:{ts}"
-            self._undo_on_unsent(key, keep, acct, keep.get(acct, _GONE))
-            keep[acct] = {"equity": eq, "ts": ts}
+            if p is not None and ts <= int(p.get("ts") or 0):
+                continue                                        # the same (or an older) row: carried, not a sample
+            keep[acct] = {"equity": eq, "ts": ts, "boot_ms": self.boot_ms}
             old = _num((p or {}).get("equity"))
-            if not old or ts <= int(p.get("ts") or 0):
+            if not old:
                 continue
             drop = (old - eq) / old * 100
             if drop <= m.equity_drop_warn_pct:
                 continue
             kill = drop > m.equity_drop_kill_pct
+            key = f"equity_drop:{acct}:{ts}"
             age = ts - int(p["ts"])
+            gap = self._gap_ms(p)
             no_switch = None
             if kill and acct.startswith("paper:"):
                 no_switch = "a paper account (simulated equity)"
             elif kill and (not acct.startswith("mt5:") or acct.endswith(":?")):
                 no_switch = "the account is not identified (the executor row has no account_drawdown)"
-            elif kill and age > max_age:
-                no_switch = (f"the previous sample is {age / MS_PER_HOUR:.1f} h old — not a drop between two runs; "
-                             "check the account")
+            elif kill and age > BASELINE_MAX_MS + gap:
+                no_switch = (f"the previous sample is {age / MS_PER_HOUR:.1f} h old"
+                             + (f" ({gap / MS_PER_HOUR:.1f} h of it asleep or off)" if gap >= MS_PER_MINUTE else "")
+                             + " — not a drop between two runs; check the account")
             switch = kill and no_switch is None
             self.add(Finding("critical" if switch else "warn", key, "Equity drop",
                              f"account {acct}: equity {old:.2f} → {eq:.2f} (−{drop:.1f} %) since {iso(int(p['ts']))}"
@@ -781,12 +787,11 @@ class Monitor:
         now_up = {k.lower(): v for k, v in _adapters().items()}
         for n in names:
             up = bool(now_up.get(n.lower(), False))             # a missing adapter is down
-            keep[n] = up
+            keep[n] = up                                        # whatever the notification does
             if n in prev and bool(prev[n]) != up:
                 word = "up" if up else "down"
-                key = f"vpn:{n}:{word}:{self.now}"
-                self._undo_on_unsent(key, keep, n, prev[n])
-                self.add(Finding("info", key, f"VPN {word}", f"network adapter '{n}' is now {word}"))
+                self.add(Finding("info", f"vpn:{n}:{word}:{self.now}", f"VPN {word}",
+                                 f"network adapter '{n}' is now {word}"))
 
     def _reviews(self) -> None:
         b = self.base
@@ -812,27 +817,30 @@ class Monitor:
 
     # ---- notification, dedupe, diagnosis
     def _dispatch(self) -> None:
-        """Decide per finding whether it is due (new, level risen, reminder due, or re-armed after an undelivered
-        notification) and queue its notification, criticals first. A key that cleared within its cool-down
-        (``COOL_MS``) and comes back persists: not re-sent unless its level rose, and not new (no diagnosis)."""
+        """Decide per finding whether it is due (new, level risen or reminder due) and queue its notification, with
+        the re-sends of earlier undelivered ones (:meth:`_resend`); criticals are queued first. A key that cleared
+        within its cool-down (``COOL_MS``) and comes back persists: not sent again unless its level rose, and not new
+        (no diagnosis). A due finding is recorded as notified whatever its sinks do: :meth:`_deliver` keeps an
+        undelivered notification for a re-send, and a re-send is never a new finding."""
         prev = self.prev.get("alerts") or {}
         once = {k: v for k, v in (self.prev.get("once") or {}).items() if self.now - int(v) < 30 * MS_PER_DAY}
         alerts: dict[str, dict] = {}
+        out: list[tuple[str, dict, Finding | None]] = []       # (finding key, pending_notify entry, finding)
         for f in sorted(self.res.findings, key=lambda x: -LEVELS[x.level]):     # criticals are queued first
             a = prev.get(f.key) if isinstance(prev.get(f.key), dict) else None
             if a is not None and a.get("cleared_ms") and not self._cooling(a):
                 a = None                                        # cleared longer than its cool-down: a new episode
             remind = f.remind_ms if f.remind_ms is not None else REMIND_MS[f.level]
-            retry = bool(a and a.get("unsent"))
             if f.once and f.key in once:
                 send = False
-            elif a is None or retry or LEVELS[f.level] > LEVELS.get(a.get("level"), 0):
+            elif a is None or LEVELS[f.level] > LEVELS.get(a.get("level"), 0):
                 send = True
             else:
                 send = bool(remind) and not f.once and self.now - int(a.get("notified_ms") or 0) >= remind
-            before = int((a or {}).get("notified_ms") or 0)
             alerts[f.key] = {"level": f.level, "first_ms": int((a or {}).get("first_ms") or self.now),
-                             "last_ms": self.now, "notified_ms": self.now if send else before, "title": f.title}
+                             "last_ms": self.now,
+                             "notified_ms": self.now if send else int((a or {}).get("notified_ms") or 0),
+                             "title": f.title}
             if f.once:
                 once.setdefault(f.key, self.now)
             (log.warning if LEVELS[f.level] else log.info)("[%s] %s: %s%s%s", f.level, f.title, f.text,
@@ -840,10 +848,19 @@ class Monitor:
                                                           "" if send else " (already notified)")
             f.new = send
             if send and not self.dry_run:
+                out.append((f.key, {"level": f.level, "title": f"Monitor: {f.title}",
+                                    "text": f.text + (f"\n{f.action}" if f.action else ""), "pair": f.pair,
+                                    "first_ms": self.now, "tries": 1}, f))
+        out += self._resend({k for k, _, _ in out})
+        for key, e, f in sorted(out, key=lambda x: -LEVELS[x[1]["level"]]):     # stable: this run's, then re-sends
+            n = e["tries"] - 1
+            text = e["text"] + (f"\n(re-sent: detected {iso(e['first_ms'])}, the earlier notification reached no "
+                                "sink)" if n else "")
+            res = _notify(self.base, e["level"], e["title"], text,
+                          key=f"monitor:{key}" + (f":retry{n}" if n else ""), pair=e.get("pair"))
+            if f is not None:
                 f.notified = True
-                res = _notify(self.base, f.level, f"Monitor: {f.title}",
-                              f.text + (f"\n{f.action}" if f.action else ""), key=f"monitor:{f.key}", pair=f.pair)
-                self._sent.append((f, res, before, retry))
+            self._sent.append((key, e, res, f))
         for k, a in prev.items():                               # cleared: remembered for the cool-down
             if k not in alerts and isinstance(a, dict) and self._cooling(a):
                 alerts[k] = {**a, "cleared_ms": int(a.get("cleared_ms") or self.now)}
@@ -856,28 +873,76 @@ class Monitor:
         """An alert last seen within its level's cool-down (``COOL_MS``)."""
         return self.now - int(a.get("last_ms") or 0) < COOL_MS.get(a.get("level"), 2 * MS_PER_HOUR)
 
+    def _resend(self, fresh: set[str]) -> list[tuple[str, dict, None]]:
+        """The notifications earlier runs could not deliver (``pending_notify``) that are due for a re-send: only the
+        notification is sent again — the event is not detected again, no switch is engaged, nothing is new. One is
+        dropped (a log line) when this run sends its key afresh (a level rise, a reminder), after ``NOTIFY_TRIES``
+        attempts, or once older than its level's reminder interval (``REMIND_MS``; info has none): the normal
+        reminder takes over. A dry run keeps them as they are."""
+        pend = self.prev.get("pending_notify") if isinstance(self.prev.get("pending_notify"), dict) else {}
+        self.state["pending_notify"] = {}
+        out: list[tuple[str, dict, None]] = []
+        for key, e in sorted(pend.items()):
+            if not isinstance(e, dict) or e.get("level") not in LEVELS \
+                    or not all(isinstance(e.get(x), str) for x in ("title", "text")):
+                continue
+            if self.dry_run:
+                self.state["pending_notify"][key] = e
+                continue
+            tries, first = int(_num(e.get("tries")) or 1), int(_num(e.get("first_ms")) or 0)
+            limit = REMIND_MS[e["level"]]
+            why = ("sent afresh by this run" if key in fresh else
+                   f"{tries} attempt(s)" if tries >= NOTIFY_TRIES else
+                   f"older than {limit / MS_PER_HOUR:g} h" if limit and self.now - first >= limit else None)
+            if why:
+                (log.info if key in fresh else log.warning)("undelivered notification '%s' dropped: %s", key, why)
+                continue
+            out.append((key, {**e, "first_ms": first or self.now, "tries": tries + 1}, None))
+        return out
+
     def _deliver(self) -> None:
-        """Wait for this run's notifications (``FLUSH_S``: the budget grows with the queue), then re-arm every finding
-        whose notification reached no sink (:func:`_undelivered`): its alert keeps the previous ``notified_ms`` and is
-        marked ``unsent``, a one-shot key is not recorded as sent, and an event's own bookkeeping is put back
-        (``_undo_on_unsent``) — the next run sends it again."""
-        queued = sum(1 for _, r, _, _ in self._sent if isinstance(r, dict) and not r.get("done"))
+        """Wait for this run's notifications (``FLUSH_S``: the budget grows with the queue), then keep every one that
+        reached no sink (:func:`_undelivered`) in ``pending_notify`` for the next runs (:meth:`_resend`), unless it
+        used up its ``NOTIFY_TRIES`` attempts. The event's own bookkeeping stays as it is — the alert's
+        ``notified_ms``, a one-shot key, a burst counted, the equity baseline, the VPN state: the event was handled,
+        only its notification is owed. main() looks again after its last flush (:meth:`reconcile`)."""
+        queued = sum(1 for _, _, r, _ in self._sent if isinstance(r, dict) and not r.get("done"))
         if queued:
             base, per, cap = FLUSH_S
             _flush_notify(min(base + per * queued, cap))
-        for f, r, before, retry in self._sent:
-            if not _undelivered(r, retry=retry):
+        for key, e, r, f in self._sent:
+            if not _undelivered(r):
                 continue
-            a = self.state["alerts"].get(f.key)
-            if a is not None:
-                a.update(notified_ms=before, unsent=True)
-            if f.once:
-                self.state["once"].pop(f.key, None)             # due this run = it was not recorded before
-            for undo in self._undo.pop(f.key, ()):
-                undo()
-            f.notified = False
-            log.warning("notification '%s' not delivered (toast: %s, Telegram: %s) — the next run sends it again",
-                        f.key, r.get("toast"), r.get("telegram"))
+            if f is not None:
+                f.notified = False
+            last = e["tries"] >= NOTIFY_TRIES
+            if not last:
+                self.state["pending_notify"][key] = e
+            log.warning("notification '%s' not delivered (toast: %s, Telegram: %s) — %s", key, r.get("toast"),
+                        r.get("telegram"), f"dropped after {e['tries']} attempts" if last
+                        else "the next run sends it again")
+
+    def reconcile(self) -> bool:
+        """After main()'s last flush: a notification still in flight when :meth:`_deliver` looked that has reached a
+        sink since leaves ``pending_notify`` (the next run would send it twice), and the state is saved again (best
+        effort). True when something changed."""
+        pend = self.state.get("pending_notify") or {}
+        done = [(key, f) for key, e, r, f in self._sent if pend.get(key) is e and not _undelivered(r)]
+        if self.dry_run or not done:
+            return False
+        for key, f in done:
+            pend.pop(key, None)
+            if f is not None:
+                f.notified = True
+        if isinstance(self.state.get("run"), dict):
+            self.state["run"]["findings"] = [f.as_dict() for f in self.res.findings]
+        log.info("delivered after the first wait: %s", ", ".join(k for k, _ in done))
+        try:
+            save_state(self.path, self.state)
+        except OSError as exc:
+            log.warning("%s could not be written after the last flush: %s — the next run may re-send %s", self.path,
+                        exc, ", ".join(k for k, _ in done))
+        return True
 
     def _session_running(self) -> bool:
         """An operator session (a review, another diagnosis) holds ``operator_session.lock`` — the one
@@ -1057,7 +1122,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         chosen, notes = hr.systems(argparse.Namespace(instance=a.instance, all_pairs_system=a.all_pairs_system))
-        res = run(base, chosen, notes, dry_run=a.dry_run, diagnose=not (a.no_diagnose or a.dry_run))
+        mon = Monitor(base, chosen, notes, dry_run=a.dry_run, diagnose=not (a.no_diagnose or a.dry_run))
+        res = mon.run()
     except Exception as exc:  # noqa: BLE001 — a crashed monitor must still be heard of
         log.exception("monitor run failed")
         if not a.dry_run:
@@ -1071,6 +1137,10 @@ def main(argv: list[str] | None = None) -> int:
     say(json.dumps(res.as_dict(), ensure_ascii=False, indent=1) if a.json else render(res))
     if not a.dry_run:
         _flush_notify()
+        try:
+            mon.reconcile()             # delivery is judged after this last flush, not after the run's own wait
+        except Exception:  # noqa: BLE001 — best effort: the state was saved by the run
+            log.warning("reconcile after the last flush failed", exc_info=True)
     return res.exit_code
 
 

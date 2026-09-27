@@ -11,10 +11,19 @@ read costs the subscription far less than fresh input, so it counts ``cache_read
 
 Level 0 below ``level1_pct`` of both budgets, 1 (reviews and events only) at or above it in either window, 2 (events
 only) at or above ``level2_pct``. A level is raised at its threshold but lowered only once the worse window is
-``HYSTERESIS_PCT`` points below it (the gauge instance remembers its last level), so usage hovering at a threshold does
-not flip the level — and its notifications — on every re-read. The engine rations by the level only while
-``ai.usage.enforce`` is true; otherwise the gauge is only published (engine status, health report, review pack). The
-CLI's own usage-limit cooldown stays the hard stop either way.
+``HYSTERESIS_PCT`` points below it, so usage hovering at a threshold does not flip the level — and its notifications —
+on every re-read. The step-down needs the last level, which only a long-lived gauge instance remembers: it applies in
+a running engine's gauge alone (the engine status the dashboard shows, and the engine's rationing). The health report,
+the review pack and the operator-session gate (``tools/operator/run_session.py``, which reads the pack's gauge) build a
+fresh gauge on every call and use the thresholds as they are — after a 92 % peak they show level 1 at 87 % while an
+engine still holds level 2. The engine rations by the level only while ``ai.usage.enforce`` is true; otherwise the
+gauge is only published (engine status, health report, review pack). The CLI's own usage-limit cooldown stays the hard
+stop either way.
+
+An operator session that ended without a result document (time limit, crash) leaves a ledger row with 0 tokens whose
+``error`` starts with :data:`.budget.USAGE_UNKNOWN_PREFIX`: its real spend is missing from the sums, not zero. The
+gauge counts those rows per window (``unknown_7d`` / ``unknown_5h``) and its reason ends ``+ N session(s) with unknown
+usage``; the level is computed from the recorded tokens only.
 
 The engine asks every 10 s on its event loop, so the sums are cached for ``ai.usage.cache_s``; the gauge never raises
 (an unreadable ledger is level 0 with the reason and ``error`` set — a gauge problem is never a reason to stop
@@ -55,6 +64,8 @@ class GaugeState:
     five_h_calls: int = 0
     as_of_ms: int = 0
     error: str | None = None
+    unknown_7d: int = 0   # operator sessions of the window with unknown usage (0 tokens recorded, real spend missing)
+    unknown_5h: int = 0
 
     def as_detail(self) -> dict[str, Any]:
         """Flat and JSON-ready (engine status ``usage_gauge``, review pack, dashboard)."""
@@ -63,6 +74,7 @@ class GaugeState:
                 "five_h_tokens": int(round(self.five_h_tokens)), "five_h_pct": round(self.five_h_pct, 1),
                 "week_budget": self.week_budget, "five_h_budget": self.five_h_budget,
                 "week_calls": self.week_calls, "five_h_calls": self.five_h_calls,
+                "unknown_7d": self.unknown_7d, "unknown_5h": self.unknown_5h,
                 "as_of_ms": self.as_of_ms, **({"error": self.error} if self.error else {})}
 
 
@@ -115,6 +127,8 @@ class UsageGauge:
             providers = claude_providers(self.s)
             wk = self.usage.tokens_since(now - WEEK_MS, providers=providers)
             fh = self.usage.tokens_since(now - FIVE_HOURS_MS, providers=providers)
+            unknown_7d = self.usage.unknown_since(now - WEEK_MS, providers=providers)
+            unknown_5h = self.usage.unknown_since(now - FIVE_HOURS_MS, providers=providers)
             week, five = effective_tokens(wk, u.cache_read_weight), effective_tokens(fh, u.cache_read_weight)
             week_pct, five_pct = 100.0 * week / week_budget, 100.0 * five / five_budget
             worst = max(week_pct, five_pct)
@@ -134,10 +148,13 @@ class UsageGauge:
                 over = [f"{name} {_millions(v)} tokens = {pct:.0f} % of {_millions(b)}"
                         for name, v, pct, b in windows if pct >= limit]
                 reason = f"{'; '.join(over)} (≥ {limit:g} % → {LEVEL_TEXT[level]})"
+            if unknown_7d:                                         # their real spend is not in the sums above
+                reason += f" + {unknown_7d} session(s) with unknown usage in 7 d"
             self._last_error, self._level = None, level
             return GaugeState(level, week, week_pct, five, five_pct, enforce, reason, week_budget=week_budget,
                               five_h_budget=five_budget, week_calls=int(wk.get("calls") or 0),
-                              five_h_calls=int(fh.get("calls") or 0), as_of_ms=now)
+                              five_h_calls=int(fh.get("calls") or 0), as_of_ms=now, unknown_7d=int(unknown_7d),
+                              unknown_5h=int(unknown_5h))
         except Exception as exc:  # noqa: BLE001 — a gauge problem never stops the engine
             err = f"{type(exc).__name__}: {exc}"[:300]
             if err != self._last_error:

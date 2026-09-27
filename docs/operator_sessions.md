@@ -264,7 +264,7 @@ tokens (`result.usage`, target ≤ 30 k), turns, `permission_denials`, whether t
 |---|---|
 | `not_signed_in` | `claude auth login` once in a terminal (H11); an API-key sign-in is refused on purpose |
 | `max_turns` | the session used all its turns without a summary — read `result.permission_denials` (denied commands cost turns) and the prompt/checklist |
-| `timeout` | the deadline killed the CLI tree; there is no result document, so the usage is unknown: the ledger row holds 0 tokens and its `error` starts with `usage_unknown: ` (with the elapsed seconds); the review pack counts such sessions. The same holds for an `error` without a result document |
+| `timeout` | the deadline killed the CLI tree; there is no result document, so the usage is unknown: the ledger row holds 0 tokens and its `error` starts with `usage_unknown: ` (with the elapsed seconds); the usage gauge (engine status, the health report's gauge line with `!!`, the pack's gauge and so the session gate's reason) and the review pack count such sessions (`ai/budget.py` `USAGE_UNKNOWN_PREFIX`). The same holds for an `error` without a result document |
 | `busy` | another session held the lock (or the CLI start stagger did not clear) — the next scheduled run tries again |
 | `gauge_paused` | the usage gauge is enforcing at level 2 (`ai.usage`); diagnoses still run |
 | `venv_missing` | the checkout has no `.venv\Scripts\python.exe` (a worktree) — create the junction |

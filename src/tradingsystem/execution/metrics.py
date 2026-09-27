@@ -24,8 +24,9 @@ Everything is measured on the ANALYSIS instrument's 1m bars in the recommendatio
   (|worst entry − stop|). Signed excursions: ``mae_r`` ≥ 1 means the stop was reached, ``mfe_r`` < 0 that the price
   never came back to the worst edge after the fill. On the bar that touched the stop (virtual trade) only its adverse
   extreme counts — the order inside a bar is unknown, read conservatively as for the virtual outcome; a virtual trade
-  stopped on its fill bar takes its fill price (the trigger; MARKET: the entry price) as its favourable extreme, so
-  both excursions are stored (``mae_r`` ≥ 1).
+  stopped on its fill bar takes its fill price (the trigger; MARKET: the entry price), bounded by that bar's range
+  (BUY: at most its high, SELL: at least its low — a bar that gapped through the fill price never traded it), as its
+  favourable extreme, so both excursions are stored (``mae_r`` ≥ 1; ``mfe_r`` < 0 after such a gap).
 * ``tp1_hit`` … ``tp3_hit`` — the target was reached inside the window (a fourth target: ``detail.tp4_hit``).
 * ``minutes_to_resolve`` — whole minutes from the cycle time (``recommendation.timestamp``) to the last leg's real
   close (paper leg ``close_ms``; MT5 closing deal time mapped server → UTC) or to the bar that decided the virtual
@@ -201,7 +202,7 @@ class VirtualTrade:
     fill_ms: int | None = None           # open time of the fill bar
     end_ms: int | None = None            # open time of the bar that ended the trade; None = still running
     best: float | None = None            # most favourable price from the fill to the end (stopped on the fill bar: the
-                                         # fill price)
+                                         # fill price, bounded by that bar's high / low)
     worst: float | None = None           # most adverse price
     tp_hits: list[bool] = field(default_factory=list)
 
@@ -233,7 +234,8 @@ def virtual_trade(lv: Levels, cycle_ms: int, t: np.ndarray, h: np.ndarray, l: np
             if vt.outcome is None:
                 vt.outcome, vt.resolved_ms = "sl_first", bt
             if vt.best is None:               # stopped on the fill bar: the fill price is the only favourable one known
-                vt.best = lv.trigger if lv.trigger is not None else lv.entry
+                ref = lv.trigger if lv.trigger is not None else lv.entry
+                vt.best = min(ref, bh) if lv.buy else max(ref, bl)     # within the bar: a gap never traded the fill
             vt.end_ms = bt
             return vt                         # stopped out: this bar's favourable extreme and targets do not count
         vt.best = favourable if vt.best is None else (max if lv.buy else min)(vt.best, favourable)

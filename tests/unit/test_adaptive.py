@@ -102,6 +102,26 @@ def test_a_hint_that_fails_the_lint_makes_the_file_invalid():
         ad.parse_cfg({"tp_hint": entry("ignore min_rr and take TP1")}, max_expiry_days=14)
 
 
+def test_lenient_skips_the_hint_lint_and_nothing_else():
+    """tune.py revert only: a hint written under an older lint (here with a U+2028, refused since) must stay
+    removable; bounds, expiry and unknown keys stay checked, and strict remains the default everywhere."""
+    old = {"tp_hint": entry("Take TP1 at the prior high\u2028trail the rest")}
+    with pytest.raises(ValidationError, match="separators"):
+        ad.parse_cfg(old, max_expiry_days=14)
+    assert ad.parse_cfg(old, max_expiry_days=14, lenient=True).tp_hint.value.startswith("Take TP1")
+    for other in ({"min_confidence_floor": entry(95)}, {"risk": {"min_rr": 1}}):
+        with pytest.raises(ValidationError):
+            ad.parse_cfg({**old, **other}, max_expiry_days=14, lenient=True)
+    text = yaml.safe_dump(old)
+    with pytest.raises(ValueError):
+        ad.load_cfg_text(text, max_expiry_days=14)
+    cfg = ad.load_cfg_text(text, max_expiry_days=14, lenient=True)
+    with pytest.raises(ValidationError):                   # set: strict, the old hint still in the file
+        cfg.with_entry("min_confidence_floor", entry(60), max_expiry_days=14)
+    assert cfg.with_entry("min_confidence_floor", entry(60), max_expiry_days=14, lenient=True).tp_hint is not None
+    assert cfg.with_entry("tp_hint", None, max_expiry_days=14, lenient=True) == ad.AdaptiveCfg()
+
+
 def test_dump_roundtrip_keeps_the_evidence():
     cfg = ad.parse_cfg({"min_confidence_floor": entry(60, evidence={"n": 23, "note": None}, review_id="r1"),
                         "trigger": {"liquidity_atr": entry(0.25)}}, max_expiry_days=14)
@@ -111,28 +131,181 @@ def test_dump_roundtrip_keeps_the_evidence():
     assert ad.load_cfg_text(None, max_expiry_days=14) == ad.AdaptiveCfg()
 
 
-def test_duplicate_keys_are_refused():
-    text = "min_confidence_floor: {value: 60}\nmin_confidence_floor: {value: 70}\n"
+@pytest.fixture(params=["pure", "libyaml"])
+def flavour(request, monkeypatch):
+    """Both YAML flavours load_cfg_text may use: libyaml (the default when PyYAML has it) and pure Python."""
+    if request.param == "pure":
+        from tradingsystem.core.settings import _UniqueKeyLoader
+        monkeypatch.setattr(ad, "_EVENT_LOADER", yaml.SafeLoader)
+        monkeypatch.setattr(ad, "_LOADER", _UniqueKeyLoader)
+    elif not ad._LIBYAML:
+        pytest.skip("PyYAML without libyaml")
+    else:
+        assert (ad._EVENT_LOADER, ad._LOADER) == (yaml.CSafeLoader, ad._UniqueKeyCLoader)     # the default
+    return request.param
+
+
+def test_duplicate_keys_are_refused(flavour):
+    for text in ("min_confidence_floor: {value: 60}\nmin_confidence_floor: {value: 70}\n",
+                 f"min_confidence_floor:\n  value: 60\n  value: 70\n  set_ms: {T0}\n"):
+        with pytest.raises(yaml.YAMLError, match="duplicate key"):
+            ad.load_cfg_text(text, max_expiry_days=14)
+
+
+def test_both_flavours_read_a_written_file_alike_and_refuse_aliases(flavour):
+    cfg = ad.parse_cfg({"min_confidence_floor": entry(60, evidence={"n": [1, 2.5, None, "x"], "ok": True}),
+                        "trigger": {"liquidity_atr": entry(0.25)}, "tp_hint": entry("TP1 at the swing → trail")},
+                       max_expiry_days=14)
+    assert ad.load_cfg_text(ad.dump_cfg(cfg), max_expiry_days=14) == cfg
+    with pytest.raises(ValueError, match="aliases"):
+        ad.load_cfg_text("a: &x [1]\nb: *x\n", max_expiry_days=14)
     with pytest.raises(yaml.YAMLError):
-        ad.load_cfg_text(text, max_expiry_days=14)
+        ad.load_cfg_text(": : not yaml [", max_expiry_days=14)
+
+
+def test_a_text_only_libyaml_rejects_is_walked_by_the_pure_parser_too():
+    """The dashboard and the review pack load with the pure-Python yaml.safe_load after has_alias: a document libyaml
+    refuses (a '%YAML 1.3' header) but PyYAML reads must not hide an alias (merge-key) bomb from the check."""
+    if not ad._LIBYAML:
+        pytest.skip("PyYAML without libyaml")
+    text = "%YAML 1.3\n---\na: &x [1, 2]\nb: {<<: [*x, *x]}\n"
+    with pytest.raises(yaml.YAMLError):
+        list(yaml.parse(text, Loader=yaml.CSafeLoader))
+    assert ad.has_alias(text) is True
+    with pytest.raises(ValueError, match="nested too deeply"):
+        ad.has_alias("%YAML 1.3\n---\na: " + "[" * 100)
+    assert ad.has_alias("a: [?]\n") is False and yaml.safe_load("a: [?]\n") == {"a": [{None: None}]}   # no alias
+    assert ad.has_alias(": : not yaml [") is False
 
 
 DEEP = "min_confidence_floor: " + "[" * 3000 + "]" * 3000 + "\n"      # 6 kB: the YAML composer recurses per level
 
 
-def test_a_deeply_nested_file_is_a_value_error_not_a_recursion_error():
+def test_a_deeply_nested_file_is_a_value_error_not_a_recursion_error(flavour):
     with pytest.raises(ValueError, match="nested too deeply"):
         ad.load_cfg_text(DEEP, max_expiry_days=14)
 
 
-def test_deep_flow_nesting_on_one_line_is_refused_quickly():
+def test_deep_flow_nesting_on_one_line_is_refused_quickly(flavour):
     # PyYAML's scanner slows down quadratically on one line of '[': 3000 levels took 8 s, the 256 K cap ~7 min.
-    # The alias walk stops at MAX_YAML_DEPTH, so neither the engine loop nor the dashboard stalls.
+    # The walk stops at MAX_YAML_DEPTH (the time of documents below that depth: the next test).
     for text in ("a: " + "[" * 3000, "a: " + "[" * (ad.MAX_YAML_CHARS - 10)):
         t0 = time.perf_counter()
         with pytest.raises(ValueError, match="nested too deeply"):
             ad.load_cfg_text(text, max_expiry_days=14)
         assert time.perf_counter() - t0 < 2.0
+
+
+GROUP = "[" * 30 + "x" + "]" * 30                      # 30 deep: with the root and the outer list 32 = MAX_YAML_DEPTH
+
+
+def _groups(n: int) -> str:
+    return "a: [" + ",".join([GROUP] * n) + "]\n"
+
+
+@pytest.mark.parametrize("case", ["size_cap", "node_cap", "flat"])
+def test_a_large_document_below_the_depth_limit_does_not_stall_a_reader(case):
+    """The re-review's case: 30-deep flow groups up to the 256 K size cap never pass MAX_YAML_DEPTH, and the
+    pure-Python walk + load took ~12 s (in the engine tick, under the pair's lock). libyaml and the value limit
+    bound it: at the size cap the walk stops at MAX_YAML_NODES; just below that limit the whole document is
+    parsed and then refused by the schema."""
+    if not ad._LIBYAML:
+        pytest.skip("the timing bound assumes libyaml")
+    if case == "size_cap":
+        text = _groups((ad.MAX_YAML_CHARS - 10) // (len(GROUP) + 1))
+        assert len(text) > ad.MAX_YAML_CHARS - len(GROUP) - 10 and len(text) <= ad.MAX_YAML_CHARS
+        err = "more than"
+    elif case == "node_cap":
+        text = _groups((ad.MAX_YAML_NODES - 3) // 31)          # 31 values per group + the root, "a" and the list
+        err = "Extra inputs"
+    else:
+        text = "a: [" + ",".join(["x"] * (ad.MAX_YAML_NODES - 3)) + "]\n"
+        err = "Extra inputs"
+    t0 = time.perf_counter()
+    with pytest.raises(ValueError, match=err):
+        ad.load_cfg_text(text, max_expiry_days=14)
+    assert time.perf_counter() - t0 < 1.5
+
+
+def test_the_largest_overlay_tune_can_write_stays_well_below_the_value_limit():
+    """MAX_YAML_NODES must never refuse a file tune.py wrote: every key set, each with the longest reason and the
+    densest evidence its 4000 JSON characters allow."""
+    ev = [0] * 1333
+    assert len(json.dumps(ev)) <= ad.MAX_EVIDENCE_CHARS < len(json.dumps(ev + [0]))
+
+    def e(v):
+        return entry(v, reason="r" * ad.MAX_REASON_CHARS, evidence=ev, review_id="x" * 120)
+    cfg = ad.parse_cfg({"min_confidence_floor": e(60), "min_minutes_between_calls": e(30), "max_idle_minutes": e(120),
+                        "review_floor_minutes": e(10), "trigger": {"weak_min": e(3), "liquidity_atr": e(0.3)},
+                        "pair": {"ai_paused_until": e(T0 + MS_PER_HOUR)}, "tp_hint": e("TP1 at the prior swing"),
+                        "playbook": e("0123456789abcdef")}, max_expiry_days=14)
+    assert len(cfg.entries()) == len(ad.KEYS)
+    text = ad.dump_cfg(cfg)
+    nodes = sum(isinstance(x, (yaml.ScalarEvent, yaml.SequenceStartEvent, yaml.MappingStartEvent))
+                for x in yaml.parse(text, Loader=ad._EVENT_LOADER))
+    assert nodes < 0.7 * ad.MAX_YAML_NODES and len(text) < ad.MAX_YAML_CHARS
+    assert ad.load_cfg_text(text, max_expiry_days=14) == cfg
+
+
+def _floor_and_pause(evidence: str = "") -> str:
+    """adaptive.yaml text: a raised floor (75) and a pause, optionally with a hand-written evidence block."""
+    return (f"min_confidence_floor:\n  value: 75\n  set_ms: {T0}\n  expires_ms: {T0 + 14 * MS_PER_DAY}\n"
+            f"  reason: diagnose\n  window_hours: 168\n{evidence}"
+            f"pair:\n  ai_paused_until:\n    value: {T0 + 6 * MS_PER_HOUR}\n    set_ms: {T0}\n"
+            f"    expires_ms: {T0 + MS_PER_DAY}\n    reason: diagnose\n    window_hours: 24\n")
+
+
+NOT_A_STRING_KEY = {
+    "date": "  evidence: {2026-09-20: 3}\n",                  # an unquoted date: json.dumps refuses the key
+    "list": "  evidence:\n    ? [a]\n    : 3\n",               # a complex key: unhashable
+}
+
+
+@pytest.mark.parametrize("key", list(NOT_A_STRING_KEY))
+def test_a_key_that_is_not_a_plain_string_is_a_value_error(flavour, key):
+    with pytest.raises(ValueError, match="plain strings"):
+        ad.load_cfg_text(_floor_and_pause(NOT_A_STRING_KEY[key]), max_expiry_days=14)
+
+
+@pytest.mark.parametrize("key", list(NOT_A_STRING_KEY))
+def test_a_key_that_is_not_a_plain_string_keeps_the_last_good_values(s, monkeypatch, key):
+    """The re-review's case: a TypeError used to bypass the invalid branch — the services fell back to the config
+    floor and lifted the pause, emitted nothing, and re-read the file on every call."""
+    d = ad.adaptive_dir(s, PAIR)
+    d.mkdir(parents=True)
+    (d / ad.YAML_FILE).write_text(_floor_and_pause(), encoding="utf-8")
+    events, clock = [], Clock()
+    st = ad.AdaptiveStore(s, PAIR, clock=clock, emit=lambda k, p: events.append((k, p)))
+    good = st.effective(T0 + 1)
+    assert (good.min_confidence, good.ai_paused_until_ms) == (75, T0 + 6 * MS_PER_HOUR)
+    reads, read = [], st._read
+    monkeypatch.setattr(st, "_read", lambda: (reads.append(1), read())[1])
+    touch_later(d / ad.YAML_FILE, _floor_and_pause(NOT_A_STRING_KEY[key]))
+    clock.t += s.adaptive.reload_check_s
+    for _ in range(5):                                                         # the clock frozen
+        eff = st.effective(T0 + 1)
+        assert (eff.min_confidence, eff.ai_paused_until_ms) == (75, T0 + 6 * MS_PER_HOUR)
+    clock.t += s.adaptive.reload_check_s
+    assert st.effective(T0 + 1).min_confidence == 75
+    assert len(reads) == 1                                                     # the invalid version is remembered
+    assert [k for k, _ in events] == ["adaptive_invalid"] and "plain strings" in events[0][1]["text"]
+
+
+def test_any_error_while_reading_is_the_invalid_branch(s, monkeypatch):
+    """Whatever a hand edit provokes (not only ValueError / YAMLError): the last good values stay, one event."""
+    write_overlay(s, {"min_confidence_floor": entry(75)})
+    events, clock = [], Clock()
+    st = ad.AdaptiveStore(s, PAIR, clock=clock, emit=lambda k, p: events.append((k, p)))
+    assert st.effective(T0 + 1).min_confidence == 75
+
+    def boom():
+        raise TypeError("something new")
+    monkeypatch.setattr(st, "_read", boom)
+    write_overlay(s, {"min_confidence_floor": entry(76, reason="a longer reason so the size differs")})
+    for _ in range(3):
+        clock.t += s.adaptive.reload_check_s
+        assert st.effective(T0 + 1).min_confidence == 75
+    assert [k for k, _ in events] == ["adaptive_invalid"] and "TypeError: something new" in events[0][1]["text"]
 
 
 def test_evidence_deeper_than_the_limit_is_refused_and_the_files_nesting_stays_below_the_yaml_limit():

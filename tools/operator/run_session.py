@@ -323,14 +323,15 @@ def record_usage(ledger: Path, spec: Any, parsed: dict[str, Any], *, purpose: st
     """One ledger row for the whole session (None = recorded, else why not). Provider = the claude_code provider:
     the subscription's shared limits count every call; ``cost_usd`` 0 (the plan, not a bill) — the API-equivalent
     price goes to ``api_equivalent_usd`` like every other claude_code row. A session without a result document
-    (``usage_unknown``: time limit, crash) is not a cheap one: its ``error`` starts with the review pack's
-    ``USAGE_UNKNOWN_PREFIX`` and gives the elapsed seconds, so its 0 tokens are never read as the real spend."""
+    (``usage_unknown``: time limit, crash) is not a cheap one: its ``error`` starts with ``ai/budget.py``'s
+    ``USAGE_UNKNOWN_PREFIX`` and gives the elapsed seconds, so its 0 tokens are never read as the real spend (the
+    usage gauge, the health report and the review pack count such rows)."""
     try:
-        from tradingsystem.ai.budget import UsageStore
+        from tradingsystem.ai.budget import USAGE_UNKNOWN_PREFIX, UsageStore
         from tradingsystem.ai.providers.base import LLMResult
         error = parsed.get("error")
         if parsed.get("usage_unknown"):
-            error = (f"{pack_module().USAGE_UNKNOWN_PREFIX}no result document after {elapsed_s:.0f} s "
+            error = (f"{USAGE_UNKNOWN_PREFIX}no result document after {elapsed_s:.0f} s "
                      f"({parsed.get('status')}): {error or '-'}")
         t = parsed.get("ledger_tokens") or {}
         res = LLMResult(provider=spec.provider, model=parsed.get("model") or spec.model, text="", data=None,

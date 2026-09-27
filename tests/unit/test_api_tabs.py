@@ -357,7 +357,8 @@ def test_kill_switch_all_pairs_mode_writes_the_global_switch_once(env, monkeypat
     sent = []
     monkeypatch.setattr(nt, "notify", lambda s, level, title, text, **k: sent.append((level, title, k.get("key"))))
     h = {"X-Dashboard-Token": TOKEN, "Origin": env.origin}
-    assert env.client.get("/api/kill_switch").json() == {"on": False, "target": str(env.data / "KILL_SWITCH"),
+    assert env.client.get("/api/kill_switch").json() == {"on": False, "target_on": False,
+                                                         "target": str(env.data / "KILL_SWITCH"),
                                                          "scope": "all", "global": True, "files": []}
     r = env.client.post("/api/kill_switch", headers=h, json={"reason": "news  spike\n"})
     body = r.json()
@@ -370,8 +371,43 @@ def test_kill_switch_all_pairs_mode_writes_the_global_switch_once(env, monkeypat
     assert again["created"] is False and "already on" in again["note"] and f.read_text(encoding="utf-8") == first
     assert sent == [("critical", "kill switch ON: ALL", "kill_switch_all")]
     app_mod._SNAP_CACHE["ts"] = 0
-    assert env.client.get("/api/status").json()["kill_switch"] == {"on": True, "files": [str(f)]}
-    assert env.client.get("/api/kill_switch").json()["on"] is True
+    assert env.client.get("/api/status").json()["kill_switch"] == {"on": True, "target_on": True, "files": [str(f)]}
+    ks = env.client.get("/api/kill_switch").json()
+    assert ks["on"] is True and ks["target_on"] is True
+
+
+def test_all_pairs_mode_a_pair_switch_alone_leaves_the_global_button_usable(env):
+    """In the all-pairs system a pair's switch (monitor order burst, kill_switch.py --pair) stops that pair only: the
+    badge shows it, but the ON button (which writes the GLOBAL switch) must stay enabled — target_on stays false."""
+    pair = env.data / "instances" / "XAUUSD" / "KILL_SWITCH"
+    pair.parent.mkdir(parents=True)
+    pair.write_text("", encoding="utf-8")
+    app_mod._SNAP_CACHE["ts"] = 0
+    assert env.client.get("/api/status").json()["kill_switch"] == {"on": True, "target_on": False,
+                                                                   "files": [str(pair)]}
+    ks = env.client.get("/api/kill_switch").json()
+    assert ks["on"] is True and ks["target_on"] is False and ks["global"] is True
+    assert ks["target"] == str(env.data / "KILL_SWITCH") and [f["path"] for f in ks["files"]] == [str(pair)]
+    (env.data / "KILL_SWITCH").write_text("", encoding="utf-8")          # the global one: nothing left to engage
+    app_mod._SNAP_CACHE["ts"] = 0
+    assert env.client.get("/api/status").json()["kill_switch"]["target_on"] is True
+    assert env.client.get("/api/kill_switch").json()["target_on"] is True
+
+
+def test_pair_instance_button_is_off_for_its_own_or_the_global_switch(tmp_path, monkeypatch):
+    e = _env(tmp_path, monkeypatch, instance="XAUUSD")
+
+    def st() -> dict:
+        app_mod._SNAP_CACHE["ts"] = 0
+        return e.client.get("/api/status").json()["kill_switch"]
+
+    assert st() == {"on": False, "target_on": False, "files": []}
+    (e.data / "KILL_SWITCH").write_text("", encoding="utf-8")            # global → this system is stopped too
+    assert st()["target_on"] is True and e.client.get("/api/kill_switch").json()["target_on"] is True
+    (e.data / "KILL_SWITCH").unlink()
+    own = e.data / "instances" / "XAUUSD" / "KILL_SWITCH"
+    own.write_text("", encoding="utf-8")
+    assert st() == {"on": True, "target_on": True, "files": [str(own)]}
 
 
 def test_kill_switch_of_a_pair_instance_writes_only_that_pairs_switch(tmp_path, monkeypatch):
@@ -410,7 +446,7 @@ def test_page_has_the_new_tabs_and_a_cache_buster(env):
     assert env.client.get(f"/static/app.js?v={v}").status_code == 200
 
 
-def test_kill_switch_button_reads_as_an_action_is_outlined_and_disabled_while_a_switch_is_on(env):
+def test_kill_switch_button_reads_as_an_action_is_outlined_and_disabled_while_its_own_switch_is_on(env):
     html = env.client.get("/").text
     button = html.split('id="kill-on"', 1)[1].split("</button>", 1)[0]
     assert button.endswith(">Engage kill switch…") and ">Kill switch ON<" not in html     # an action, not a state
@@ -423,5 +459,29 @@ def test_kill_switch_button_reads_as_an_action_is_outlined_and_disabled_while_a_
     assert "background: var(--red)" in badge and "color: white" in badge                # filled: clearly different
     assert "cursor: not-allowed" in rule("button.danger:disabled")
     js = env.client.get("/static/app.js").text
-    assert "kb.disabled = killOn;" in js and '"kill switch already engaged"' in js
+    # disabled only by the flag for the file the POST would write (or the global one): never by the badge's "any
+    # switch" nor by the executor heartbeat; the tooltip follows the same flag
+    assert "const targetOn = !!STATUS.kill_switch?.target_on;" in js and "kb.disabled = targetOn;" in js
+    assert "kb.disabled = killOn" not in js and 'kb.title = targetOn ? "kill switch already engaged' in js
+    assert '$("#kill-badge").classList.toggle("hidden", !killOn);' in js                    # the badge: any switch
     assert 'addEventListener("click", killSwitchNow)' in js and 'method: "POST"' in js    # flow unchanged
+
+
+# ---------------------------------------------------------------------- scripts\check_ops.ps1 (static: never run here)
+def test_check_ops_counts_every_fix_line_so_the_summary_cannot_say_all_is_right():
+    """A FIX line printed outside Report() (e.g. an operator task's 'result 3 = config invalid') must count toward
+    $script:todo in its own block, or the final line says 'all checked settings look right' next to it."""
+    raw = (Path(__file__).resolve().parents[2] / "scripts" / "check_ops.ps1").read_bytes()
+    assert raw.isascii() and b"\n" not in raw.replace(b"\r\n", b"")        # Windows PowerShell 5.1: ASCII + CRLF
+    lines = raw.decode("ascii").split("\r\n")
+    indent = lambda s: len(s) - len(s.lstrip())                              # noqa: E731
+    direct = [i for i, ln in enumerate(lines) if ln.lstrip().startswith(('Write-Host ("FIX', 'Write-Host "FIX'))]
+    heads = []
+    for i in direct:                     # walk back through the FIX line's own block up to the line that opens it
+        block, j = [], i - 1
+        while j >= 0 and lines[j].strip() and indent(lines[j]) >= indent(lines[i]):
+            block.append(lines[j])
+            j -= 1
+        assert any("$script:todo++" in ln for ln in block), f"line {i + 1} prints FIX without counting it"
+        heads.append(lines[j])
+    assert any('"Last Result") -eq "3"' in h for h in heads)        # the operator tasks' config-error branch is covered

@@ -194,6 +194,10 @@ def create_app(s: Settings) -> FastAPI:
     # every switch that stops this system (what Executor.kill_switch() tests); only existence matters
     switches = tuple(dict.fromkeys([data / "KILL_SWITCH", s.paths.state() / "KILL_SWITCH",
                                     *(data / "instances" / p / "KILL_SWITCH" for p in pair_names)]))
+    # the file the ON button writes (this system's own switch: the global one in all-pairs mode) plus the global one:
+    # only while one of them exists has the button nothing left to engage. A pair's switch in the all-pairs system
+    # leaves the other pairs trading, so it must not disable the global stop (target_on).
+    own_switches = tuple(dict.fromkeys([data / "KILL_SWITCH", s.paths.state() / "KILL_SWITCH"]))
     reviews_dir = data / "reviews"               # shared by every system of the data root (like adaptive/)
 
     def reader(key: str) -> InstrumentReader:
@@ -202,7 +206,7 @@ def create_app(s: Settings) -> FastAPI:
         return readers[key]
 
     def snapshot() -> dict:
-        return _shared_snapshot(app_db, pair_names, known, usage_path, switches)
+        return _shared_snapshot(app_db, pair_names, known, usage_path, switches, own_switches)
 
     def guard(request: Request, x_dashboard_token: str | None) -> None:
         """The write endpoints' protection (Execute Now, kill switch): a foreign Origin → 403; the token must travel
@@ -464,10 +468,11 @@ def create_app(s: Settings) -> FastAPI:
     # ------------------------------------------------------------------ kill switch (ON only)
     @app.get("/api/kill_switch")
     def kill_switch_state() -> dict:
-        """What the ON button would write, and every switch that currently stops this system."""
+        """What the ON button would write, and every switch that currently stops this system. ``target_on``: that
+        file or the global switch already exists (the button has nothing left to engage); ``on``: any switch does."""
         target = s.paths.state() / "KILL_SWITCH"
-        return {"on": any(p.exists() for p in switches), "target": str(target), "scope": s.paths.instance or "all",
-                "global": s.paths.instance is None,
+        return {"on": any(p.exists() for p in switches), "target_on": any(p.exists() for p in own_switches),
+                "target": str(target), "scope": s.paths.instance or "all", "global": s.paths.instance is None,
                 "files": [{"path": str(p), "set_by": read_reason(p)} for p in switches if p.exists()]}
 
     @app.post("/api/kill_switch")
@@ -754,12 +759,13 @@ def _adaptive_pair(s: Settings, pair: str, now: int) -> dict:
 
 
 def _shared_snapshot(app_db: Path, pairs: tuple[str, ...] = (), known: set[str] | None = None,
-                     usage_path: Path | None = None, switches: tuple[Path, ...] = ()) -> dict:
+                     usage_path: Path | None = None, switches: tuple[Path, ...] = (),
+                     targets: tuple[Path, ...] = ()) -> dict:
     """One status snapshot per ~second, shared by ``/api/status`` and every WebSocket client (read-only: copy it)."""
     with _SNAP_LOCK:
-        key = (str(app_db), pairs, str(usage_path), tuple(str(p) for p in switches))
+        key = (str(app_db), pairs, str(usage_path), tuple(str(p) for p in switches), tuple(str(p) for p in targets))
         if _SNAP_CACHE["key"] != key or now_ms() - _SNAP_CACHE["ts"] >= _SNAP_TTL_MS:
-            _SNAP_CACHE.update(snap=_status_snapshot(app_db, pairs, known, usage_path, switches), key=key,
+            _SNAP_CACHE.update(snap=_status_snapshot(app_db, pairs, known, usage_path, switches, targets), key=key,
                                ts=now_ms())
         return _SNAP_CACHE["snap"]
 
@@ -776,11 +782,13 @@ def _usage_rows(usage_path: Path, sql: str, params: tuple = ()) -> list[dict]:
 
 
 def _status_snapshot(app_db: Path, pairs: tuple[str, ...] = (), known: set[str] | None = None,
-                     usage_path: Path | None = None, switches: tuple[Path, ...] = ()) -> dict:
+                     usage_path: Path | None = None, switches: tuple[Path, ...] = (),
+                     targets: tuple[Path, ...] = ()) -> dict:
     out: dict[str, Any] = {"server_time": now_ms(), "server_time_iso": iso(now_ms())}
-    # the switch files themselves (the executor's heartbeat also reports it, but only while the executor runs)
+    # the switch files themselves (the executor's heartbeat also reports it, but only while the executor runs);
+    # target_on: the file the dashboard's ON button writes, or the global one, exists (the button's disabled state)
     on = [str(p) for p in switches if p.exists()]
-    out["kill_switch"] = {"on": bool(on), "files": on}
+    out["kill_switch"] = {"on": bool(on), "target_on": any(p.exists() for p in targets), "files": on}
     if not app_db.exists():
         return out
     with _ro(app_db) as con:

@@ -112,11 +112,15 @@ function renderLive() {
   $("#kill-badge").classList.toggle("hidden", !killOn);
   const ks = STATUS.kill_switch?.files || [];
   $("#kill-badge").title = `${ks.length ? ks.join(" · ") : "reported by the executor"} — the executor blocks all new orders`;
-  // the button is an action, never a state: disabled while a switch is on, so the badge is the header's only indicator
+  // the button is an action, never a state (the badge is the header's only indicator): disabled only while the file its
+  // POST would write (this system's own switch) or the global switch exists. Not on the badge's "any switch": in the
+  // all-pairs system a pair's switch leaves the other pairs trading, so the global stop must stay reachable; never on
+  // the executor heartbeat either (a stale row must not block the emergency stop).
   const kb = $("#kill-on");
   kb.dataset.title ??= kb.title;
-  kb.disabled = killOn;
-  kb.title = killOn ? "kill switch already engaged" : kb.dataset.title;
+  const targetOn = !!STATUS.kill_switch?.target_on;
+  kb.disabled = targetOn;
+  kb.title = targetOn ? "kill switch already engaged for this system (its own switch or the global one)" : kb.dataset.title;
   const eng = (STATUS.collectors || []).find((c) => c.collector === "engine");
   const g = eng?.detail?.usage_gauge;
   const gauge = g && g.level != null ? ` · usage L${g.level}${g.week_pct != null ? ` (${g.week_pct}% wk)` : ""}` : "";

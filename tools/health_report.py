@@ -65,7 +65,9 @@ def _kill_switch_lines(s: Settings) -> list[str]:
 
 def usage_gauge_line(s: Settings) -> str | None:
     """The usage gauge over the shared AI ledger (Phase 4, ai/usage_gauge.py); None before it exists or when there
-    is no ledger yet (a report never creates one)."""
+    is no ledger yet (a report never creates one). A problem line ("!!") at level 2, at level 1 when enforced, and
+    while an operator session of the last 7 days has unknown usage (timed out or crashed: its row holds 0 tokens, so
+    the sums undercount). A fresh gauge: the thresholds as they are, without an engine's step-down margin."""
     ledger = s.paths.shared() / "ai_usage.db" if s.paths.instance else s.paths.state() / "app.db"
     if not ledger.exists():
         return None
@@ -83,11 +85,15 @@ def usage_gauge_line(s: Settings) -> str | None:
     finally:
         if store is not None:
             store.close()
-    bad = g.level >= 2 or (g.level >= 1 and g.enforce)
+    unknown = int(getattr(g, "unknown_7d", 0) or 0)
+    reason = g.reason or ""
+    if unknown and "unknown usage" not in reason:          # the gauge's reason names them; say it when it does not
+        reason = f"{reason} + {unknown} session(s) with unknown usage in 7 d".lstrip()
+    bad = g.level >= 2 or (g.level >= 1 and g.enforce) or unknown > 0
     return (f"{'!! ' if bad else '   '}usage gauge: level {g.level} — 7 d {g.week_tokens / 1e6:.2f} M tokens "
             f"({g.week_pct:.0f} % of the weekly budget), 5 h {g.five_h_tokens / 1e6:.2f} M ({g.five_h_pct:.0f} %)"
             + (" — enforced" if g.enforce else " — observe only (ai.usage.enforce off)")
-            + (f" — {g.reason}" if g.reason else ""))
+            + (f" — {reason}" if reason else ""))
 
 
 def systems(a: argparse.Namespace) -> tuple[list[Settings], list[str]]:
