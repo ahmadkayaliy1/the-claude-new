@@ -41,6 +41,15 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-09-27 09:18 UTC — Phase 3 is LIVE: the user merged `feat/phase3-sees-manages` (ff → `dfa19da`) and ran
+  `restart_all.bat`; production = three per-pair systems on Phase 3 code.** `tradingsystem config`: charts=on,
+  escalation=off, management=on, position_actions=on, 40 calls/pair/day. First cycles: ETH 25.2 k in / 3.8 k out,
+  60 s, NO_TRADE; BTC 25.1 k / 9.7 k, 144 s (long plan), SELL conf 60 rejected by the gate at RR 1.4996 (shown
+  "1.50 ≥ 1.5" — follow-up: 3 decimals + tolerance, PROJECT_STATUS P12.3 note (9)). `snapshot_build_ms` was 15 s / 7 s
+  on the first build after the restart (cold; replay medians 0.2–0.5 s) — watch the steady state. RAM 0.98 GB free.
+  Overnight on Phase 2 code two BTC BUYs closed in profit (+2.55, +1.52 USD; equity 99.11 → 103.85). XAU reopens
+  Sunday 22:00 UTC. Next: Phase 4 (§3.8) on `C:\the_claude_new_wt\phase4`, branch `feat/phase4-watches-learns`.
+
 * **2026-09-27 — Phase 3 (P12.3, D-044) is DONE on branch `feat/phase3-sees-manages` (worktree
   `C:\the_claude_new_wt\phase3`); production still runs Phase 2 on `main` until the user's H16.** 606 unit tests.
   The ONE live call (BTCUSDT, scratch data root, 6 charts, Sonnet): valid, 24.9 k input (target 23 k missed by 8 %),
