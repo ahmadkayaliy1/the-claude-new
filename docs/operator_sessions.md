@@ -115,9 +115,9 @@ claude -p --model <m> --effort <e> --output-format json --no-session-persistence
   --disallowedTools Edit Write NotebookEdit WebFetch WebSearch "Read(**/.env)" "Read(.env)" "Read(**/.env.*)"
     "Read(~/.claude/**)" "Read(~/.ssh/**)" "Read(~/.aws/**)" "Read(~/.config/**)" "Read(**/.credentials.json)"
   --allowedTools Read Grep Glob
-    "Bash(.venv/Scripts/python.exe tools/health_report.py*)" "Bash(.venv/Scripts/python.exe tools/review_pack.py*)"
-    "Bash(.venv/Scripts/python.exe tools/tune.py*)" "Bash(.venv/Scripts/python.exe tools/propose.py*)"
-    "Bash(.venv/Scripts/python.exe tools/notify.py*)"
+    "Bash(.venv/Scripts/python.exe tools/health_report.py *)" "Bash(.venv/Scripts/python.exe tools/review_pack.py *)"
+    "Bash(.venv/Scripts/python.exe tools/tune.py *)" "Bash(.venv/Scripts/python.exe tools/propose.py *)"
+    "Bash(.venv/Scripts/python.exe tools/notify.py *)"
     [diagnose only] "Bash(.venv/Scripts/python.exe tools/kill_switch.py --pair *)"
 ```
 
@@ -125,6 +125,11 @@ claude -p --model <m> --effort <e> --output-format json --no-session-persistence
   session file (`result.permission_denials`) — a denied command costs a turn, which is why `_system.md` spells out
   the exact command forms.
 * `--setting-sources=` (equals form, one argument): no settings, hooks or CLAUDE.md; `--strict-mcp-config`: no MCP.
+* **A space before every `*`.** Claude Code (2.1.282) compiles a rule whose only `*` is a trailing ` *` to
+  `<command>( .*)?` — the bare command or the command, a space and arguments. A glued `tools/tune.py*` would be
+  `tools/tune[.]py.*`, which also matches `tools/tune.py/../<any file>`: Windows collapses the `..`, so the session
+  could run any Python file (a `.env` line in a traceback, pip, `demo_order_test.py`), and python.exe arguments are
+  not path-checked by the CLI. `test_no_rule_lets_a_path_through_an_allowed_tool` emulates the CLI's matcher.
 * The diagnosis' kill-switch rule names `--pair`: one pair's switch only. `--all` (every system) is the monitor's
   decision (§3.8) or the owner's; `kill_switch.py` refuses it in a session as well (below).
 * **No git rule** (a deviation from the §3.8 text): the pack carries the git facts (sha, branch, last 5 commits,

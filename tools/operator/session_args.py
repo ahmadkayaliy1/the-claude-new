@@ -11,8 +11,12 @@ The session is a read-only reviewer with a narrow Bash allow-list:
 * ``--permission-mode dontAsk --permission-prompts none``: whatever the allow-list does not name is denied, never
   asked (nobody is there to answer) — the denials come back in the result's ``permission_denials``;
 * tools Read, Grep, Glob and Bash; editors and the web disallowed, ``.env`` unreadable; Bash only for the exact
-  prefixes ``.venv/Scripts/python.exe tools/<tool>.py`` of health_report, review_pack, tune, propose and notify (the
-  diagnosis adds ``tools/kill_switch.py --pair``: one pair's switch only — the global switch is the monitor's). No
+  commands ``.venv/Scripts/python.exe tools/<tool>.py`` of health_report, review_pack, tune, propose and notify, bare or
+  followed by a space and arguments (the diagnosis adds ``tools/kill_switch.py --pair``: one pair's switch only — the
+  global switch is the monitor's). Every rule is ``Bash(<command> *)`` with a SPACE before the ``*``: Claude Code
+  (2.1.282) compiles a pattern whose only ``*`` is a trailing `` *`` to ``<command>( .*)?``, while a glued
+  ``tools/tune.py*`` is ``tools/tune[.]py.*`` — it matched ``tools/tune.py/../<any file>`` (Windows collapses the
+  ``..``), i.e. any Python file, pip or demo_order_test.py, and python.exe arguments are not path-checked. No
   git rule: the review pack carries the git facts, and ``git diff``/``git log`` take ``--output=<file>`` (a file write
   through a read-only-looking prefix);
 * the working directory is the checkout this file lives in (never a hard-coded path), so the relative allow-list paths
@@ -55,7 +59,7 @@ DIAGNOSE_TOOLS = ("kill_switch",)
 # what may follow ``tools/<tool>.py`` in a rule (default "*": any arguments); the diagnosis may engage one pair's
 # switch only — ``--all`` (the global switch) is the monitor's decision (§3.8), and kill_switch.py refuses it in a
 # session too
-RULE_TAIL = {"kill_switch": " --pair *"}
+RULE_TAIL = {"kill_switch": " --pair *"}         # every other tool: " *" (never a glued "*", see the docstring)
 READ_TOOLS = ("Read", "Grep", "Glob")
 TOOLS = "Read,Grep,Glob,Bash"
 DISALLOWED = ("Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Read(**/.env)", "Read(.env)",
@@ -127,11 +131,11 @@ def model_effort(s: Settings, kind: str) -> tuple[str, str | None, str]:
 
 
 def allowed_tools(kind: str) -> list[str]:
-    """The allow-list: Read/Grep/Glob, and Bash only for the exact tool prefixes (the diagnosis adds the kill
-    switch, ``--pair`` only). The rules match the command text literally — ``./.venv/…``, backslashes or
-    ``python tools/…`` are denied."""
+    """The allow-list: Read/Grep/Glob, and Bash only for the exact tool commands, bare or with arguments after a
+    space (the diagnosis adds the kill switch, ``--pair`` only). The rules match the command text literally —
+    ``./.venv/…``, backslashes, ``python tools/…`` or ``tools/tune.py/../x`` are denied."""
     tools = BASE_TOOLS + (DIAGNOSE_TOOLS if check_kind(kind) == "diagnose" else ())
-    return [*READ_TOOLS, *(f"Bash({PY} tools/{t}.py{RULE_TAIL.get(t, '*')})" for t in tools)]
+    return [*READ_TOOLS, *(f"Bash({PY} tools/{t}.py{RULE_TAIL.get(t, ' *')})" for t in tools)]
 
 
 def outside(path: Path, root: Path) -> bool:

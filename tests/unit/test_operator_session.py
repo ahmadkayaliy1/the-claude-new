@@ -103,7 +103,7 @@ def test_daily_args_are_the_read_only_allow_list(sa, tmp_path):
                    "Read(**/.env.*)", "Read(~/.claude/**)", "Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(~/.config/**)",
                    "Read(**/.credentials.json)"]
     allowed = args[args.index("--allowedTools") + 1:]
-    assert allowed == ["Read", "Grep", "Glob"] + [f"Bash(.venv/Scripts/python.exe tools/{t}.py*)" for t in
+    assert allowed == ["Read", "Grep", "Glob"] + [f"Bash(.venv/Scripts/python.exe tools/{t}.py *)" for t in
                                                   ("health_report", "review_pack", "tune", "propose", "notify")]
     assert not any("git" in a.lower() for a in allowed) and not any(a.startswith("-") for a in allowed)
     assert Path(args[args.index("--system-prompt-file") + 1]).resolve().is_relative_to(ROOT.resolve())  # this checkout
@@ -126,9 +126,40 @@ def test_diagnose_adds_the_kill_switch_and_uses_the_monitor_model(sa, tmp_path):
 
 
 def _allowed_by(rules: list[str], command: str) -> bool:
-    """Whether a Bash command matches one of the allow-list's Bash rules (``*`` = any text, the rest literal)."""
-    pats = [r[len("Bash("):-1] for r in rules if r.startswith("Bash(")]
-    return any(re.fullmatch(".*".join(map(re.escape, p.split("*"))), command, re.S) for p in pats)
+    """Whether a Bash command matches one of the allow-list's Bash rules, as Claude Code 2.1.282 matches them (its
+    ``j3``): the pattern is literal except ``*`` = any text, anchored at both ends; a pattern whose only ``*`` is a
+    trailing `` *`` becomes ``( .*)?``, so it also matches the bare command."""
+    for r in rules:
+        if not r.startswith("Bash("):
+            continue
+        p = r[len("Bash("):-1]
+        if p.endswith(" *") and p.count("*") == 1:
+            rx = re.escape(p[:-2]) + "( .*)?"
+        else:
+            rx = ".*".join(map(re.escape, p.split("*")))
+        if re.fullmatch(rx, command, re.S):
+            return True
+    return False
+
+
+@pytest.mark.parametrize("kind", ["daily", "weekly", "diagnose"])
+def test_no_rule_lets_a_path_through_an_allowed_tool(sa, kind):
+    """``tools/tune.py/../x`` runs x on Windows (the ``..`` is collapsed): a glued ``tools/tune.py*`` matched it, so a
+    session could run any Python file (print .env in a traceback, pip, demo_order_test.py, a daily kill switch)."""
+    rules, py = sa.allowed_tools(kind), sa.PY
+    for cmd in (f"{py} tools/tune.py/../kill_switch.py --pair BTCUSDT --reason x",
+                f"{py} tools/tune.py/../kill_switch.py --all",
+                f"{py} tools/notify.py/../../.env",
+                f"{py} tools/tune.py/../../.venv/Lib/site-packages/pip/__main__.py install x",
+                f"{py} tools/review_pack.py/../demo_order_test.py",
+                f"{py} tools/health_report.pyc", f"{py} tools/propose.py.bak --slug x",
+                f"{py} tools/kill_switch.py --pair/../x", f"{py} tools/kill_switch.py --pairX"):
+        assert not _allowed_by(rules, cmd), cmd
+    for cmd in (f"{py} tools/health_report.py", f"{py} tools/tune.py --pair BTCUSDT list",
+                f"{py} tools/review_pack.py --hours 24 --print", f"{py} tools/notify.py --level info --title t --text x"):
+        assert _allowed_by(rules, cmd), cmd
+    assert _allowed_by(rules, f"{py} tools/kill_switch.py --pair BTCUSDT --reason x") == (kind == "diagnose")
+    assert all(r in ("Read", "Grep", "Glob") or r.endswith(" *)") for r in rules)       # never a glued "*"
 
 
 def test_a_diagnosis_may_engage_one_pairs_switch_but_never_the_global_one(sa):

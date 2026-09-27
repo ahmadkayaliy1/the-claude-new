@@ -731,7 +731,9 @@ conservative thresholds, dedupe, `kill_switch_off.bat`.
   deleted by `install_autostart.ps1`); the runner is Python (`tools/operator/run_session.py`, `run_session.ps1` only
   launches it). The review tasks' `ExecutionTimeLimit` is 130/190 min, a backstop beyond every `operator.*_timeout_min`
   value — the runner's own deadline governs.
-- **Session command line:** no `git` rules (`git diff/log --output=<file>` writes files); Read denials for `.env`,
+- **Session command line:** every Bash rule is `Bash(.venv/Scripts/python.exe tools/<tool>.py *)` with a space before
+  the `*` (the CLI compiles it to `<command>( .*)?`; a glued `tools/tune.py*` matched `tools/tune.py/../<any file>`);
+  no `git` rules (`git diff/log --output=<file>` writes files); Read denials for `.env`,
   `~/.claude`, `~/.ssh`, `~/.aws`, `~/.config`, `*.credentials.json`; the diagnosis may run only
   `tools/kill_switch.py --pair <PAIR>` (the global switch is the monitor's). Every session exports
   `TS_OPERATOR_SESSION=1`: with it `tune.py` takes the playbook only as `--text`, `propose.py` refuses `--body-file` and
