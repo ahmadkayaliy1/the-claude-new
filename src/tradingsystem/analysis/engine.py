@@ -199,7 +199,8 @@ class Engine:
     def _save_cursor(self) -> None:
         """Persist the event cursor BEHIND every event not handled yet (waiting to be coalesced, held by the review
         floor, or given back after a call without an answer) — a restart replays them instead of losing them."""
-        waiting = [int(e["id"]) for v in self._events.values() for e in v]
+        enabled = set(self.s.enabled_pairs())       # a disabled pair's events never get handled: not a reason to wait
+        waiting = [int(e["id"]) for p, v in self._events.items() if p in enabled for e in v]
         waiting += [int(e["id"]) for (_, _, consumed) in self._prev_call.values() for e in consumed]
         cursor = min(waiting) - 1 if waiting else self._event_id
         try:

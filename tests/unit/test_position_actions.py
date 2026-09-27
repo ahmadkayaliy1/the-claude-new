@@ -459,3 +459,61 @@ def test_close_and_cancel_need_no_basis_priced_actions_wait_for_it(live, monkeyp
     assert [(a, st) for _, a, _, st, _ in rows(ex)] == [("close", "applied")]
     assert len(ex.store.pending_actions("XAUUSD", 0)) == 1                              # the stop move waits
     monkeypatch.setattr(ex.reg, "primary", real_primary)
+
+
+def test_a_leg_the_venue_deferred_is_retried_while_the_other_is_done(live, monkeypatch):
+    """A stop move on two legs: leg 1 applied, leg 2 deferred by the venue (freeze level) — leg 2 is checked again
+    and applied later; the action is not closed with one leg left behind (final check, defect 1)."""
+    from tradingsystem.execution.management import ActionResult
+    ex, ticks = live
+    q = ticks[-1]
+    did = "e" * 32
+    r = {"decision": "BUY", "order_type": "MARKET", "stop_loss": round(q.bid - 20, 2),
+         "valid_until": iso(now_ms() + 3_600_000),
+         "take_profits": [{"price": round(q.ask + 10, 2), "close_fraction": 0.5},
+                          {"price": round(q.ask + 30, 2), "close_fraction": 0.5}],
+         "management": [], "entry": {"price": None}}
+    assert ex.paper.place(decision_id=did, pair="XAUUSD", instrument=XAU, rec=r, lots=0.02, entry=q.ask,
+                          contract_size=100, volume_step=0.01, volume_min=0.01, quote=q)["ok"]
+    ex.store.save(DecisionRecord("XAUUSD", "agent_per_pair", "t", "valid", recommendation={**r, "pair": "XAUUSD"},
+                                 id=did, ts=now_ms() - 120_000))
+    ex.store.set_execution_state(did, "executed", {"mode": "paper"})
+    real, frozen = ex.model_legs.set_sl, {"on": True}
+
+    def set_sl(lg, sl):
+        if lg.key.endswith(":2") and frozen["on"]:
+            return ActionResult(False, "deferred", "deferred: within the freeze level")
+        return real(lg, sl)
+    monkeypatch.setattr(ex.model_legs, "set_sl", set_sl)
+    new_sl = round(r["stop_loss"] + 5, 2)
+    src = model_decision(ex, [{"target": {"decision": did[:8], "kind": "position"}, "action": "modify_sl",
+                               "value": new_sl, "reason": "tighten"}])
+    ex.process_actions()
+    ex.process_actions()
+    assert [lg["sl"] for lg in ex.paper.decision_legs(did)] == [new_sl, r["stop_loss"]]
+    assert [d["id"] for d in ex.store.pending_actions("XAUUSD", 0)] == [src]            # still waiting for :2
+    frozen["on"] = False
+    ex.process_actions()
+    assert [lg["sl"] for lg in ex.paper.decision_legs(did)] == [new_sl, new_sl]
+    assert ex.store.pending_actions("XAUUSD", 0) == []
+
+
+def test_a_superseded_stop_ends_quietly(live):
+    ex, ticks = live
+    did, r = trade_decision(ex, ticks)
+    q = ticks[-1]
+    old = model_decision(ex, [{"target": {"decision": did[:8], "kind": "position"}, "action": "modify_sl",
+                               "value": round(q.bid - 0.01, 2), "reason": "lock in"}], did="b" * 32)
+    ex.process_actions()
+    newer = model_decision(ex, [{"target": {"decision": did[:8], "kind": "position"}, "action": "modify_sl",
+                                 "value": round(r["stop_loss"] + 5, 2), "reason": "give it room"}], did="c" * 32)
+    con = sqlite3.connect(ex.app_db)
+    con.execute("UPDATE ai_decisions SET ts=ts+1000 WHERE id=?", (newer,))
+    con.execute("UPDATE ai_decisions SET recommendation=json_set(recommendation, '$.timestamp', ?) WHERE id=?",
+                (iso(now_ms() - 900_000), old))                          # the old decision is 15 min old by now
+    con.commit()
+    con.close()
+    for _ in range(3):
+        ex.process_actions()
+    assert events(ex, "action_rejected") == []                               # no false "refused" wakes the model
+    assert ex.store.pending_actions("XAUUSD", 0) == []

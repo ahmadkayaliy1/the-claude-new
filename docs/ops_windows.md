@@ -135,11 +135,11 @@ empty history): use `switch_to_pairs.bat` or `tools\migrate_instance.py <PAIR>` 
   Claude may tighten a stop, take profit, adjust a target or cancel a pending order. It can never widen or remove a
   stop or add size; every action is checked first and listed in the dashboard ("Actions applied").
 - **The kill switch blocks new orders only.** Protective actions (tightening a stop, closing, cancelling) keep running
-  while a kill switch is on — they reduce risk. The system's own management rules (and a tighter stop of Claude's
-  that is already waiting) wait while the market is closed (gold's daily break, weekends) or the terminal refuses
-  (Algo Trading off, no connection) and go through when trading resumes. A NEW action of Claude's (close, cancel, stop
-  or target change) sent while the market is closed or refused by the terminal is refused — Claude is told on its next
-  call and decides again.
+  while a kill switch is on — they reduce risk. The system's own management rules wait while the market is closed
+  (gold's daily break, weekends) or the terminal refuses (Algo Trading off, no connection) and go through when trading
+  resumes; a tighter stop of Claude's that is already waiting keeps waiting while the market is closed. A NEW action of
+  Claude's (close, cancel, stop or target change) sent while the market is closed, or refused by the terminal, is
+  refused — Claude is told on its next call and decides again.
 - **Models per role** (`ai.models` in `config\config.yaml`; override in `config\config.local.yaml`): the decisions use
   the provider's model (Sonnet); `escalation.enabled: true` makes Opus (or `models.escalation.model: fable`) confirm or
   downgrade strong setups before they can be executed.

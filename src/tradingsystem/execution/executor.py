@@ -873,15 +873,21 @@ class Executor:
                 continue
             legs = self.model_legs.legs_of(target)
             rows = self.actions.action_rows("model", d["id"], seq, target)
-            if any((r[1] or {}).get("pending") for r in rows.values()):
-                done = self._resume_plan(d, seq, target, a, legs, rows, now) and done
-                continue
+            planned = any((r[1] or {}).get("pending") for r in rows.values())   # sent (in part) before
+            if any(r[0] == "pending" for r in rows.values()):
+                ok = self._resume_plan(d, seq, target, a, legs, rows, now)
+                done = ok and done
+                rows = self.actions.action_rows("model", d["id"], seq, target)
+                if any(r[0] == "pending" for r in rows.values()):
+                    continue                                  # still settling / re-read on the next loops
             by_key = {lg.key: lg for lg in legs}
             for k, (st, det, ts) in list(rows.items()):
                 if st == "deferred" and (k not in by_key or by_key[k].kind == "closed"):
                     self.actions.record("model", d["id"], seq, target, k, a["action"], a, "skipped",
                                         {**det, "reason": "the leg closed before the stop could be moved"}, pair=pair)
                     rows[k] = ("skipped", det, ts)
+            if rows and all(r[0] in ("applied", "rejected", "skipped") for r in rows.values()):
+                continue            # carried out, refused or superseded: never a second pass through the gate
             ctx = ActionContext(now_ms=now, pair=pair, rec_ts_ms=rec_ts, max_age_s=self.s.risk.max_recommendation_age_s,
                                 market_open=market_open, cfg=cfg,
                                 applied_today=self.actions.applied_today(pair, "model"),
@@ -892,6 +898,8 @@ class Executor:
                 leg_key = plan.leg.key if plan.leg else "-"
                 if (rows.get(leg_key) or (None,))[0] in ("applied", "rejected", "skipped"):
                     continue
+                if planned and (rows.get(leg_key) or (None,))[0] != "deferred":
+                    continue                # once planned, only the legs still waiting are checked again
                 checks = [{"check": n, "ok": ok, "detail": x} for n, ok, x in plan.checks]
                 if plan.status == "deferred":
                     self.actions.record("model", d["id"], seq, target, leg_key, a["action"], a, "deferred",
