@@ -39,4 +39,5 @@ Thumbs.db
 
 # agent worktrees (Claude Code)
 .claude/worktrees/
-backups/                 # tools/backup_state.py (Phase 5 A2)
+# tools/backup_state.py (Phase 5 A2): zips, the run lock, the .zip.tmp being written
+backups/
