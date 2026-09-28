@@ -10,6 +10,7 @@ import datetime as dt
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -47,6 +48,7 @@ def mon(monkeypatch):
     monkeypatch.setattr(m, "_free_disk_gb", lambda p: 500.0)
     monkeypatch.setattr(m, "_adapters", lambda: {})
     probes = {"battery": None, "commit": None, "gauge": (0, "stub: within budget")}     # Phase 5 machine probes
+    m.real_battery = m._battery                        # a test can put the real probe (health_report) back
     monkeypatch.setattr(m, "_battery", lambda: probes["battery"])
     monkeypatch.setattr(m, "_commit", lambda: probes["commit"])
     monkeypatch.setattr(m, "_gauge_level", lambda base, chosen, now: probes["gauge"])
@@ -1134,14 +1136,84 @@ def test_a_low_battery_warns_at_once_and_below_the_critical_level_says_plug_it_i
     assert res.exit_code == 1
 
 
-def test_plugged_in_an_unknown_power_source_or_no_battery_is_nothing(mon, world):
-    for i, b in enumerate([(9.0, True), (9.0, None), None]):          # charging from 9 %, unknown source, a desktop
+def test_plugged_in_an_unknown_power_source_or_no_battery_is_nothing(mon, world, monkeypatch):
+    """Windows' own readings (GetSystemPowerStatus: ACLineStatus, BatteryFlag, BatteryLifePercent) through the real
+    probe the monitor uses (health_report.battery): charging from 9 %, the same with an unknown AC line (255 — psutil
+    turns it into "unplugged", which at 9 % would be a critical at once), a desktop (no system battery)."""
+    monkeypatch.setattr(mon, "_battery", mon.real_battery)
+    for i, st in enumerate([(1, 8 | 4, 9), (255, 8 | 4, 9), (1, 128, 255)]):
         at = T0 + i * 15 * MIN
-        mon.probes["battery"] = b
+        monkeypatch.setattr(mon.hr, "_power_status", lambda st=st: st)
         beat(world, at)
         res = run(mon, world, ["BTCUSDT"], at=at)
         assert res.findings == [] and res.held == []
+        if i == 1:
+            b = state(world)["battery"]
+            assert (b["percent"], b["plugged"], b["on_battery_since"]) == (9.0, None, None)
     assert state(world)["battery"] == {"present": False, "ts": T0 + 30 * MIN}
+    for i, b in enumerate([(9.0, True), (9.0, None), None]):          # the probe's three shapes, stubbed
+        at = T0 + (3 + i) * 15 * MIN
+        mon.probes["battery"] = b
+        monkeypatch.setattr(mon, "_battery", lambda: mon.probes["battery"])
+        beat(world, at)
+        res = run(mon, world, ["BTCUSDT"], at=at)
+        assert res.findings == [] and res.held == []
+
+
+def test_a_real_unplugged_reading_still_warns_through_the_power_status_probe(mon, world, monkeypatch):
+    """ACLineStatus 0 (offline) at 27 % (BatteryFlag 2 = low): on battery below battery_warn_pct, a warning at once."""
+    monkeypatch.setattr(mon, "_battery", mon.real_battery)
+    monkeypatch.setattr(mon.hr, "_power_status", lambda: (0, 2, 27))
+    beat(world, T0)
+    (f,) = run(mon, world, ["BTCUSDT"]).problems
+    assert (f.level, f.key, f.title) == ("warn", f"battery:{T0}", "Running on battery")
+    assert "on battery (first seen on this run), 27 % left" in f.text
+
+
+# ------------------------------------------------------------------ docs/ops_windows.md: the Phase 5 switches, the way back
+OPS = ROOT / "docs" / "ops_windows.md"
+PHASE5_KEYS = {"ai": ["skip_closed_market", "transient_retry_s", "quota_reserve_share", "quota_reserve_hours_utc"],
+               "monitor": ["battery_warn_pct", "battery_critical_pct", "on_battery_warn_min", "commit_warn_pct",
+                           "recorder_stall_min", "diagnose_max_per_day", "diagnose_max_gauge_level"],
+               "storage": ["cold_archive_min_free_gb"]}
+PHASE5_SECTIONS = ["backup", "evaluation"]
+
+
+def test_the_runbooks_battery_switch_turns_the_whole_battery_rule_off(mon, world):
+    """§8 'a monitor rule is noisy': the battery switch as written (both levels at 0 and a large
+    on_battery_warn_min — on_battery_warn_min has ge=1, so it cannot be 0) — no warning after 2 h on battery at 12 %."""
+    (row,) = [ln for ln in OPS.read_text(encoding="utf-8").splitlines()
+              if ln.startswith("| Phase 5: a monitor rule is noisy |")]
+    switch = {k: int(v) for k, v in re.findall(r"`(battery_warn_pct|battery_critical_pct|on_battery_warn_min): (\d+)`",
+                                               row)}
+    assert switch == {"battery_warn_pct": 0, "battery_critical_pct": 0, "on_battery_warn_min": 1440}
+    monitor_cfg(world, **switch)
+    mon.probes["battery"] = (12.0, False)
+    for at in (T0, T0 + 60 * MIN, T0 + 120 * MIN):
+        beat(world, at)
+        assert run(mon, world, ["BTCUSDT"], at=at).problems == []
+    assert state(world)["battery"]["on_battery_since"] == T0              # still tracked, only not warned about
+
+
+def test_going_back_before_phase5_names_every_phase5_key_and_puts_diagnose_off_back():
+    """Phase 4's settings (extra='forbid') refuse every Phase 5 key, also inside ai:/monitor:/storage:, so §9.7 names
+    each one (also under instances.*.overrides), puts diagnose_enabled: false back (Phase 4 has no diagnosis budget)
+    and has the older code's `config` check run before restart_all.bat."""
+    s = load_settings()
+    for section, keys in PHASE5_KEYS.items():
+        assert set(keys) <= set(type(getattr(s, section)).model_fields), section   # real keys of this code
+    assert all(sec in type(s).model_fields for sec in PHASE5_SECTIONS)
+    text = OPS.read_text(encoding="utf-8")
+    back = " ".join(text.split("### 9.7 Going back to the code before Phase 5", 1)[1].split("\n## ", 1)[0].split())
+    for key in [k for keys in PHASE5_KEYS.values() for k in keys]:
+        assert f"`{key}`" in back, key
+    assert all(f"`{sec}:`" in back for sec in PHASE5_SECTIONS)
+    assert "`instances.*.overrides`" in back
+    assert "put `diagnose_enabled: false` back into the `monitor:` block" in back
+    assert "`.venv\\Scripts\\python.exe -m tradingsystem config` must succeed (it names any key still refused) before " \
+           "`scripts\\restart_all.bat`" in back
+    assert back.index("install_operator_tasks.bat -Uninstall") < back.index("Clean `config\\config.local.yaml`") \
+        < back.index("-m tradingsystem config")
 
 
 # ------------------------------------------------------------------ commit charge
@@ -1185,6 +1257,9 @@ def test_a_stalled_recorder_warns_unless_the_owner_stopped_it_or_the_rule_is_off
     beat(world, at)
     (f,) = run(mon, world, ["BTCUSDT"], at=at).problems
     assert "alive but not flushing (hung)" in f.text
+    # a hung recorder reads STOP only after a completed flush: the advice ends the process, never "create STOP"
+    assert "end it with taskkill /PID 10892 /T /F" in f.text and "starts a fresh one within 5 min" in f.text
+    assert "STOP" not in f.text
     (d / "STOP").write_text("", encoding="utf-8")                      # the owner stopped it: nothing
     at += 15 * MIN
     beat(world, at)

@@ -1,5 +1,6 @@
 """tools/recorder_keepalive.py (Phase 5 A3): the STOP file, no MT5 terminal, never two recorders, the crash-loop
-guard, a hung recorder left alone, the detached start with start_recorder.bat's arguments, and the task wiring.
+guard, a hung recorder left alone (the advice: taskkill), the detached start with the P1.12 arguments, the task wiring,
+and scripts/start_recorder.bat going through the same check (static: never run here).
 status.json is the real file the production recorder wrote (tests/fixtures/real/recorder_status.json). Nothing here
 starts the recorder or MT5: the spawn is replaced, except for one harmless stand-in script that proves the process scan."""
 from __future__ import annotations
@@ -86,6 +87,10 @@ def test_keepalive_leaves_a_hung_recorder_alone_and_warns_once(ka, monkeypatch, 
     monkeypatch.setattr(ka, "now_ms", lambda: UPDATED_MS + 20 * MS_PER_MINUTE)
     outcome, detail = ka.check(now=UPDATED_MS + 20 * MS_PER_MINUTE)
     assert outcome == "stale" and "last flush 20 min ago" in detail and ka.spawned == []
+    # a hung recorder reads STOP only after a completed flush (recorder.py flusher): the advice ends the process
+    assert f"end it with 'taskkill /PID {STATUS['pid']} /T /F', then the TradingSystemOps-Recorder task starts a " \
+           "fresh one within 5 min (by hand: scripts\\start_recorder.bat)" in detail
+    assert "STOP" not in detail and detail.isascii()                  # printed on a cp1252 console by the .bat
     with caplog.at_level("WARNING", logger="recorder-keepalive"):
         assert ka.main(["--quiet"]) == 0
         assert ka.main(["--quiet"]) == 0
@@ -181,16 +186,51 @@ def test_recorder_pids_finds_a_running_recorder_process(tmp_path):
     assert p.pid not in m.recorder_pids(status_pid=p.pid)
 
 
-def test_keepalive_matches_the_recorder_and_its_launcher():
+def test_keepalive_matches_the_recorder():
     m = load("test_ts_recorder_keepalive_pins", ROOT / "tools" / "recorder_keepalive.py")
     rec = (ROOT / "research" / "price_matching" / "recorder.py").read_text(encoding="utf-8")
     assert 'OUT = PROJECT_ROOT / "data" / "research" / "price_matching"' in rec
     assert m.OUT == ROOT / "data" / "research" / "price_matching"
     assert m.recorder_constant("MT5_PATH", "?") == m.DEFAULT_MT5_PATH
-    bat = (ROOT / "scripts" / "start_recorder.bat").read_text(encoding="ascii")
-    args = re.search(r"research\\price_matching\\recorder\.py (.+)$", bat, re.M).group(1).split()
-    assert args == m.RECORDER_ARGS
+    assert m.RECORDER_ARGS == ["--flush-s", "300", "--mt5-interval-ms", "50"]
     assert '(OUT / "STOP")' in rec and '"pid": os.getpid()' in rec and '"updated": iso(now_ms())' in rec
+    # STOP is read only in the flusher, after the flush and the status write: a hung recorder never sees it
+    flusher = rec.split("async def flusher", 1)[1]
+    assert flusher.index("buf.flush") < flusher.index('(OUT / "STOP").exists()')
+
+
+def test_start_recorder_bat_goes_through_the_keepalive_check_never_straight_to_recorder_py():
+    """start_recorder.bat never starts a second recorder: after the MT5 wait it removes STOP and runs the keep-alive
+    once (not --quiet: its answer is shown), whose check starts nothing while a recorder.py process runs. It says the
+    STOP file is the only way to stop the recorder (the task restarts one closed any other way)."""
+    raw = (ROOT / "scripts" / "start_recorder.bat").read_bytes()
+    assert raw.isascii() and b"\n" not in raw.replace(b"\r\n", b"")        # cmd.exe: ASCII + CRLF
+    text = raw.decode("ascii")
+    code = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().lower().startswith("rem ")]
+    runs = [ln for ln in code if "%PY%" in ln and not ln.lower().startswith(("set ", "if not exist", "echo "))]
+    assert runs == ['"%PY%" tools\\recorder_keepalive.py']                  # the only start, without --quiet
+    assert not [ln for ln in code if ln.lower().startswith("start ") or "price_matching\\recorder.py" in ln]
+    wait, delete, keep = (code.index(':run'), code.index('del /q "data\\research\\price_matching\\STOP" 2>nul'),
+                          code.index(runs[0]))
+    assert code.index("tasklist /FI \"IMAGENAME eq terminal64.exe\" 2>nul | find /i \"terminal64.exe\" >nul "
+                      "&& goto run") < wait < delete < keep                # the MT5 wait is kept, STOP removed first
+    header = " ".join(ln[4:].strip() for ln in text.splitlines()[1:8] if ln.lower().startswith("rem "))
+    assert "Stop it only by creating data\\research\\price_matching\\STOP" in header
+    assert "restarts (hidden) a recorder that was closed or ended any other way" in header
+    assert "closing its window)" not in text
+
+
+def test_the_start_by_hand_adds_no_recorder_while_one_runs(ka, monkeypatch, capsys):
+    """What start_recorder.bat does: STOP removed, then ``recorder_keepalive.py`` without --quiet — a running
+    recorder (for example the task's hidden one after a resume) is reported, none is added."""
+    assert not (ka.OUT / "STOP").exists()                                   # the .bat has removed it
+    monkeypatch.setattr(ka, "recorder_pids", lambda status_pid=None: [7777])
+    monkeypatch.setattr(ka, "now_ms", lambda: UPDATED_MS + 3 * MS_PER_MINUTE)
+    assert ka.main([]) == ka.EXIT_OK and ka.spawned == []
+    assert capsys.readouterr().out.strip() == "recorder: alive - pid 7777, last flush 3 min ago"
+    monkeypatch.setattr(ka, "recorder_pids", lambda status_pid=None: [])  # none runs: it starts one
+    assert ka.main([]) == ka.EXIT_OK and len(ka.spawned) == 1
+    assert capsys.readouterr().out.startswith("recorder: started - pid 5555: ")
 
 
 def test_recorder_task_runs_every_5_minutes_from_the_operator_tasks_not_autostart():

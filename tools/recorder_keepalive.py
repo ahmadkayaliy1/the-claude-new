@@ -2,22 +2,26 @@
 
 Task Scheduler runs it every 5 min (``TradingSystemOps-Recorder``, ``scripts\\install_operator_tasks.ps1`` — not an
 ``install_autostart.ps1`` task: that script deletes every ``TradingSystem-*`` task it does not know as a pair). The
-recorder (``research/price_matching/recorder.py``, started by hand with ``scripts\\start_recorder.bat``) dies at every
-suspend and shutdown and has no autostart of its own. Each run, in this order:
+recorder (``research/price_matching/recorder.py``) dies at every suspend and shutdown and has no autostart of its
+own. ``scripts\\start_recorder.bat`` (by hand) removes the STOP file and runs this tool once without ``--quiet``, so a
+start by hand goes through the same checks and never makes a second recorder. Each run, in this order:
 
 1. ``data/research/price_matching/STOP`` exists → nothing: the owner stopped it (``start_recorder.bat`` removes the
-   file and starts it again). This tool never removes the file.
+   file and starts it again). This tool never removes the file. STOP is the only way to stop the recorder for good:
+   one closed or ended any other way is started again by the next run.
 2. The MT5 terminal the recorder attaches to (its ``MT5_PATH``) is not running → nothing: the recorder's MT5 poller
    would start the terminal as its own child through ``mt5.initialize(path)``, and our processes never start MT5
    (docs/ops_windows.md §5) — the ``TradingSystem-MT5`` task or a supervisor does.
 3. A recorder runs → nothing (never two recorders). Alive = a process whose command line runs
    ``research/price_matching/recorder.py`` (any checkout, relative or absolute path). ``status.json`` alone cannot
    tell: a new recorder writes it only at its first flush (300 s), so the pid in it is checked first and then every
-   python process. A live recorder whose last flush is older than 15 min is logged as a warning, not replaced.
+   python process. A live recorder whose last flush is older than 15 min is logged as a warning, not replaced: it
+   is hung, and a hung recorder never reads STOP (it checks the file only after a completed flush) — the advice is
+   ``taskkill /PID <pid> /T /F``, after which the next run starts a fresh one.
 4. Crash-loop guard: this tool started it 3 times within 60 min and no flush happened since the first of them → no
    start (logged once as an error; the guard lifts as the window moves on — at most 3 attempts an hour).
 5. Otherwise it starts ``pythonw research\\price_matching\\recorder.py --flush-s 300 --mt5-interval-ms 50`` (the
-   arguments of ``start_recorder.bat``) in the project folder, detached and outside the task's job
+   P1.12 run's arguments) in the project folder, hidden (no window), detached and outside the task's job
    (``winops.spawn_outside``, as the monitor starts its diagnosis sessions), and checks that it still runs a few
    seconds later.
 
@@ -52,7 +56,7 @@ log = logging.getLogger("recorder-keepalive")
 
 RECORDER = ROOT / "research" / "price_matching" / "recorder.py"
 OUT = ROOT / "data" / "research" / "price_matching"          # = recorder.OUT (pinned by a test)
-RECORDER_ARGS = ["--flush-s", "300", "--mt5-interval-ms", "50"]  # = scripts\start_recorder.bat (pinned by a test)
+RECORDER_ARGS = ["--flush-s", "300", "--mt5-interval-ms", "50"]  # the P1.12 run (start_recorder.bat runs this tool)
 DEFAULT_MT5_PATH = r"C:/Program Files/MetaTrader 5/terminal64.exe"
 STATE_FILE = "keepalive.json"
 LOCK_FILE = "keepalive.lock"
@@ -178,9 +182,11 @@ def check(*, dry_run: bool = False, now: int | None = None) -> tuple[str, str]:
         detail = f"pid {', '.join(map(str, pids))}" + ("" if age_ms is None else
                                                         f", last flush {age_ms / MS_PER_MINUTE:.0f} min ago")
         if age_ms is not None and age_ms > STALE_MS and status.get("pid") in pids:
-            # the recorder that wrote the status is still there but no longer flushes: hung — never a second one
-            return "stale", (detail + " - alive but not flushing; not replaced (never two recorders): create "
-                             f"{OUT / 'STOP'}, wait for it to exit, then scripts\\start_recorder.bat")
+            # the recorder that wrote the status is still there but no longer flushes: hung — never a second one.
+            # It reads STOP only after a completed flush, so the STOP file cannot end it: the process must be ended.
+            return "stale", (detail + " - alive but not flushing (hung); not replaced (never two recorders): end it "
+                             f"with 'taskkill /PID {status['pid']} /T /F', then the TradingSystemOps-Recorder task "
+                             "starts a fresh one within 5 min (by hand: scripts\\start_recorder.bat)")
         return "alive", detail
     state = read_json(OUT / STATE_FILE)
     starts = [int(t) for t in state.get("starts") or [] if isinstance(t, (int, float)) and now - t < LOOP_WINDOW_MS]

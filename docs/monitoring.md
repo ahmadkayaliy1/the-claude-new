@@ -47,7 +47,7 @@ or data root.
 Everything is read **read-only**: each system's `app.db` (heartbeats, events, quotes), its `run\supervisor.json`,
 `data\shared\account_peak.json`, `data\reviews\`, the price recorder's `data\research\price_matching\status.json` and,
 for the diagnosis budget only, the AI usage ledger (through the usage gauge). The machine itself: free RAM and disk,
-the battery (psutil), the commit charge (`GlobalMemoryStatusEx`), the network adapters.
+the battery (`GetSystemPowerStatus`), the commit charge (`GlobalMemoryStatusEx`), the network adapters.
 
 ## 3. The rules
 
@@ -70,7 +70,7 @@ Thresholds are in the `monitor:` block of `config/config.yaml` (defaults shown).
 | Running on battery (Phase 5) | the laptop on battery longer than `on_battery_warn_min` (5) min, or below `battery_warn_pct` (30) % — *Running on battery*: the charger is unplugged | warn | — |
 | Battery critical (Phase 5) | on battery below `battery_critical_pct` (15) % — *plug the charger in now: at 5 % Windows hibernates and every system stops* | critical (reminded hourly) | — |
 | High memory commit (Phase 5) | Windows commit charge (the RAM + page-file space programs have reserved, `GlobalMemoryStatusEx`) above `commit_warn_pct` (85) % of the commit limit — at 100 % Windows refuses new memory and services crash, whatever the free RAM says | warn | — |
-| Price recorder stalled (Phase 5) | the P1.12 recorder's `data\research\price_matching\status.json` `updated` older than `recorder_stall_min` (30) min, while that file exists and no `STOP` file does (the owner stopped it); the text says whether its pid still runs (hung: not replaced) or not (the `TradingSystemOps-Recorder` task restarts it every 5 min while MT5 runs). Two runs while the machine settles (§4). `0` = not watched | warn | — |
+| Price recorder stalled (Phase 5) | the P1.12 recorder's `data\research\price_matching\status.json` `updated` older than `recorder_stall_min` (30) min, while that file exists and no `STOP` file does (the owner stopped it); the text says whether its pid still runs (hung: not replaced — end it with `taskkill /PID <pid> /T /F`, then the task starts a fresh one within 5 min; a hung recorder never reads `STOP`, which it looks for only after a completed flush) or not (the `TradingSystemOps-Recorder` task restarts it every 5 min while MT5 runs). Two runs while the machine settles (§4). `0` = not watched | warn | — |
 | Restart loop | more than `restart_loop_per_hour` (3) `exited`/`killed` events of one service in the last hour | warn | — |
 | Outage | a `disconnect` without a later `resumed` (MT5) / `connect` (Binance) for > `outage_warn_min` (10) | warn | — |
 | VPN | an adapter in `vpn_adapter_names` went up or down since the last run (a missing adapter is down) | info | — |
@@ -81,13 +81,15 @@ Thresholds are in the `monitor:` block of `config/config.yaml` (defaults shown).
 Equity is compared **per account**, not per pair: the three pair systems share one MT5 account and report the same
 equity, which is therefore counted once.
 
-**The battery rules** (Phase 5 A4; the outages of 2026-09-26/27 were critical-battery hibernates and shutdowns). psutil
-tells the charge and the power source, not since when the laptop runs on battery: the first run that sees it unplugged
+**The battery rules** (Phase 5 A4; the outages of 2026-09-26/27 were critical-battery hibernates and shutdowns).
+Windows' `GetSystemPowerStatus` (read directly: psutil turns an unknown AC line into "unplugged") tells the charge and
+the power source, not since when the laptop runs on battery: the first run that sees it unplugged
 records `battery.on_battery_since` in the state (listed as `waiting: machine on battery …`) and the next runs carry it,
 so the time rule fires on the run after the unplug (≤ 15 min later); a charge below `battery_warn_pct` warns at once.
 Each unplugged episode is a key of its own (`battery:<since>`): plugging in ends it, and a new unplug is told again
 even within a warning's cool-down; within one episode the rise from warn to critical is sent again. Plugged in (also
-while charging from a low level), an unknown power source or no battery (a desktop): nothing. The monitor task runs
+while charging from a low level), an unknown power source (`ACLineStatus` 255) or no battery (a desktop, or
+`BatteryFlag` 128/255): nothing. The monitor task runs
 on battery too (`-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries`). Turn a rule off: `battery_warn_pct: 0` and
 `battery_critical_pct: 0` (no charge rule), a large `on_battery_warn_min` (no time rule), `commit_warn_pct: 100`,
 `recorder_stall_min: 0`.
@@ -254,8 +256,9 @@ Phase 5 adds (A3/A4/A7):
   comes from the monitor's `battery.on_battery_since`; before the monitor has seen it: *not known yet*), and `!!` too
   when the commit charge is above `commit_warn_pct`. The last suspend is the newest `system_suspend` event or
   `supervisor.json` `last_gap` of any system on the data root;
-* `price recorder: last flush N min ago, pid P alive|not running` — `!!` with *stalled* above `recorder_stall_min`,
-  never while the owner's `STOP` file exists (*STOP present*);
+* `price recorder: last flush N min ago, pid P alive|not running` — `!!` with *stalled* above `recorder_stall_min`
+  (still alive = hung: *end it with taskkill /PID P /T /F*), never while the owner's `STOP` file exists (*STOP
+  present*);
 * per system, under `events:`, `disconnect reasons: gaierror(11001) 60, ConnectionClosedError 21, …, PermissionError(13)
   4` — the exception class of each `disconnect` event with its errno when it has one, so `PermissionError(13)` (Windows
   refused the socket) is a reason of its own;

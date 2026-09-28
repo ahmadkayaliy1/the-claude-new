@@ -501,7 +501,7 @@ the tools (monitor, sessions, `tune.py`) read the config at every run, so for th
 | Phase 5: calls on a closed execution market | `ai: {skip_closed_market: false}` (Phase 4 behaviour) |
 | Phase 5: the 60-s retry of a sign-in race / 403 | `ai: {transient_retry_s: 0}` (the old quick retries) |
 | Phase 5: the afternoon call reserve | `ai: {quota_reserve_share: 0}` (no reserve) |
-| Phase 5: a monitor rule is noisy | `monitor:` → `battery_warn_pct: 0` + `battery_critical_pct: 0` (battery), `commit_warn_pct: 100` (commit charge), `recorder_stall_min: 0` (recorder), `diagnose_max_per_day: 0` (no diagnosis at all) |
+| Phase 5: a monitor rule is noisy | `monitor:` → `battery_warn_pct: 0` + `battery_critical_pct: 0` + `on_battery_warn_min: 1440` (battery: no charge rule and no time rule), `commit_warn_pct: 100` (commit charge), `recorder_stall_min: 0` (recorder), `diagnose_max_per_day: 0` (no diagnosis at all) |
 | Phase 5: the daily backup | `backup: {enabled: false}` (the task and `restart_all.bat` then do nothing), or `install_operator_tasks.bat -Uninstall` |
 | Phase 5: the cold-archive disk guard | `storage: {cold_archive_min_free_gb: 0}` |
 
@@ -511,7 +511,8 @@ Check what is in force with `.venv\Scripts\python.exe -m tradingsystem config` b
 a line in `logs\monitor-config-error.log` / `logs\operator-session-config-error.log` and a toast; `check_ops.bat`
 points there.
 
-**Going back to the code before Phase 5:** see §9.7 (uninstall the two new tasks, remove the Phase 5 keys from `config.local.yaml`).
+**Going back to the code before Phase 5:** see §9.7 (uninstall the two new tasks, remove every Phase 5 key from
+`config.local.yaml`, put `diagnose_enabled: false` back).
 
 **Going back to the code before Phase 4:** first run `scripts\install_operator_tasks.bat -Uninstall` (the older code
 has no monitor or session runner), then remove every Phase 4 key from `config\config.local.yaml` (`ai.usage`,
@@ -621,17 +622,21 @@ The P1.12 recorder (`research\price_matching\recorder.py`, H5/P7.1 need 72 h of 
 The task `TradingSystemOps-Recorder` runs `pythonw tools\recorder_keepalive.py --quiet` every 5 minutes (time limit
 4 min). Each run:
 
-1. `data\research\price_matching\STOP` exists → nothing. That is how you stop the recorder; the keep-alive never
-   removes the file. `scripts\start_recorder.bat` removes it and starts the recorder again.
+1. `data\research\price_matching\STOP` exists → nothing. That is the only way to stop the recorder: the keep-alive
+   never removes the file, and it starts again a recorder that was closed or ended any other way.
+   `scripts\start_recorder.bat` removes the file and runs the keep-alive once in its window (the same checks, so it
+   never starts a second recorder: with one already running it says `alive` and adds none).
 2. The MT5 terminal is not running → nothing. The recorder would start the terminal itself as its own child; our
    processes never start MT5 (§5).
 3. A recorder is already running → nothing, so there are never two. A recorder that runs but has not written
-   `status.json` for 15 minutes is reported once in `logs\recorder-keepalive.jsonl` and left alone: stop it with the
-   STOP file, wait until it has exited, then run `start_recorder.bat`.
+   `status.json` for 15 minutes is hung: it is reported once in `logs\recorder-keepalive.jsonl` (and by the monitor
+   and the health report after 30 minutes) and left alone. End it with `taskkill /PID <pid> /T /F` (the pid those
+   lines show); the task then starts a fresh one within 5 minutes (by hand: `scripts\start_recorder.bat`). The STOP
+   file does not help here: the recorder looks for it only after a completed flush, so a hung one never sees it.
 4. It started the recorder 3 times in 60 minutes and none of them flushed → it stops trying (logged) until the hour
    has passed: look at `logs\recorder.jsonl` and `logs\recorder-mt5.jsonl`.
-5. Otherwise it starts the recorder hidden (no window), with the same arguments as `start_recorder.bat`, outside the
-   task, and checks a few seconds later that it still runs.
+5. Otherwise it starts the recorder hidden (no window), with the P1.12 arguments (`--flush-s 300
+   --mt5-interval-ms 50`), outside the task, and checks a few seconds later that it still runs.
 
 The outcome of the last run is in `data\research\price_matching\keepalive.json`. To turn the keep-alive off, disable
 the task in Task Scheduler (or `install_operator_tasks.bat -Uninstall`, which removes all five operator tasks);
@@ -661,7 +666,23 @@ creating the STOP file is enough to keep the recorder down.
 
 ### 9.7 Going back to the code before Phase 5
 
-Remove the two tasks while the Phase 5 code is still checked out (the older installer does not know them):
-`scripts\install_operator_tasks.bat -Uninstall`; after going back, `scripts\install_operator_tasks.bat` registers the
-three Phase 4 tasks again. Remove a `backup:` block from `config\config.local.yaml` (the older code refuses unknown
-sections). `backups\` and `keepalive.json` can stay.
+1. **Remove the two new tasks first**, while the Phase 5 code is still checked out (the older installer does not know
+   them): `scripts\install_operator_tasks.bat -Uninstall`.
+2. **Go back to the older code** (check out the commit before Phase 5).
+3. **Clean `config\config.local.yaml`.** The older code refuses every key it does not know, also inside a section it
+   knows (`ai:`, `monitor:`, `storage:`): a single leftover key and no system starts, `restart_all.bat` aborts and the
+   monitor exits 3 on every run. Remove each of these, and the same keys under `instances.*.overrides`:
+   - the whole `backup:` and `evaluation:` sections;
+   - `ai:` `skip_closed_market`, `transient_retry_s`, `quota_reserve_share`, `quota_reserve_hours_utc`;
+   - `monitor:` `battery_warn_pct`, `battery_critical_pct`, `on_battery_warn_min`, `commit_warn_pct`,
+     `recorder_stall_min`, `diagnose_max_per_day`, `diagnose_max_gauge_level`;
+   - `storage:` `cold_archive_min_free_gb`.
+
+   Then **put `diagnose_enabled: false` back into the `monitor:` block**: Phase 4 has no diagnosis budget, and its
+   monitor would start a billed Claude diagnosis for every warning (up to one every 3 h) on the shared plan.
+4. **Check it with the older code:** `.venv\Scripts\python.exe -m tradingsystem config` must succeed (it names any key
+   still refused) before `scripts\restart_all.bat`.
+5. `scripts\install_operator_tasks.bat` registers the three Phase 4 tasks again.
+
+`backups\` and `keepalive.json` can stay (the older code does not read them). The recorder is no longer kept alive:
+start it by hand after every sleep again.

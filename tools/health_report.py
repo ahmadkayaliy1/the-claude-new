@@ -51,10 +51,45 @@ class _MemoryStatusEx(ctypes.Structure):
                 ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
 
 
+class _SystemPowerStatus(ctypes.Structure):
+    """SYSTEM_POWER_STATUS (GetSystemPowerStatus)."""
+    _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte),
+                ("BatteryLifePercent", ctypes.c_ubyte), ("SystemStatusFlag", ctypes.c_ubyte),
+                ("BatteryLifeTime", ctypes.c_ulong), ("BatteryFullLifeTime", ctypes.c_ulong)]
+
+
 # --------------------------------------------------------------------------- machine probes (the monitor uses them too)
+def _power_status() -> tuple[int, int, int] | None:
+    """GetSystemPowerStatus as Windows gives it: ``(ACLineStatus, BatteryFlag, BatteryLifePercent)``. None off
+    Windows or on failure."""
+    if os.name != "nt":
+        return None
+    try:
+        st = _SystemPowerStatus()
+        if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(st)):
+            return None
+        return int(st.ACLineStatus), int(st.BatteryFlag), int(st.BatteryLifePercent)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def battery_from_status(ac_line: int, flag: int, percent: int) -> tuple[float, bool | None] | None:
+    """One GetSystemPowerStatus reading as ``(percent, on mains)``: ACLineStatus 1 → True, 0 → False, anything else
+    (255 = unknown) → None. BatteryFlag 128 (no system battery) or 255 (cannot be read) — both have bit 7 — and
+    BatteryLifePercent 255 (unknown) → None."""
+    if flag & 128 or not 0 <= percent <= 100:
+        return None
+    return float(percent), {1: True, 0: False}.get(ac_line)
+
+
 def battery() -> tuple[float, bool | None] | None:
-    """The laptop battery (psutil → GetSystemPowerStatus): ``(percent, on mains)`` — on mains None when Windows cannot
-    tell; None without a battery (a desktop) or when it cannot be read."""
+    """The laptop battery: ``(percent, on mains)`` — on mains None when Windows cannot tell (ACLineStatus 255); None
+    without a battery (a desktop) or when it cannot be read. On Windows straight from GetSystemPowerStatus: psutil
+    turns an unknown AC line into "unplugged" (``power_plugged = ACLineStatus == 1``), which would read as on
+    battery. psutil only where that call is not available."""
+    st = _power_status()
+    if st is not None:
+        return battery_from_status(*st)
     try:
         b = psutil.sensors_battery()
     except Exception:  # noqa: BLE001 — psutil raises on odd firmware; the battery is then unknown
@@ -131,9 +166,11 @@ def recorder_line(s: Settings, now: float) -> str | None:
     if r["stop"]:
         text += " — STOP present (stopped by the owner; scripts\\start_recorder.bat starts it again)"
     elif stalled:
+        # hung: it reads STOP only after a flush, so the STOP file cannot end it — the process has to be ended
         text += (f" — stalled (no flush for more than {lim} min): "
-                 + ("alive but not flushing — create its STOP file, wait for it to exit, then "
-                    "scripts\\start_recorder.bat" if r["alive"] else
+                 + (f"alive but not flushing (hung) — end it with taskkill /PID {r['pid']} /T /F; the "
+                    "TradingSystemOps-Recorder task then starts a fresh one within 5 min (by hand: "
+                    "scripts\\start_recorder.bat)" if r["alive"] else
                     "the TradingSystemOps-Recorder task restarts it every 5 min while MT5 runs; by hand: "
                     "scripts\\start_recorder.bat"))
     return ("!! " if stalled else "   ") + text

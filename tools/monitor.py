@@ -128,7 +128,8 @@ def _adapters() -> dict[str, bool]:
 
 
 def _battery() -> tuple[float, bool | None] | None:
-    """(percent, on mains — None when Windows cannot tell) of the laptop battery; None without one (a desktop)."""
+    """(percent, on mains — None when Windows cannot tell) of the laptop battery; None without one (a desktop).
+    The health report's reading (GetSystemPowerStatus: an unknown AC line is None, never "on battery")."""
     return hr.battery()
 
 
@@ -840,12 +841,13 @@ class Monitor:
                                                               f"{m.free_disk_warn_gb:g} GB)"))
 
     def _power(self) -> None:
-        """The laptop on battery (Phase 5 A4: the outages of 2026-09-26/27 were critical-battery hibernates). psutil
-        tells the percent and the power source, not how long it has run on battery: the first run that sees it on
-        battery records ``battery.on_battery_since`` in the state and later runs carry it. Warn once it is on battery
-        longer than ``on_battery_warn_min`` or below ``battery_warn_pct``; critical below ``battery_critical_pct``.
-        Plugged in, an unknown power source or no battery (a desktop): nothing. Each unplugged episode is a key of
-        its own (a new unplug is news, not a flapping condition); a level rise within it is sent again."""
+        """The laptop on battery (Phase 5 A4: the outages of 2026-09-26/27 were critical-battery hibernates).
+        GetSystemPowerStatus tells the percent and the power source, not how long it has run on battery: the first
+        run that sees it on battery records ``battery.on_battery_since`` in the state and later runs carry it. Warn
+        once it is on battery longer than ``on_battery_warn_min`` or below ``battery_warn_pct``; critical below
+        ``battery_critical_pct``. Plugged in, an unknown power source (ACLineStatus 255) or no battery (a desktop):
+        nothing. Each unplugged episode is a key of its own (a new unplug is news, not a flapping condition); a level
+        rise within it is sent again."""
         m = self.base.monitor
         prev = self.prev.get("battery") if isinstance(self.prev.get("battery"), dict) else {}
         self.state["battery"] = dict(prev)                  # kept as it was if the probe fails below
@@ -909,8 +911,10 @@ class Monitor:
             return
         items: dict[str, str] = {}
         if r["age_min"] > lim:
-            alive = {True: "alive but not flushing (hung): create its STOP file, wait for it to exit, then "
-                           "scripts\\start_recorder.bat",
+            # hung: the recorder reads STOP only after a completed flush, so the STOP file cannot end it
+            alive = {True: f"alive but not flushing (hung): end it with taskkill /PID {r['pid']} /T /F — the "
+                           "TradingSystemOps-Recorder task then starts a fresh one within 5 min (by hand: "
+                           "scripts\\start_recorder.bat)",
                      False: "not running: the TradingSystemOps-Recorder task restarts it every 5 min while MT5 runs "
                             "(install_operator_tasks.bat; by hand: scripts\\start_recorder.bat)",
                      None: "its state is unknown: scripts\\start_recorder.bat"}[r["alive"]]
