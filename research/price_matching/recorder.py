@@ -144,6 +144,11 @@ def mt5_poller(q: mp.Queue, stop, interval_s: float) -> None:
     while not stop.is_set():
         try:
             if not connected:
+                # never start MT5 from here: initialize(path) launches the terminal as OUR child when it is not running
+                # (it then dies with the recorder and sits outside the supervisor's control) — wait for it instead
+                from tradingsystem.ingest.mt5.terminal import terminal_running
+                if not terminal_running(MT5_PATH, min_age_s=30.0):
+                    raise RuntimeError("MT5 terminal not running (or started < 30 s ago) - not launching it")
                 if not mt5.initialize(path=MT5_PATH):
                     raise RuntimeError(f"initialize failed: {mt5.last_error()}")
                 for s in MT5_SYMBOLS:

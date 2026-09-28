@@ -81,7 +81,8 @@ is still a log line and an event on the dashboard.
 | Executor | order placed or failed; fills and closes; outcome; position action applied or rejected; management rule applied; drawdown stop tripped; kill switch on or off | info, warn for failures and rejections, critical for the drawdown stop |
 | Engine | usage gauge level changed (key `gauge:<level>`); adaptive overlay invalid (warn) or an entry expired (info) | info or warn |
 | Escalation (second opinion) | confirmed, downgraded to NO_TRADE, withheld, failed | info or warn |
-| Monitor (`tools\monitor.py`, every 15 min) | every finding: stale heartbeat, MT5 IPC hung, position without SL, order burst, daily loss, equity drop, low RAM or disk, restart loop, outage, VPN change, overdue review (key `monitor:<finding>`) | as in docs/monitoring.md |
+| Monitor (`tools\monitor.py`, every 15 min) | every finding: stale heartbeat, MT5 IPC hung, position without SL, order burst, daily loss, equity drop, low RAM or disk, high commit charge, running on battery or a low battery, a stalled price recorder, restart loop, outage, VPN change, overdue review (key `monitor:<finding>`) | as in docs/monitoring.md |
+| Supervisor (every pair system) | "PC was asleep" after a sleep/hibernate, with its length (one machine-wide key `supervisor:system_suspend`: three systems wake together, one message) | warn |
 | Kill switch (`tools\kill_switch.py`, dashboard) | switch engaged, or could not be engaged | critical |
 | Tuning (`tools\tune.py`) | a change applied or reverted | info |
 | Proposals (`tools\propose.py`) | a proposal is waiting for you | info |

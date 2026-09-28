@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import yaml  # noqa: E402
 
-from tradingsystem.ai.budget import USAGE_UNKNOWN_PREFIX  # noqa: E402
+from tradingsystem.ai.budget import CANCELLED_PREFIX, USAGE_UNKNOWN_PREFIX  # noqa: E402
 from tradingsystem.core.settings import INSTANCE_ENV, PROJECT_ROOT, Settings, load_settings  # noqa: E402
 from tradingsystem.core.timeutil import MS_PER_HOUR, iso  # noqa: E402
 from tradingsystem.core.timeutil import now_ms as _now_ms  # noqa: E402
@@ -313,8 +313,11 @@ def usage_section(ledger: Path, since: int, until: int | None = None) -> dict[st
             f"COALESCE(sum(input_tokens),0), COALESCE(sum(cached_tokens),0), COALESCE(sum(output_tokens),0), "
             f"{turns}, {api} FROM ai_usage "
             "WHERE ts>=? AND ts<? GROUP BY r, p ORDER BY r, p", (since, hi)).fetchall()
-        unknown = con.execute("SELECT count(*) FROM ai_usage WHERE ts>=? AND ts<? AND substr(error, 1, ?)=?",
-                              (since, hi, len(USAGE_UNKNOWN_PREFIX), USAGE_UNKNOWN_PREFIX)).fetchone()[0] \
+        # a timed-out/crashed session and a call cancelled after the CLI started: tokens spent, amount unknown
+        unknown = con.execute("SELECT count(*) FROM ai_usage WHERE ts>=? AND ts<? AND (substr(error, 1, ?)=? "
+                              "OR substr(error, 1, ?)=?)",
+                              (since, hi, len(USAGE_UNKNOWN_PREFIX), USAGE_UNKNOWN_PREFIX,
+                               len(CANCELLED_PREFIX), CANCELLED_PREFIX)).fetchone()[0] \
             if "error" in have else 0
     except sqlite3.Error as exc:
         return {"ledger": str(ledger), "error": f"unreadable: {exc}"[:200]}

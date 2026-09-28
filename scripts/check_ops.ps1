@@ -130,7 +130,7 @@ foreach ($name in @("TradingSystem-MT5") + @($tsNames | Sort-Object -Unique)) {
     } else { Write-Host ("info {0,-22} not registered (scripts\install_autostart.bat)" -f $name) }
 }
 if (-not $opsNames) {
-    Write-Host "info TradingSystemOps-*      not registered (scripts\install_operator_tasks.bat - monitor + reviews)"
+    Write-Host "info TradingSystemOps-*      not registered (scripts\install_operator_tasks.bat - monitor, reviews, backup, recorder)"
 }
 foreach ($name in @($opsNames | Sort-Object -Unique)) {
     $q = schtasks /Query /TN $name /FO LIST /V 2>$null

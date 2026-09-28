@@ -55,7 +55,7 @@ from typing import Any, Iterable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from tradingsystem.ai.budget import USAGE_UNKNOWN_PREFIX  # noqa: E402
+from tradingsystem.ai.budget import CANCELLED_PREFIX, USAGE_UNKNOWN_PREFIX  # noqa: E402
 from tradingsystem.core.settings import INSTANCE_ENV, Settings, load_settings  # noqa: E402
 from tradingsystem.core.timeutil import MS_PER_DAY, MS_PER_MINUTE, iso, parse_date_spec  # noqa: E402
 from tradingsystem.core.timeutil import now_ms as _now_ms  # noqa: E402
@@ -313,7 +313,7 @@ def cost_per_day(rows: list[dict[str, Any]], s: Settings) -> dict[str, Any]:
         if r.get("provider") in claude:
             a["weighted"] += effective_tokens({"input": inp, "cached": cached, "output": out}, weight)
         a["cli_usd"] += float(r.get("api_equivalent_usd") or 0.0)
-        if str(r.get("error") or "").startswith(USAGE_UNKNOWN_PREFIX):
+        if str(r.get("error") or "").startswith((USAGE_UNKNOWN_PREFIX, CANCELLED_PREFIX)):
             a["usage_unknown"] += 1
         if inp or out:
             a["with_tokens_n"] += 1

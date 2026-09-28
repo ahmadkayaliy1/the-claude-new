@@ -498,12 +498,20 @@ the tools (monitor, sessions, `tune.py`) read the config at every run, so for th
 | The monitor starts diagnosis sessions you do not want | `monitor: {diagnose_enabled: false}` |
 | The monitor itself | `monitor: {enabled: false}`, or `scripts\install_operator_tasks.bat -Uninstall` |
 | The review sessions | `operator: {enabled: false}` (the tasks start and exit at once), or remove the tasks |
+| Phase 5: calls on a closed execution market | `ai: {skip_closed_market: false}` (Phase 4 behaviour) |
+| Phase 5: the 60-s retry of a sign-in race / 403 | `ai: {transient_retry_s: 0}` (the old quick retries) |
+| Phase 5: the afternoon call reserve | `ai: {quota_reserve_share: 0}` (no reserve) |
+| Phase 5: a monitor rule is noisy | `monitor:` → `battery_warn_pct: 0` + `battery_critical_pct: 0` (battery), `commit_warn_pct: 100` (commit charge), `recorder_stall_min: 0` (recorder), `diagnose_max_per_day: 0` (no diagnosis at all) |
+| Phase 5: the daily backup | `backup: {enabled: false}` (the task and `restart_all.bat` then do nothing), or `install_operator_tasks.bat -Uninstall` |
+| Phase 5: the cold-archive disk guard | `storage: {cold_archive_min_free_gb: 0}` |
 
 Check what is in force with `.venv\Scripts\python.exe -m tradingsystem config` before `restart_all.bat` (the
 "phase 4:" line: adaptive, `TUNING_FREEZE`, notify/toast/Telegram configured, monitor, diagnose, sessions, gauge). A
 `config.local.yaml` the tools cannot read stops the monitor and the sessions with exit code 3 (task "Last Result"),
 a line in `logs\monitor-config-error.log` / `logs\operator-session-config-error.log` and a toast; `check_ops.bat`
 points there.
+
+**Going back to the code before Phase 5:** see §9.7 (uninstall the two new tasks, remove the Phase 5 keys from `config.local.yaml`).
 
 **Going back to the code before Phase 4:** first run `scripts\install_operator_tasks.bat -Uninstall` (the older code
 has no monitor or session runner), then remove every Phase 4 key from `config\config.local.yaml` (`ai.usage`,

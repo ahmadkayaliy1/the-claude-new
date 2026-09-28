@@ -341,7 +341,16 @@ def status(data: Path, s: Settings) -> int:
     for path, pids in procs.find_terminals(sorted(paths)).items():
         warn = "  <-- inside the supervisor job (started by a service)" if in_job.get(path) else ""
         out.append(f"MT5        : {'running pid ' + ','.join(map(str, pids)) if pids else 'NOT running'}  ({path}){warn}")
+    try:                                   # venues this system has an instrument on (XAUUSD: none on Binance spot)
+        from ..core.instruments import InstrumentRegistry
+        from .supervisor import VENUE_BEATS
+        beats, venues = VENUE_BEATS, {i.venue for i in InstrumentRegistry.from_settings(s).all()}
+    except Exception:  # noqa: BLE001 — unknown: every row is shown as it is
+        beats, venues = frozenset(), set()
     for col, state, upd in _collectors(Path(data) / "app.db"):
+        if col in beats and col not in venues and state == "stopped":
+            out.append(f"  {col:<20} n/a (no instrument)")      # stopped by design, not a failure
+            continue
         out.append(f"  {col:<20} {state:<14} heartbeat {(now_ms() - upd) / 1000:.0f}s ago")
     out.append(f"dashboard  : http://{s.api.host}:{s.api.port}")
     print("\n".join(out))

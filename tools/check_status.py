@@ -11,7 +11,7 @@ REQUIRED = [
     "Notes/open issues:", "The exact next step:",
 ]
 PHASE_RE = re.compile(r"^### Phase (P\d+\.\d+):", re.M)
-STATUS_RE = re.compile(r"Status:\s*(✅|🔄|⏳|⚠️)")
+STATUS_RE = re.compile(r"Status:\s*(✅|🔄|⏳|⚠️|⛔)")      # ⛔ = obsolete / superseded (Phase 5 A1 reconciliation)
 
 
 def check(path: Path) -> list[str]:
@@ -37,7 +37,7 @@ def check(path: Path) -> list[str]:
                 errors.append(f"{pid}: missing field {field!r}")
         st = STATUS_RE.search(block)
         if not st:
-            errors.append(f"{pid}: status must be one of ✅ 🔄 ⏳ ⚠️")
+            errors.append(f"{pid}: status must be one of ✅ 🔄 ⏳ ⚠️ ⛔")
         elif st.group(1) == "🔄":
             in_progress += 1
     print(f"{len(matches)} phases checked; {in_progress} in progress")

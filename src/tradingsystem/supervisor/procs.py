@@ -147,7 +147,10 @@ def running_supervisors(older_s: float | None = None) -> dict[int, str | None]:
         mine, born = {os.getpid()}, None
     out: dict[int, str | None] = {}
     parent: dict[int, int] = {}
-    for p in psutil.process_iter(["name", "ppid"]):
+    # only the name is prefetched: asking psutil for every process's ppid made this scan take ≈ 3.6 s on Windows
+    # (the monitor, the health report, the review pack and the backup all call it); the parent is read for the few
+    # supervisor matches only (≈ 0.2 s, the same result — Phase 5 A7)
+    for p in psutil.process_iter(["name"]):
         if p.pid in mine or not (p.info.get("name") or "").lower().startswith("python"):
             continue
         try:
@@ -157,7 +160,7 @@ def running_supervisors(older_s: float | None = None) -> dict[int, str | None]:
             if older_s is not None and born is not None and p.create_time() > born - older_s:
                 continue
             out[p.pid] = _proc_instance(p, cmd)
-            parent[p.pid] = p.info.get("ppid") or 0
+            parent[p.pid] = p.ppid() or 0
         except (psutil.Error, OSError):
             continue
     # a venv's python.exe is a launcher that runs the real interpreter as its child with the same command line:
