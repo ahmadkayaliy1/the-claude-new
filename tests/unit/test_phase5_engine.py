@@ -440,13 +440,17 @@ def test_the_cycle_deadline_cancellation_is_in_the_ledger(orch, monkeypatch):  #
 # ------------------------------------------------------------------ (5) the session-aware quota reserve
 FIRED = [("XAUUSD", ["15m BOS"], "strong", None), ("XAUUSD", ["event: stop hit"], "event", None)]
 H11, H13, H22 = T0, T0 + 2 * 3_600_000, T0 + 11 * 3_600_000     # 11:10, 13:10, 22:10 UTC
+H12, H21 = T0 + 50 * MIN, T0 + 590 * MIN                          # 12:00:00 and 21:00:00 UTC exactly
 
 
 @pytest.mark.parametrize("now,used,kept", [
     (H11, 17, ["strong", "event"]),                   # 17 < floor(0.6 × 30) = 18
     (H11, 18, ["event"]),                             # the reserve binds before 12:00 …
-    (H22, 25, ["event"]),                             # … and after 21:00
-    (H13, 29, ["strong", "event"]),                   # inside the busy hours the whole cap is there
+    (H12 - 1, 18, ["event"]),                         # … up to the last ms of 11:59
+    (H12, 29, ["strong", "event"]),                   # from 12:00 exactly the whole cap is there …
+    (H13, 29, ["strong", "event"]),                   # … inside the busy hours …
+    (H21, 25, ["strong", "event"]),                   # … and from 21:00 exactly (the window is over, the quota day
+    (H22, 25, ["strong", "event"]),                   #     ends at UTC midnight: kept calls would only expire)
 ])
 def test_quota_reserve_keeps_calls_for_the_busy_hours(eng, monkeypatch, now, used, kept):  # noqa: F811
     monkeypatch.setattr(eng.orch, "quota", lambda name=None: (None, None))
@@ -461,7 +465,48 @@ def test_quota_reserve_is_logged_like_the_quota_messages(eng, monkeypatch, caplo
         eng._ration(list(FIRED[:1]), H11)
     [(n,)] = [one(eng, "SELECT count(*) FROM ingestion_events WHERE event='ai_quota'")]
     assert n == 1                                                  # quietly: once, not on every screen
-    assert any("kept for 12:00–21:00 UTC" in r.getMessage() and "18/30" in r.getMessage() for r in caplog.records)
+    assert any("18/30 calls used today — the 12 left are kept for 12:00–21:00 UTC" in r.getMessage()
+               for r in caplog.records)                            # the calls actually left, not cap − allowed
+
+
+REVIEW = ("XAUUSD", ["next_review: 15m close below 4280"], "review", None)
+FLAT_OR_HELD = {
+    "position": [{"pair": "XAUUSD", "kind": "position", "decision": "abcd1234", "side": "BUY", "volume": 0.01,
+                  "price": 4300.0, "sl": 4280.0}],
+    "order": [{"pair": "XAUUSD", "kind": "order", "decision": "abcd1234", "side": "BUY", "order_type": "BUY_LIMIT",
+               "volume": 0.01, "price": 4290.0, "sl": 4280.0}],
+    "flat": [{"pair": "BTCUSDT", "kind": "position", "decision": "ef012345", "side": "BUY", "volume": 0.01,
+              "price": 1.0, "sl": 0.9}],                           # another pair's position: XAUUSD is flat
+}
+
+
+@pytest.mark.parametrize("holds,kept", [
+    ("position", ["review", "event"]),                # money at risk: its management review is never held back
+    ("order", ["review", "event"]),                   # … a pending order too
+    (None, ["review", "event"]),                      # the executor is not reporting: holdings unknown → kept
+    ("flat", ["event"]),                              # a flat pair's review waits for the busy hours
+])
+def test_quota_reserve_keeps_the_reviews_of_a_pair_with_money_at_risk(eng, monkeypatch, holds, kept):  # noqa: F811
+    monkeypatch.setattr(eng.orch, "quota", lambda name=None: (None, None))
+    monkeypatch.setattr(eng.orch, "quota_used", lambda name=None: (18, 30))
+    if holds:
+        executor_reports(eng, FLAT_OR_HELD[holds])
+    assert eng._holds("XAUUSD") is {"position": True, "order": True, None: None, "flat": False}[holds]
+    assert [f[2] for f in eng._ration([REVIEW, FIRED[0], FIRED[1]], H11)] == kept
+
+
+def test_no_quota_reserve_when_the_quota_day_is_not_the_utc_day(eng, monkeypatch, caplog):  # noqa: F811
+    caplog.set_level(logging.INFO, logger="engine")
+    name = eng.orch.route[0]
+    prov = eng.s.ai.providers[name].model_copy(update={"quota_reset_tz": "America/Los_Angeles"})
+    with_ai(eng, providers={**eng.s.ai.providers, name: prov})
+    monkeypatch.setattr(eng.orch, "quota", lambda name=None: (None, None))
+    monkeypatch.setattr(eng.orch, "quota_used", lambda name=None: (29, 30))
+    for _ in range(3):
+        assert [f[2] for f in eng._ration(list(FIRED), H11)] == ["strong", "event"]
+    notes = [r.getMessage() for r in caplog.records if "no quota reserve" in r.getMessage()]
+    assert len(notes) == 1 and "America/Los_Angeles" in notes[0]  # why, once
+    assert one(eng, "SELECT count(*) FROM ingestion_events WHERE event='ai_quota'") == (0,)
 
 
 def test_quota_reserve_zero_is_off(eng, monkeypatch):  # noqa: F811

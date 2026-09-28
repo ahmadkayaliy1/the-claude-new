@@ -17,8 +17,9 @@ then; one INFO line per hour per closed pair.
 * Calls are rationed: per-pair spacing that doubles after each failed cycle (not after one a suspend interrupted),
   ``next_review`` at most once per decision and never sooner than ``ai.review_floor_minutes`` (F1), and quota
   pressure — below 50 % of the provider's daily cap only strong setups and reviews, below 20 % only reviews, none
-  when it is used up (F8); outside ``ai.quota_reserve_hours_utc`` a pair keeps ``ai.quota_reserve_share`` of its
-  daily calls for those hours (event calls are exempt: they manage money already at risk).
+  when it is used up (F8); before ``ai.quota_reserve_hours_utc`` begins in the (UTC) quota day a pair keeps
+  ``ai.quota_reserve_share`` of its daily calls for those hours (event calls, and the reviews of a pair that holds
+  a position or a pending order, are exempt: they manage money already at risk).
 
 CLI:
   engine                         run the service
@@ -105,6 +106,7 @@ class Engine:
         self._closed_seen: dict[str, int | None] = {}  # pair → last screen bar stored when its closed-market
         #                                                signature was last taken (rebuilt only when data moved)
         self._quiet: dict[str, tuple[str, int]] = {}
+        self._reserve_off_noted: set[str] = set()   # providers told once: quota day not the UTC day → no reserve
         self._tick_error: str | None = None
         self.stop = False
 
@@ -563,15 +565,28 @@ class Engine:
         return self._reserve(fired, now)
 
     def _reserve(self, fired: list, now: int) -> list:
-        """The session-aware quota reserve (Phase 5 A5): outside ``ai.quota_reserve_hours_utc`` [start, end) a pair
-        uses at most floor((1 − ``ai.quota_reserve_share``) × its daily cap) calls of the quota day, so the London
-        afternoon and New York keep calls (the cap used to bind by early afternoon). Event calls are exempt — they
-        manage money already at risk. 0 = off; the all-pairs system (no per-pair cap) has no reserve."""
+        """The session-aware quota reserve (Phase 5 A5): before ``ai.quota_reserve_hours_utc`` [start, end) begins
+        in the quota day a pair uses at most floor((1 − ``ai.quota_reserve_share``) × its daily cap) calls, so the
+        London afternoon and New York keep calls (the cap used to bind by early afternoon). From ``start`` on —
+        inside the window and after it — the calls left are free to use: the quota day ends at UTC midnight, so
+        nothing kept after the window could ever be used. A provider whose quota day is not the UTC day
+        (``quota_reset_tz``) gets no reserve (logged once). Exempt: event calls, and the 'review' calls of a pair
+        that holds a position or a pending order or whose holdings are unknown (the executor is not reporting) —
+        they manage money already at risk; a flat pair's reviews wait like any other trigger. 0 = off; the
+        all-pairs system (no per-pair cap) has no reserve."""
         share = self.s.ai.quota_reserve_share
         if share <= 0 or not fired:
             return fired
+        name = self.orch.route[0]
+        prov = self.s.ai.providers.get(name)
+        if prov is not None and prov.quota_reset_tz:
+            if name not in self._reserve_off_noted:
+                self._reserve_off_noted.add(name)
+                log.info("%s: no quota reserve — its quota day starts at midnight %s, not UTC, so the "
+                         "ai.quota_reserve_hours_utc window cannot be placed in it", name, prov.quota_reset_tz)
+            return fired
         start, end = self.s.ai.quota_reserve_hours_utc
-        if start <= now % MS_PER_DAY // MS_PER_HOUR < end:
+        if now % MS_PER_DAY // MS_PER_HOUR >= start:
             return fired
         got = self.orch.quota_used()
         if not got:
@@ -580,12 +595,12 @@ class Engine:
         allowed = math.floor(round((1 - share) * cap, 6))
         if used < allowed:
             return fired
-        keep = [f for f in fired if f[2] == "event"]
+        keep = [f for f in fired if f[2] == "event" or (f[2] == "review" and self._holds(f[0]) is not False)]
         if len(keep) < len(fired):
             dropped = ", ".join(f[0] for f in fired if f not in keep)
             self._quietly("quota_reserve", dropped, now, "ai_quota",
-                          f"{self.orch.route[0]}: {used}/{cap} calls used today — the other {cap - allowed} are kept "
-                          f"for {start:02d}:00–{end:02d}:00 UTC (ai.quota_reserve_share {share:g}) — not analysed: "
+                          f"{name}: {used}/{cap} calls used today — the {max(cap - used, 0)} left are kept for "
+                          f"{start:02d}:00–{end:02d}:00 UTC (ai.quota_reserve_share {share:g}) — not analysed: "
                           f"{dropped}")
         return keep
 

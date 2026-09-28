@@ -120,12 +120,29 @@ def test_oi_change_is_none_when_no_row_lies_within_ten_minutes(env):
 
 def test_stale_metrics_give_no_oi_changes_and_no_oi_rank(env):
     eth(env, oi_60s=())
-    fresh = env.derivatives("ETHUSDT", T0720 + 10 * MIN)                   # exactly 10 min old: still fresh
+    fresh = env.derivatives("ETHUSDT", T0720 + 15 * MIN)                   # exactly 15 min old: still fresh
     assert fresh["open_interest"]["change_pct_1h"] is not None and fresh["oi_pct_rank_30d"] is not None
-    stale = env.derivatives("ETHUSDT", T0720 + 11 * MIN)
+    stale = env.derivatives("ETHUSDT", T0720 + 16 * MIN)                   # 16 min old: stale
     assert [stale["open_interest"][f"change_pct_{h}h"] for h in (1, 4, 24)] == [None, None, None]
     assert stale["oi_pct_rank_30d"] is None
     assert stale["open_interest"]["time"] == iso(T0720)                     # the reading is still shown, dated
+
+
+def test_the_metrics_row_of_ten_minutes_before_the_screen_still_gives_the_changes_and_the_rank(env):
+    """The metrics poll drifts against the 5-min grid: at the screen after the 07:30 close (+ 6 s) the newest stored
+    row is at times still 07:20 (606 s old — 605–622 s on production screens). Each change is an exact span from that
+    row, so it is shown, and so is the rank (a 10-min limit blanked both on ≈ 5 % of real screens)."""
+    as_of = T0720 + 10 * MIN + 6_000
+    m = by_ts(ETH_METRICS)
+    d = eth(env, as_of=as_of)
+    oi = d["open_interest"]
+    assert oi["change_pct_1h"] == pct(m[T0720][OI], m[T0720 - H][OI])
+    assert oi["change_pct_4h"] == pct(m[T0720][OI], m[T0720 - 4 * H][OI])
+    assert oi["change_pct_24h"] == pct(m[T0720][OI], m[T0720 - DAY][OI])
+    window = [r[OI] for r in ETH_METRICS if as_of - 30 * DAY <= r[0] < as_of and r[OI] is not None]
+    assert d["oi_pct_rank_30d"] == rank(window, m[T0720][OI])
+    live = [r for r in ETH_OI_60S if r[0] < as_of][-1]                      # 'last' keeps its 10-min 60-s window
+    assert oi["last"] == round(live[1], 3) and oi["time"] == iso(live[0])
 
 
 def test_the_newest_oi_row_without_a_value_is_skipped_not_shown(env):

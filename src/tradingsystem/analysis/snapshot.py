@@ -4,6 +4,11 @@ Only closed candles are analysed (as-of semantics); every block carries its data
 capability registry; numbers are rounded to the instrument's precision; the payload is hashed so each AI
 decision can be linked to exactly what the model saw (spec §8.3). ``data_problems`` is the gate that keeps AI
 calls off payloads whose data is missing, stale or too short (stall F5, F11).
+
+Derivatives freshness (Phase 5 A6): the open interest ``last`` comes from the 60-s table while its newest reading
+is at most 10 min old (``OI_FRESH_MS``); the OI changes (1/4/24 h) and the 30-day OI rank come from the 5-min
+metrics and are shown while its newest row is at most 15 min old (``OI_METRICS_FRESH_MS`` — the metrics poll drifts
+against the 5-min grid, so a screen sometimes sees the row of 10 min before as the newest).
 """
 from __future__ import annotations
 
@@ -99,7 +104,12 @@ def execution_costs(contract: dict, bid: float, ask: float, spreads_1h: np.ndarr
 
 
 # ---------------------------------------------------------------------------------------- derivatives (Phase 5 A6)
-OI_FRESH_MS = 10 * MS_PER_MINUTE        # newest OI row older than this → no change figures; also the 60-s 'last' window
+OI_FRESH_MS = 10 * MS_PER_MINUTE        # the 60-s table's 'last' is used while its newest reading is at most this old
+# the newest 5-min metrics row older than this → no OI change figures and no OI rank. One poll period (5 min) more
+# than OI_FRESH_MS: the metrics poll drifts against the 5-min grid, so at a screen (close + 5–9 s) the newest stored
+# row is at times the one of 10 min before (605–622 s old on production screens) — still a correct change, since
+# each change is measured from that row itself
+OI_METRICS_FRESH_MS = 15 * MS_PER_MINUTE
 OI_REF_TOL_MS = 10 * MS_PER_MINUTE      # a change's reference row may lie this far from its target time
 OI_CHANGE_HOURS = (1, 4, 24)
 RANK_WINDOW_MS = 30 * 86_400_000
@@ -153,9 +163,9 @@ def _oi_change(t: np.ndarray, v: np.ndarray, hours: int) -> float | None:
 def open_interest_block(m_ts, m_oi, live_ts, live_oi, as_of: int) -> dict | None:
     """``last`` + ``time``: the newest open interest — the 60-s table's when it has a reading in the last 10 minutes,
     else the 5-min metrics row's. ``change_pct_1h/4h/24h`` come from the metrics' ``sum_open_interest`` only (one
-    source at both ends; the 60-s poll has gaps and reads ≈ 0.1 % off the metrics): the newest row (≤ 10 min old,
-    else every change is None) against the row nearest to 1/4/24 h before it (±10 min, else that change is None) —
-    an exact span on the 5-min grid. None when neither source has a row."""
+    source at both ends; the 60-s poll has gaps and reads ≈ 0.1 % off the metrics): the newest row (≤ 15 min old,
+    OI_METRICS_FRESH_MS, else every change is None) against the row nearest to 1/4/24 h before it (±10 min, else
+    that change is None) — an exact span on the 5-min grid. None when neither source has a row."""
     t, v = _known(m_ts, m_oi, as_of)
     lt, lv = _known(live_ts, live_oi, as_of)
     fresh_live = lt >= as_of - OI_FRESH_MS
@@ -164,16 +174,17 @@ def open_interest_block(m_ts, m_oi, live_ts, live_oi, as_of: int) -> dict | None
         return None
     last_t, last = (lt[-1], lv[-1]) if len(lt) else (t[-1], v[-1])
     out: dict = {"last": _r(last, 3), "time": iso(int(last_t))}
-    fresh = len(t) > 0 and as_of - int(t[-1]) <= OI_FRESH_MS
+    fresh = len(t) > 0 and as_of - int(t[-1]) <= OI_METRICS_FRESH_MS
     for h in OI_CHANGE_HOURS:
         out[f"change_pct_{h}h"] = _oi_change(t, v, h) if fresh else None
     return out
 
 
 def oi_rank_30d(m_ts, m_oi, as_of: int) -> int | None:
-    """30-day percentile rank of the newest metrics OI — None while that row is stale (> 10 min)."""
+    """30-day percentile rank of the newest metrics OI — None while that row is stale (> 15 min,
+    OI_METRICS_FRESH_MS)."""
     t, v = _known(m_ts, m_oi, as_of)
-    if not len(t) or as_of - int(t[-1]) > OI_FRESH_MS:
+    if not len(t) or as_of - int(t[-1]) > OI_METRICS_FRESH_MS:
         return None
     return pct_rank_30d(t, v, as_of, min_rows=OI_RANK_MIN_ROWS)
 
