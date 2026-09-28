@@ -1,10 +1,13 @@
 """Integrity report for a data directory: per table row counts, candle-grid gaps, aggTrade id gaps, duplicates.
 
 Usage: python tools/check_integrity.py [DATA_DIR] [--since-hours N]
-Reads only (hot SQLite + cold Parquet via InstrumentReader). Exit code 1 when any unexplained gap exists.
+Reads only (hot SQLite + cold Parquet via InstrumentReader). Exit code 1 when any unexplained gap exists, 2 when the
+data directory does not exist or holds no hot store of a configured instrument (nothing checked is never "OK": until
+Phase 5 the value of --since-hours was taken as DATA_DIR and such a run printed OK after checking nothing).
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -21,16 +24,28 @@ from tradingsystem.storage.reader import InstrumentReader
 from tradingsystem.storage.tablespec import table_specs
 
 
-def main() -> int:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    since_h = float(sys.argv[sys.argv.index("--since-hours") + 1]) if "--since-hours" in sys.argv else None
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """``[DATA_DIR] [--since-hours N]`` in any order."""
+    ap = argparse.ArgumentParser(description="Integrity report of a data directory (read-only).")
+    ap.add_argument("data_dir", nargs="?", help="default: the configured data directory")
+    ap.add_argument("--since-hours", type=float, default=None, help="only rows of the last N hours")
+    return ap.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = parse_args(sys.argv[1:] if argv is None else argv)
+    since_h = a.since_hours
     s = load_settings()
-    data_dir = Path(args[0]) if args else s.paths.data()
+    data_dir = Path(a.data_dir) if a.data_dir else s.paths.data()
+    if not data_dir.is_dir():
+        print(f"not a directory: {data_dir}")
+        return 2
     reg = InstrumentRegistry.from_settings(s)
-    bad = 0
+    bad = checked = 0
     for inst in reg.all():
         if not inst.hot_db_path(data_dir).exists():
             continue
+        checked += 1
         rd = InstrumentReader(inst, data_dir)
         cal = calendar_for(inst.venue, inst.symbol, s.pairs[inst.pair].asset_class)
         print(f"== {inst.key}")
@@ -62,6 +77,9 @@ def main() -> int:
                 bad += dup
             print(msg)
         rd.close()
+    if not checked:
+        print(f"no hot store of a configured instrument under {data_dir} - nothing checked")
+        return 2
     print("OK" if not bad else f"{bad} problem(s)")
     return 1 if bad else 0
 
