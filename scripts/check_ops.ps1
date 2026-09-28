@@ -56,7 +56,32 @@ try {
     $ps = [System.Windows.Forms.SystemInformation]::PowerStatus
     Report "Power line" ("{0} (battery {1:P0})" -f $ps.PowerLineStatus, $ps.BatteryLifePercent) `
         ("$($ps.PowerLineStatus)" -ne "Offline") "plug the charger in; on battery the laptop hibernates at critical level"
+    if ("$($ps.PowerLineStatus)" -eq "Offline") {
+        # how long: only the monitor knows (data\shared\monitor_state.json battery.on_battery_since, UTC ms)
+        $since = $null
+        try {
+            $ms = (Get-Content (Join-Path $root "data\shared\monitor_state.json") -Raw -ErrorAction Stop |
+                   ConvertFrom-Json).battery.on_battery_since
+            if ($ms) { $since = [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$ms) }
+        } catch { }
+        if ($since) {
+            Write-Host ("info Time on battery                    {0:N0} min at least (since {1:yyyy-MM-dd HH:mm} UTC, per the monitor)" -f `
+                        ([DateTimeOffset]::UtcNow - $since).TotalMinutes, $since.UtcDateTime)
+        } else { Write-Host "info Time on battery                    not known yet (the monitor records it on its next run)" }
+    }
 } catch { Write-Host "info power state not readable" }
+# the last sleep any supervisor saw (run\supervisor.json last_gap of the all-pairs system and of each pair)
+$last = $null
+foreach ($f in @((Join-Path $root "data\run\supervisor.json")) + @(Get-ChildItem (Join-Path $root "data\instances") -Directory -ErrorAction SilentlyContinue |
+                 ForEach-Object { Join-Path $_.FullName "run\supervisor.json" })) {
+    if (-not (Test-Path $f)) { continue }
+    try { $g = (Get-Content $f -Raw -ErrorAction Stop | ConvertFrom-Json).last_gap } catch { continue }
+    if ($g -and $g.kind -eq "suspend" -and $g.ts -and (-not $last -or [int64]$g.ts -gt [int64]$last.ts)) { $last = $g }
+}
+if ($last) {
+    Write-Host ("info Last suspend                       resumed {0:yyyy-MM-dd HH:mm} UTC after ~{1:N0} min asleep" -f `
+                [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$last.ts).UtcDateTime, ([double]$last.seconds / 60))
+} else { Write-Host "info Last suspend                       none recorded by a running supervisor" }
 
 Write-Host ""
 Write-Host "== Wi-Fi adapter power management (Device Manager > adapter > Power Management)"
@@ -127,14 +152,21 @@ $py = Join-Path $root ".venv\Scripts\python.exe"
 if (Test-Path $py) {
     Push-Location $root
     try {
-        # the all-pairs system first (exit 0 = it runs); otherwise every pair that has its own system
-        & $py -m tradingsystem run --status
-        if ($LASTEXITCODE -ne 0) {
+        # the all-pairs system first (exit 0 = it runs); otherwise every pair that has its own system (D-042) - the
+        # all-pairs block is then one line, not a "supervisor : not running" block that reads like a problem
+        $allPairs = @(& $py -m tradingsystem run --status)
+        if ($LASTEXITCODE -eq 0) {
+            $allPairs | ForEach-Object { Write-Host $_ }
+        } else {
             $pairs = @(& $py -m tradingsystem config --instances | Where-Object { $_.Trim() })
-            foreach ($p in @($pairs | Where-Object { Test-Path (Join-Path $root "data\instances\$_\app.db") })) {
-                Write-Host ""
-                & $py -m tradingsystem run --status --instance $p
-            }
+            $own = @($pairs | Where-Object { Test-Path (Join-Path $root "data\instances\$_\app.db") })
+            if ($own.Count -gt 0) {
+                Write-Host "all-pairs system: not in use (one system per pair below)"
+                foreach ($p in $own) {
+                    Write-Host ""
+                    & $py -m tradingsystem run --status --instance $p
+                }
+            } else { $allPairs | ForEach-Object { Write-Host $_ } }
         }
     } finally { Pop-Location }
 }

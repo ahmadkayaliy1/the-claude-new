@@ -6,14 +6,22 @@ Built for a periodic check by a person or an agent: short, and every problem lin
 
 Which system (D-042): ``--instance PAIR`` one pair's system; ``--all-pairs-system`` the single all-pairs system;
 default: the all-pairs system when it runs; otherwise every running pair plus every pair that should run (its own
-``data/instances/<PAIR>/app.db``, not stopped by the user); when nothing applies, the all-pairs system.
+``data/instances/<PAIR>/app.db``, not stopped by the user); when nothing applies, the all-pairs system — so the
+all-pairs block never shows while the per-pair systems are in use.
+
+Phase 5 (A3/A4/A7): the price-recorder line (last flush, pid alive, STOP), the machine line (power source and time on
+battery, commit charge, the last suspend of any system), the disconnect reasons of the window (``PermissionError(13)``
+on its own), and ``n/a (no instrument)`` for a venue collector a pair has no instrument on (XAUUSD: Binance spot).
 """
 from __future__ import annotations
 
 import argparse
 import calendar
 import collections
+import ctypes
 import json
+import os
+import re
 import sqlite3
 import sys
 import time
@@ -23,10 +31,202 @@ import psutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from tradingsystem.core.instruments import InstrumentRegistry  # noqa: E402
 from tradingsystem.core.settings import INSTANCE_ENV, Settings, load_settings  # noqa: E402
-from tradingsystem.supervisor import procs  # noqa: E402
+from tradingsystem.supervisor import control, procs  # noqa: E402
+from tradingsystem.supervisor.supervisor import VENUE_BEATS  # noqa: E402
 
 STALE_S = {"binance_backfill": 900, "mt5_backfill": 900}
+RECORDER_DIR = Path("research") / "price_matching"         # under the data root: status.json, STOP (P1.12 recorder)
+MONITOR_STATE = "monitor_state.json"                        # tools/monitor.py STATE_FILE (data/shared)
+_EXC_RE = re.compile(r"\s*([A-Za-z_][\w.]*)\((-?\d+)?")    # "PermissionError(13, 'Access is denied', …)" → name, 13
+
+
+class _MemoryStatusEx(ctypes.Structure):
+    """MEMORYSTATUSEX (GlobalMemoryStatusEx): ullTotalPageFile is the commit limit (RAM + page files)."""
+    _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+
+# --------------------------------------------------------------------------- machine probes (the monitor uses them too)
+def battery() -> tuple[float, bool | None] | None:
+    """The laptop battery (psutil → GetSystemPowerStatus): ``(percent, on mains)`` — on mains None when Windows cannot
+    tell; None without a battery (a desktop) or when it cannot be read."""
+    try:
+        b = psutil.sensors_battery()
+    except Exception:  # noqa: BLE001 — psutil raises on odd firmware; the battery is then unknown
+        return None
+    if b is None or b.percent is None:
+        return None
+    return float(b.percent), (None if b.power_plugged is None else bool(b.power_plugged))
+
+
+def commit_charge() -> tuple[int, int] | None:
+    """Windows commit charge: ``(committed bytes, commit limit)``. The limit is RAM + page files
+    (GlobalMemoryStatusEx ``ullTotalPageFile``), what is left of it ``ullAvailPageFile``. At the limit Windows refuses
+    new allocations and services die with MemoryError, whatever the free RAM says. None off Windows or on failure."""
+    if os.name != "nt":
+        return None
+    try:
+        st = _MemoryStatusEx()
+        st.dwLength = ctypes.sizeof(_MemoryStatusEx)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return None
+        total, avail = int(st.ullTotalPageFile), int(st.ullAvailPageFile)
+    except Exception:  # noqa: BLE001
+        return None
+    return (max(total - avail, 0), total) if total > 0 else None
+
+
+def _recorder_alive(pid) -> bool | None:  # noqa: ANN001
+    """The pid of status.json still runs the recorder (a python process with ``…/price_matching/recorder.py`` on its
+    command line, as tools/recorder_keepalive.py decides); None when that cannot be told (access denied)."""
+    try:
+        p = psutil.Process(int(pid))
+        if not (p.name() or "").lower().startswith("python"):
+            return False
+        return any(a.replace("\\", "/").lower().endswith("price_matching/recorder.py") for a in p.cmdline()[1:])
+    except psutil.AccessDenied:
+        return None
+    except (psutil.Error, ValueError, TypeError, OSError):
+        return False
+
+
+def recorder_state(s: Settings, now: float) -> dict | None:
+    """The P1.12 price recorder (``research/price_matching/recorder.py``, outside the supervisors): its
+    ``status.json`` (rewritten at every flush, 5 min), the pid in it and the owner's ``STOP`` file. None when it never
+    ran here (no status.json). Keys: ``stop``, ``readable``, ``updated_ms``, ``age_min``, ``pid``, ``alive`` (None =
+    unknown)."""
+    d = s.paths.data() / RECORDER_DIR
+    st_file = d / "status.json"
+    if not st_file.exists():
+        return None
+    out = {"stop": (d / "STOP").exists(), "readable": False, "updated_ms": None, "age_min": None, "pid": None,
+           "alive": None}
+    try:
+        doc = json.loads(st_file.read_text(encoding="utf-8"))
+        upd = calendar.timegm(time.strptime(doc["updated"][:19], "%Y-%m-%dT%H:%M:%S")) * 1000   # UTC, DST-proof
+    except (OSError, ValueError, KeyError, TypeError):
+        return out                          # the recorder writes it in place: a read can catch it half-written
+    pid = doc.get("pid")
+    out.update(readable=True, updated_ms=upd, age_min=(now - upd) / 60_000, pid=pid, alive=_recorder_alive(pid))
+    return out
+
+
+def recorder_line(s: Settings, now: float) -> str | None:
+    """``price recorder: last flush N min ago, pid P alive`` — a problem line when it has not flushed for more than
+    ``monitor.recorder_stall_min`` (the monitor's rule; 0 = not watched) and the owner did not stop it (STOP)."""
+    r = recorder_state(s, now)
+    if r is None:
+        return None
+    if not r["readable"]:
+        return "!! price recorder: status.json unreadable" + (" (STOP present)" if r["stop"] else "")
+    lim = s.monitor.recorder_stall_min
+    stalled = not r["stop"] and lim > 0 and r["age_min"] > lim
+    alive = {True: "alive", False: "not running", None: "(state unknown)"}[r["alive"]]
+    text = f"price recorder: last flush {r['age_min']:.0f} min ago, pid {r['pid']} {alive}"
+    if r["stop"]:
+        text += " — STOP present (stopped by the owner; scripts\\start_recorder.bat starts it again)"
+    elif stalled:
+        text += (f" — stalled (no flush for more than {lim} min): "
+                 + ("alive but not flushing — create its STOP file, wait for it to exit, then "
+                    "scripts\\start_recorder.bat" if r["alive"] else
+                    "the TradingSystemOps-Recorder task restarts it every 5 min while MT5 runs; by hand: "
+                    "scripts\\start_recorder.bat"))
+    return ("!! " if stalled else "   ") + text
+
+
+def _state_dirs(s: Settings) -> list[tuple[str, Path]]:
+    """Every system's state dir on this data root: the all-pairs one (the data root) and each pair's."""
+    data = s.paths.data()
+    out = [("all-pairs", data)]
+    inst = data / "instances"
+    if inst.is_dir():
+        out += [(d.name, d) for d in sorted(inst.iterdir()) if d.is_dir()]
+    return out
+
+
+def last_suspend(s: Settings) -> tuple[int, float, str] | None:
+    """The newest sleep any system's supervisor saw: ``(resumed at ms, seconds asleep, system)`` from the
+    ``system_suspend`` events (every app.db, read-only) and ``run/supervisor.json`` ``last_gap`` — every supervisor
+    records the same machine sleep. None when none is recorded."""
+    best: tuple[int, float, str] | None = None
+    for name, d in _state_dirs(s):
+        cands: list[tuple[int, float]] = []
+        gap = (control.read_state(d) or {}).get("last_gap") or {}
+        if isinstance(gap, dict) and gap.get("kind") == "suspend" and isinstance(gap.get("ts"), (int, float)):
+            cands.append((int(gap["ts"]), float(gap.get("seconds") or 0)))
+        db = d / "app.db"
+        if db.exists():
+            try:
+                con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=5)
+                try:
+                    row = con.execute("SELECT ts, duration_ms FROM ingestion_events WHERE collector='supervisor:all' "
+                                      "AND event='system_suspend' ORDER BY ts DESC LIMIT 1").fetchone()
+                finally:
+                    con.close()
+                if row:
+                    cands.append((int(row[0]), (row[1] or 0) / 1000))
+            except sqlite3.Error:
+                pass
+        for ts, sec in cands:
+            if best is None or ts > best[0]:
+                best = (ts, sec, name)
+    return best
+
+
+def _when(ms: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ms / 1000))
+
+
+def _on_battery_since(s: Settings) -> int | None:
+    """When the monitor first saw the machine on battery in this episode (its state file), None when it has not."""
+    try:
+        doc = json.loads((s.paths.shared() / MONITOR_STATE).read_text(encoding="utf-8"))
+        b = doc.get("battery") if isinstance(doc, dict) else None
+        since = b.get("on_battery_since") if isinstance(b, dict) and b.get("plugged") is False else None
+        return int(since) if isinstance(since, (int, float)) and not isinstance(since, bool) else None
+    except (OSError, ValueError):
+        return None
+
+
+def machine_line(s: Settings, now: float) -> str:
+    """``machine: <power> — commit N % of G GB — last suspend …``; a problem line on battery or above
+    ``monitor.commit_warn_pct``. Time on battery comes from the monitor's state (psutil cannot tell how long)."""
+    parts, bad = [], False
+    b = battery()
+    if b is None:
+        parts.append("no battery")
+    elif b[1] is False:
+        bad = True
+        since = _on_battery_since(s)
+        parts.append(f"ON BATTERY {b[0]:.0f} %"
+                     + (f" for {(now - since) / 60_000:.0f} min at least (since {_when(since)})" if since else
+                        " (time on battery not known yet: the monitor has not seen it)")
+                     + " — plug the charger in (at 5 % Windows hibernates and every system stops)")
+    else:
+        parts.append(f"on AC power (battery {b[0]:.0f} %)" if b[1] else f"power source unknown (battery {b[0]:.0f} %)")
+    c = commit_charge()
+    if c:
+        pct = c[0] / c[1] * 100
+        bad = bad or pct > s.monitor.commit_warn_pct
+        parts.append(f"commit {pct:.0f} % of {c[1] / 2**30:.1f} GB")
+    last = last_suspend(s)
+    parts.append(f"last suspend: resumed {_when(last[0])} after ~{last[1] / 60:.0f} min asleep ({last[2]})" if last
+                 else "last suspend: none recorded")
+    return f"{'!! ' if bad else '   '}machine: " + " — ".join(parts)
+
+
+def _disconnect_reason(detail: str | None) -> str:
+    """The exception class of a ``disconnect`` event, with its errno when the first argument is one:
+    ``PermissionError(13)`` (Windows refused the socket) and ``gaierror(11001)`` (DNS) are reasons of their own."""
+    m = _EXC_RE.match(detail or "")
+    if not m:
+        return (detail or "?").strip()[:40] or "?"
+    return f"{m.group(1)}({m.group(2)})" if m.group(2) else m.group(1)
 
 
 def _snapshot_build(d: dict) -> tuple[str, float | None, str]:
@@ -125,24 +325,19 @@ def systems(a: argparse.Namespace) -> tuple[list[Settings], list[str]]:
 
 
 def machine_report(s: Settings, now: float) -> list[str]:
-    """What every system shares: the MT5 terminal, the supervisors, the price recorder, the AI ledger."""
+    """What every system shares: the MT5 terminal, the supervisors, the machine (power, commit charge, last suspend),
+    the price recorder, the AI ledger."""
     out: list[str] = []
     p = out.append
     terms = [x for x in psutil.process_iter(["name"]) if (x.info["name"] or "").lower() == "terminal64.exe"]
     p(("   " if terms else "!! ") + f"MT5 terminal running: {bool(terms)}")
     sups = procs.running_supervisors()
     p(("   " if sups else "!! ") + "supervisors: " + (procs.describe(sups) if sups else "none running"))
+    p(machine_line(s, now))
     # research recorder (P1.12, runs outside the supervisor): its status.json is rewritten every flush (5 min)
-    st_file = s.paths.data() / "research" / "price_matching" / "status.json"
-    if st_file.exists():
-        try:
-            st = json.loads(st_file.read_text(encoding="utf-8"))
-            upd = calendar.timegm(time.strptime(st["updated"][:19], "%Y-%m-%dT%H:%M:%S"))   # UTC, DST-proof
-            age_min = (now / 1000 - upd) / 60
-            p(f"{'!! ' if age_min > 12 else '   '}price recorder: last flush {age_min:.0f} min ago"
-              + (" — stalled or stopped (restart: scripts\\start_recorder.bat)" if age_min > 12 else ""))
-        except (OSError, ValueError, KeyError):
-            p("!! price recorder: status.json unreadable")
+    rec = recorder_line(s, now)
+    if rec:
+        p(rec)
     ledger = s.paths.shared() / "ai_usage.db"
     if ledger.exists():
         try:
@@ -173,10 +368,17 @@ def system_report(s: Settings, hours: float, now: float) -> list[str]:
         p(f"!! {db} does not exist (never started)")
         return out
     con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=10)
+    try:
+        venues = {i.venue for i in InstrumentRegistry.from_settings(s).all()}
+    except Exception:  # noqa: BLE001 — unknown: every row is shown as it is
+        venues = set(VENUE_BEATS)
 
     # ---- heartbeats
     for c, st, upd, err, det in con.execute("SELECT collector, state, updated_ms, last_error, detail FROM collector_status "
                                             "ORDER BY collector"):
+        if c in VENUE_BEATS and c not in venues and st == "stopped":
+            p(f"   {c:17s} n/a (no instrument)")         # stopped by design: this system has no instrument there
+            continue
         age = (now - upd) / 1000 if upd else None
         bad = st in ("error",) or (age is not None and age > STALE_S.get(c, 120) and st not in ("stopped",))
         extra = ""
@@ -210,6 +412,10 @@ def system_report(s: Settings, hours: float, now: float) -> list[str]:
     # ---- events
     ev = collections.Counter(r[0] for r in con.execute("SELECT event FROM ingestion_events WHERE ts>=?", (since,)))
     p("events: " + (", ".join(f"{k} {v}" for k, v in ev.most_common(14)) or "none"))
+    why = collections.Counter(_disconnect_reason(d) for (d,) in con.execute(
+        "SELECT detail FROM ingestion_events WHERE ts>=? AND event='disconnect'", (since,)))
+    if why:
+        p("   disconnect reasons: " + ", ".join(f"{k} {v}" for k, v in why.most_common(10)))
     for ts, col, e, det in con.execute("SELECT ts, collector, event, detail FROM ingestion_events WHERE ts>=? AND event IN "
                                        "('exited','killed','cycle_error','order_failed','worker_exit','ai_not_ready',"
                                        "'data_not_ready','system_suspend','terminal_started') ORDER BY ts DESC LIMIT 8",

@@ -45,7 +45,9 @@ system stopped by you (`run\manual_stop`, no live supervisor) is skipped. A pair
 or data root.
 
 Everything is read **read-only**: each system's `app.db` (heartbeats, events, quotes), its `run\supervisor.json`,
-`data\shared\account_peak.json` and `data\reviews\`.
+`data\shared\account_peak.json`, `data\reviews\`, the price recorder's `data\research\price_matching\status.json` and,
+for the diagnosis budget only, the AI usage ledger (through the usage gauge). The machine itself: free RAM and disk,
+the battery (psutil), the commit charge (`GlobalMemoryStatusEx`), the network adapters.
 
 ## 3. The rules
 
@@ -65,6 +67,10 @@ Thresholds are in the `monitor:` block of `config/config.yaml` (defaults shown).
 | Drawdown stop tripped | `account_peak.json` (or the executor row) shows the account's stop tripped | critical, **once** per trip | — (the executors already refuse) |
 | Stale quote | `latest_quote` older than `quote_stale_min` (10) while the instrument's market was open through that whole window | warn | — |
 | Low RAM / disk | free RAM < `free_ram_warn_mb` (300), free disk of the data drive < `free_disk_warn_gb` (5) | warn | — |
+| Running on battery (Phase 5) | the laptop on battery longer than `on_battery_warn_min` (5) min, or below `battery_warn_pct` (30) % — *Running on battery*: the charger is unplugged | warn | — |
+| Battery critical (Phase 5) | on battery below `battery_critical_pct` (15) % — *plug the charger in now: at 5 % Windows hibernates and every system stops* | critical (reminded hourly) | — |
+| High memory commit (Phase 5) | Windows commit charge (the RAM + page-file space programs have reserved, `GlobalMemoryStatusEx`) above `commit_warn_pct` (85) % of the commit limit — at 100 % Windows refuses new memory and services crash, whatever the free RAM says | warn | — |
+| Price recorder stalled (Phase 5) | the P1.12 recorder's `data\research\price_matching\status.json` `updated` older than `recorder_stall_min` (30) min, while that file exists and no `STOP` file does (the owner stopped it); the text says whether its pid still runs (hung: not replaced) or not (the `TradingSystemOps-Recorder` task restarts it every 5 min while MT5 runs). Two runs while the machine settles (§4). `0` = not watched | warn | — |
 | Restart loop | more than `restart_loop_per_hour` (3) `exited`/`killed` events of one service in the last hour | warn | — |
 | Outage | a `disconnect` without a later `resumed` (MT5) / `connect` (Binance) for > `outage_warn_min` (10) | warn | — |
 | VPN | an adapter in `vpn_adapter_names` went up or down since the last run (a missing adapter is down) | info | — |
@@ -74,6 +80,21 @@ Thresholds are in the `monitor:` block of `config/config.yaml` (defaults shown).
 
 Equity is compared **per account**, not per pair: the three pair systems share one MT5 account and report the same
 equity, which is therefore counted once.
+
+**The battery rules** (Phase 5 A4; the outages of 2026-09-26/27 were critical-battery hibernates and shutdowns). psutil
+tells the charge and the power source, not since when the laptop runs on battery: the first run that sees it unplugged
+records `battery.on_battery_since` in the state (listed as `waiting: machine on battery …`) and the next runs carry it,
+so the time rule fires on the run after the unplug (≤ 15 min later); a charge below `battery_warn_pct` warns at once.
+Each unplugged episode is a key of its own (`battery:<since>`): plugging in ends it, and a new unplug is told again
+even within a warning's cool-down; within one episode the rise from warn to critical is sent again. Plugged in (also
+while charging from a low level), an unknown power source or no battery (a desktop): nothing. The monitor task runs
+on battery too (`-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries`). Turn a rule off: `battery_warn_pct: 0` and
+`battery_critical_pct: 0` (no charge rule), a large `on_battery_warn_min` (no time rule), `commit_warn_pct: 100`,
+`recorder_stall_min: 0`.
+
+**The restart-loop rule on a real pattern:** on 2026-09-26 22:17–23:19 UTC XAUUSD's supervisor killed `ingest-binance`
+21 times in 62 min (heartbeat unchanged ≈ 176 s each time); the rule reports it on the first run after the fourth kill
+(a test replays those 21 events from production).
 
 ## 4. Sleep, reboot and clock jumps
 
@@ -93,7 +114,19 @@ monitor task right after the resume. So:
   carried it (`seen_ms`: that run saw the machine up) to the boot counts — hours awake without a sample before the
   reboot (the executor loop failing) still age it.
 
+* the price recorder dies at every suspend and its keep-alive task needs up to 10 min to bring back a flush: while the
+  machine settles its stall must be seen on two runs too.
+
 Without any of that, a stale heartbeat is reported on the first run that sees it.
+
+**The supervisors tell you about a sleep** (Phase 5 A4). When a supervisor detects that the PC was asleep (its
+`system_suspend` event, the awake clock stopped while the wall clock ran on), it sends a **warn** notification *PC was
+asleep* — how long, until when, which system saw it — through `core/notify.py` right after the resume, without waiting
+for the next monitor run. The key `supervisor:system_suspend` is the same for every system: the notifier's dedupe,
+shared by the systems (`notify.dedupe_minutes`, 30), lets the first system's message through, so one sleep is one
+toast, not three. A second sleep within those 30 min is logged (the `system_suspend` event and the log line) but not
+toasted again. The notifier is loaded by a supervisor only at its first sleep. A clock jump or a loop stall is not
+notified (the monitor's settling rules cover them).
 
 ## 5. Notifications and deduplication
 
@@ -148,6 +181,12 @@ own, outside the task's job — see docs/operator_sessions.md), unless:
 * `monitor.diagnose_enabled: false`, or `operator.enabled: false`,
 * the environment variable `TS_MONITOR_NO_DIAGNOSE` is set (anything but `0`) — set it for a scratch or test run,
 * the previous diagnosis started less than `diagnose_every_hours` (3) ago,
+* **the day's budget is used up** (Phase 5 A4): `diagnose_max_per_day` (2) sessions already started this UTC day
+  (`diagnose_launches` in the state; a state from before the budget counts its `last_diagnose_ms`; `0` = none at all),
+* **the usage gauge is above `diagnose_max_gauge_level`** (0, i.e. none at level ≥ 1) — the gauge the review pack
+  shows, over the same ledger (`data\shared\ai_usage.db` for the per-pair systems): the shared Max plan also carries the
+  trading calls. A gauge that cannot be read holds the session back too (`usage gauge unreadable`): a billed session
+  starts only while the plan's use is known to be low. No ledger yet counts as level 0,
 * the run was `--dry-run` or `--no-diagnose`,
 * the state file cannot be written (`state not persisted`): `last_diagnose_ms` is saved **before** the session
   starts, so a state that cannot be saved never starts a session on every run,
@@ -159,6 +198,18 @@ own, outside the task's job — see docs/operator_sessions.md), unless:
 A finding that is already known (no reminder due) never starts a session, nor does the re-send of an undelivered
 notification (§5). The session gets the new findings as its `--reason` and can read all of the run's findings in
 `data\shared\monitor_state.json` (`run.findings`).
+
+A budget refusal (the day's count or the gauge) is final for those findings — they are not kept *wanted*; the next new
+warning on a new day or with a lower gauge starts one. The reason is in the run summary (`diagnosis: not started —
+daily budget used: 2 diagnosis session(s) started today (UTC), …` / `usage gauge at level 1, above …`) and in
+`logs\monitor.jsonl` (`diagnosis held back: …`). A start that failed does not use up the budget.
+
+**Re-enabling diagnoses after Phase 5 checkpoint A.** The first monitor run on Phase 4 code (2026-09-27 22:20 UTC)
+started a billed Sonnet diagnosis for "low free RAM 147 MB", so `monitor.diagnose_enabled: false` was put into
+`config\config.local.yaml` (H30) until this budget existed. Once checkpoint A is merged and the systems restarted,
+remove that line from the `monitor:` block of `config\config.local.yaml` (or set it to `true`), then run
+`scripts\monitor.bat --dry-run` once: it must print the findings (exit 0 or 1), not exit 3. From then on at most two
+diagnoses a UTC day start, none while the usage gauge is at level 1 or 2.
 
 ## 8. The state file
 
@@ -181,6 +232,8 @@ so the notifier's dedupe sends it at most every 30 min): until it is fixed, ever
 | `slow_build` | per system: the slow snapshot build seen on the previous run |
 | `vpn` | last state of each watched adapter |
 | `last_diagnose_ms`, `diagnose` | the last diagnosis started (pid, findings) |
+| `diagnose_launches` | the diagnoses started in the last 2 days (ms): the per-UTC-day budget (§7) |
+| `battery` | the last battery sample: `present`, `percent`, `plugged`, `on_battery_since` (the first run that saw this unplugged episode; `null` on mains), `ts` — read by `health_report.py` and `check_ops.bat` for the time on battery |
 | `diagnose_wanted` | a diagnosis put off by a running operator session (or a failed start): since when, for which findings (§7) |
 
 ## 9. In the health report
@@ -193,6 +246,26 @@ so the notifier's dedupe sends it at most every 30 min): until it is fixed, ever
 * `!! kill switch ON (<scope>): <file> — <ts> <actor> <reason>` for every switch the system obeys;
 * `usage gauge: level N — 7 d … M tokens (… % of the weekly budget), 5 h …` (`!!` at level 2, or level 1 when
   `ai.usage.enforce` is on).
+
+Phase 5 adds (A3/A4/A7):
+
+* `machine: on AC power (battery 100 %) — commit 74 % of 20.3 GB — last suspend: resumed <UTC> after ~52 min asleep
+  (BTCUSDT)`; on battery `!! machine: ON BATTERY 41 % for 23 min at least (since …) — plug the charger in …` (the time
+  comes from the monitor's `battery.on_battery_since`; before the monitor has seen it: *not known yet*), and `!!` too
+  when the commit charge is above `commit_warn_pct`. The last suspend is the newest `system_suspend` event or
+  `supervisor.json` `last_gap` of any system on the data root;
+* `price recorder: last flush N min ago, pid P alive|not running` — `!!` with *stalled* above `recorder_stall_min`,
+  never while the owner's `STOP` file exists (*STOP present*);
+* per system, under `events:`, `disconnect reasons: gaierror(11001) 60, ConnectionClosedError 21, …, PermissionError(13)
+  4` — the exception class of each `disconnect` event with its errno when it has one, so `PermissionError(13)` (Windows
+  refused the socket) is a reason of its own;
+* `binance_spot      n/a (no instrument)` instead of a bare `stopped` for a venue collector the pair has no instrument
+  on (XAUUSD has no Binance spot) — stopped by design;
+* the all-pairs block never shows while the per-pair systems are in use (only when it runs, or nothing else does).
+
+`scripts\check_ops.bat` follows: under *Power source* the time on battery (from the monitor's state) and the last
+suspend (from the supervisors' `supervisor.json`), and under *Trading system* one line `all-pairs system: not in use`
+instead of the all-pairs status block while pairs have their own systems.
 
 ## 10. False positives
 

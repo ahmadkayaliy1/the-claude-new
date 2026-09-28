@@ -46,6 +46,11 @@ def mon(monkeypatch):
     monkeypatch.setattr(m, "_free_ram_mb", lambda: 8000.0)
     monkeypatch.setattr(m, "_free_disk_gb", lambda p: 500.0)
     monkeypatch.setattr(m, "_adapters", lambda: {})
+    probes = {"battery": None, "commit": None, "gauge": (0, "stub: within budget")}     # Phase 5 machine probes
+    monkeypatch.setattr(m, "_battery", lambda: probes["battery"])
+    monkeypatch.setattr(m, "_commit", lambda: probes["commit"])
+    monkeypatch.setattr(m, "_gauge_level", lambda base, chosen, now: probes["gauge"])
+    m.probes = probes
     sent: list[tuple] = []
     monkeypatch.setattr(m, "_notify",
                         lambda s, level, title, text, *, key, pair: sent.append((level, key, title, text)))
@@ -1072,3 +1077,284 @@ def test_a_config_that_cannot_be_read_exits_3_with_a_log_line_and_a_toast(mon, m
     monkeypatch.setattr(mon.subprocess, "run", hang)
     monkeypatch.setattr(mon.sys, "stderr", None)                     # pythonw
     assert mon.main([]) == 3                                         # a toast that hangs never raises
+
+
+# ================================================================== Phase 5 A4 (and the monitor part of A3)
+REAL = ROOT / "tests" / "fixtures" / "real"
+GB = 2**30
+
+
+def monitor_cfg(world, **kw) -> None:
+    world["base"] = world["base"].model_copy(update={"monitor": world["base"].monitor.model_copy(update=kw)})
+
+
+def beat(world, at: int, pair: str = "BTCUSDT") -> None:
+    """Healthy rows of ``pair`` as of ``at`` (nothing but the rule under test fires)."""
+    seed(world[pair], status=fresh(at))
+
+
+# ------------------------------------------------------------------ battery
+def test_on_battery_longer_than_on_battery_warn_min_warns_that_the_charger_is_unplugged(mon, world):
+    beat(world, T0)
+    mon.probes["battery"] = (96.0, False)                             # unplugged, nearly full: time decides
+    first = run(mon, world, ["BTCUSDT"])
+    assert first.problems == [] and first.held[0].startswith("machine on battery (96 %)")
+    assert state(world)["battery"]["on_battery_since"] == T0          # psutil cannot say since when: tracked here
+    beat(world, T0 + 15 * MIN)
+    mon.probes["battery"] = (90.0, False)
+    (f,) = run(mon, world, ["BTCUSDT"], at=T0 + 15 * MIN).problems
+    assert (f.level, f.key, f.title) == ("warn", f"battery:{T0}", "Running on battery")
+    assert "the charger is unplugged: on battery for 15 min at least, 90 % left" in f.text
+    assert [x[1] for x in mon.sent] == [f"monitor:battery:{T0}"]
+    beat(world, T0 + 30 * MIN)
+    mon.probes["battery"] = (91.0, True)                              # plugged in again: nothing
+    assert run(mon, world, ["BTCUSDT"], at=T0 + 30 * MIN).findings == []
+    assert state(world)["battery"]["on_battery_since"] is None
+    later = T0 + 90 * MIN                                              # unplugged again: a new episode, told again
+    mon.probes["battery"] = (88.0, False)
+    beat(world, later)
+    assert run(mon, world, ["BTCUSDT"], at=later).problems == []
+    beat(world, later + 15 * MIN)
+    (f,) = run(mon, world, ["BTCUSDT"], at=later + 15 * MIN).problems
+    assert f.key == f"battery:{later}" and f.new and mon.sent[-1][1] == f"monitor:battery:{later}"
+
+
+def test_a_low_battery_warns_at_once_and_below_the_critical_level_says_plug_it_in_now(mon, world):
+    beat(world, T0)
+    mon.probes["battery"] = (27.0, False)                             # below battery_warn_pct 30: the first run
+    (f,) = run(mon, world, ["BTCUSDT"]).problems
+    assert f.level == "warn" and "on battery (first seen on this run), 27 % left" in f.text
+    beat(world, T0 + 15 * MIN)
+    mon.probes["battery"] = (14.0, False)                             # below battery_critical_pct 15: escalates
+    res = run(mon, world, ["BTCUSDT"], at=T0 + 15 * MIN)
+    (f,) = res.problems
+    assert (f.level, f.key, f.title) == ("critical", f"battery:{T0}", "Battery critical") and f.new
+    assert "plug the charger in now: at 5 % Windows hibernates and every system stops" in f.text
+    assert [x[:2] for x in mon.sent] == [("warn", f"monitor:battery:{T0}"), ("critical", f"monitor:battery:{T0}")]
+    assert res.exit_code == 1
+
+
+def test_plugged_in_an_unknown_power_source_or_no_battery_is_nothing(mon, world):
+    for i, b in enumerate([(9.0, True), (9.0, None), None]):          # charging from 9 %, unknown source, a desktop
+        at = T0 + i * 15 * MIN
+        mon.probes["battery"] = b
+        beat(world, at)
+        res = run(mon, world, ["BTCUSDT"], at=at)
+        assert res.findings == [] and res.held == []
+    assert state(world)["battery"] == {"present": False, "ts": T0 + 30 * MIN}
+
+
+# ------------------------------------------------------------------ commit charge
+def test_a_commit_charge_above_commit_warn_pct_warns(mon, world):
+    beat(world, T0)
+    mon.probes["commit"] = (int(17 * GB), int(20 * GB))               # 85 %: at the limit, not above it
+    assert run(mon, world, ["BTCUSDT"]).findings == []
+    beat(world, T0 + 15 * MIN)
+    mon.probes["commit"] = (int(18.4 * GB), int(20 * GB))             # 92 %
+    (f,) = run(mon, world, ["BTCUSDT"], at=T0 + 15 * MIN).problems
+    assert (f.level, f.key, f.title) == ("warn", "commit", "High memory commit")
+    assert "18.4 of 20.0 GB committed (92 %, warning above 85 %)" in f.text
+
+
+# ------------------------------------------------------------------ the P1.12 price recorder (A3)
+RECORDER_UPD = int(dt.datetime(2026, 9, 28, 6, 5, 34, tzinfo=dt.timezone.utc).timestamp() * 1000)   # the fixture
+
+
+def recorder(world) -> Path:
+    """The real production status.json (fixture: pid 10892, updated 2026-09-28T06:05:34Z) under the tmp data root."""
+    d = world["data"] / "research" / "price_matching"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "status.json").write_bytes((REAL / "recorder_status.json").read_bytes())
+    return d
+
+
+def test_a_stalled_recorder_warns_unless_the_owner_stopped_it_or_the_rule_is_off(mon, world, monkeypatch):
+    d = recorder(world)
+    monkeypatch.setattr(mon.hr, "_recorder_alive", lambda pid: False)
+    at = RECORDER_UPD + 20 * MIN
+    beat(world, at)
+    assert run(mon, world, ["BTCUSDT"], at=at).findings == []          # 20 min: within recorder_stall_min 30
+    at = RECORDER_UPD + 45 * MIN
+    beat(world, at)
+    (f,) = run(mon, world, ["BTCUSDT"], at=at).problems
+    assert (f.level, f.key, f.title) == ("warn", "recorder", "Price recorder stalled")
+    assert "last flush 45 min ago (2026-09-28T06:05:34.000Z, limit 30 min); pid 10892 not running" in f.text
+    assert "TradingSystemOps-Recorder" in f.text
+    monkeypatch.setattr(mon.hr, "_recorder_alive", lambda pid: True)
+    at += 15 * MIN
+    beat(world, at)
+    (f,) = run(mon, world, ["BTCUSDT"], at=at).problems
+    assert "alive but not flushing (hung)" in f.text
+    (d / "STOP").write_text("", encoding="utf-8")                      # the owner stopped it: nothing
+    at += 15 * MIN
+    beat(world, at)
+    assert run(mon, world, ["BTCUSDT"], at=at).findings == []
+    (d / "STOP").unlink()
+    monitor_cfg(world, recorder_stall_min=0)                           # 0 = not watched
+    at += 15 * MIN
+    beat(world, at)
+    assert run(mon, world, ["BTCUSDT"], at=at).findings == []
+    monitor_cfg(world, recorder_stall_min=30)
+    (d / "status.json").unlink()                                       # never ran here: nothing
+    at += 15 * MIN
+    beat(world, at)
+    assert run(mon, world, ["BTCUSDT"], at=at).findings == []
+
+
+def test_after_a_sleep_a_stalled_recorder_needs_two_runs(mon, world, monkeypatch):
+    """The recorder dies at every suspend and its keep-alive needs up to 10 min to bring back a flush: the run right
+    after a resume holds it (the two-run rule), the next one reports it if it still has not flushed."""
+    recorder(world)
+    monkeypatch.setattr(mon.hr, "_recorder_alive", lambda pid: False)
+    at = RECORDER_UPD + 5 * MIN
+    beat(world, at)
+    assert run(mon, world, ["BTCUSDT"], at=at).findings == []
+    at += 60 * MIN
+    mon.clock["awake_lag_s"] = 50 * 60.0                               # asleep 50 of those 60 min
+    beat(world, at)
+    res = run(mon, world, ["BTCUSDT"], at=at)
+    assert res.problems == [] and any(h.startswith("machine recorder stall: the machine slept") for h in res.held)
+    at += 15 * MIN
+    beat(world, at)
+    assert [f.key for f in run(mon, world, ["BTCUSDT"], at=at).problems] == ["recorder"]
+
+
+# ------------------------------------------------------------------ the diagnosis budget
+def spawned(mon, monkeypatch, tmp_path) -> list:
+    script = tmp_path / "run_session.py"
+    script.write_text("# stand-in\n", encoding="utf-8")
+    monkeypatch.setattr(mon, "RUN_SESSION", script)
+    calls: list = []
+    monkeypatch.setattr(mon, "_spawn", lambda cmd, cwd: calls.append(cmd) or type("P", (), {"pid": 9})())
+    return calls
+
+
+def stale_at(world, pair: str, at: int) -> None:
+    """``pair``'s engine silent for 20 min as of ``at``: a new warning (stale:<pair>:engine)."""
+    rows = fresh(at)
+    rows[1] = ("engine", "live", at - 20 * MIN, None, {})
+    seed(world[pair], status=rows)
+
+
+def test_at_most_diagnose_max_per_day_diagnoses_start_per_utc_day(mon, world, monkeypatch, tmp_path):
+    calls = spawned(mon, monkeypatch, tmp_path)
+    monitor_cfg(world, diagnose_every_hours=0.5)                       # the interval is not what limits here
+    day = int(dt.datetime(2026, 9, 23, 1, 0, tzinfo=dt.timezone.utc).timestamp() * 1000)
+    res = None
+    for i, pair in enumerate(("BTCUSDT", "ETHUSDT", "XAUUSD")):        # a new warning every hour
+        stale_at(world, pair, day + i * MS_PER_HOUR)
+        res = run(mon, world, [pair], at=day + i * MS_PER_HOUR, diagnose=True)
+    assert len(calls) == 2 and not res.diagnose["launched"]
+    assert res.diagnose["why"] == ("daily budget used: 2 diagnosis session(s) started today (UTC), "
+                                   "monitor.diagnose_max_per_day 2")
+    assert "diagnosis: not started — daily budget used: 2" in mon.render(res)
+    st = state(world)
+    assert st["diagnose_launches"] == [day, day + MS_PER_HOUR] and "diagnose_wanted" not in st
+    nxt = int(dt.datetime(2026, 9, 24, 0, 5, tzinfo=dt.timezone.utc).timestamp() * 1000)    # a new UTC day
+    stale_at(world, "ETHUSDT", nxt)
+    assert run(mon, world, ["ETHUSDT"], at=nxt, diagnose=True).diagnose["launched"] and len(calls) == 3
+    assert state(world)["diagnose_launches"] == [day, day + MS_PER_HOUR, nxt]
+
+
+def test_a_state_from_before_the_budget_counts_its_last_diagnosis_and_0_means_none(mon, world, monkeypatch, tmp_path):
+    calls = spawned(mon, monkeypatch, tmp_path)
+    monitor_cfg(world, diagnose_every_hours=0.5, diagnose_max_per_day=1)
+    path = world["data"] / "shared" / "monitor_state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 1, "last_diagnose_ms": T0 - MS_PER_HOUR}), encoding="utf-8")
+    stale_engine(world["BTCUSDT"])
+    res = run(mon, world, ["BTCUSDT"], diagnose=True)
+    assert calls == [] and res.diagnose["why"].startswith("daily budget used: 1 diagnosis session(s)")
+    monitor_cfg(world, diagnose_max_per_day=0)
+    stale_at(world, "ETHUSDT", T0 + 15 * MIN)
+    res = run(mon, world, ["ETHUSDT"], at=T0 + 15 * MIN, diagnose=True)
+    assert calls == [] and "monitor.diagnose_max_per_day 0" in res.diagnose["why"]
+
+
+def test_no_diagnosis_while_the_usage_gauge_is_above_its_level_or_unreadable(mon, world, monkeypatch, tmp_path):
+    calls = spawned(mon, monkeypatch, tmp_path)
+    mon.probes["gauge"] = (1, "7 d 8.60 M tokens = 72 % of 12.00 M (≥ 70 % → reviews and events only)")
+    stale_engine(world["BTCUSDT"])
+    res = run(mon, world, ["BTCUSDT"], diagnose=True)
+    assert calls == [] and not res.diagnose["launched"]
+    assert res.diagnose["why"].startswith("usage gauge at level 1, above monitor.diagnose_max_gauge_level 0 (7 d")
+    st = state(world)
+    assert st["last_diagnose_ms"] is None and st["diagnose_launches"] == [] and "diagnose_wanted" not in st
+    mon.probes["gauge"] = (None, "OperationalError: database is locked")      # unknown = held back
+    stale_at(world, "ETHUSDT", T0 + 15 * MIN)
+    res = run(mon, world, ["ETHUSDT"], at=T0 + 15 * MIN, diagnose=True)
+    assert calls == [] and res.diagnose["why"] == ("usage gauge unreadable (OperationalError: database is locked) — "
+                                                   "no billed diagnosis while the plan's use is unknown")
+    monitor_cfg(world, diagnose_max_gauge_level=1)                     # the owner allows level 1
+    mon.probes["gauge"] = (1, "")
+    stale_at(world, "XAUUSD", T0 + 30 * MIN)
+    assert run(mon, world, ["XAUUSD"], at=T0 + 30 * MIN, diagnose=True).diagnose["launched"] and len(calls) == 1
+
+
+def test_the_gauge_level_is_read_from_the_ledger_the_review_pack_reads(world, monkeypatch):
+    m = tool("monitor")                                                # the real probe (the fixture stubs it)
+    base, btc = world["base"], world["BTCUSDT"]
+    assert m._gauge_level(base, [btc], T0) == (0, "no ledger yet")     # a check never creates the ledger
+    assert not (base.paths.shared() / "ai_usage.db").exists()
+    from tradingsystem.ai.budget import UsageStore
+    base.paths.shared().mkdir(parents=True, exist_ok=True)
+    UsageStore(base.paths.shared() / "ai_usage.db").close()            # the per-pair systems' shared ledger
+    level, reason = m._gauge_level(base, [btc], T0)
+    assert level == 0 and "within budget" in reason
+    assert m._gauge_level(base, [base], T0) == (0, "no ledger yet")    # the all-pairs system: its own app.db
+    broken = type("G", (), {"level": 0, "reason": "gauge unavailable", "error": "OperationalError: locked"})()
+    import tradingsystem.ai.usage_gauge as ug
+    monkeypatch.setattr(ug, "UsageGauge", lambda s, store: type("U", (), {"state": lambda self, now=None: broken})())
+    assert m._gauge_level(base, [btc], T0) == (None, "OperationalError: locked")
+
+
+# ------------------------------------------------------------------ restart loop on the real 2026-09-26 XAU pattern
+def test_the_restart_loop_rule_fires_on_the_2026_09_26_xau_pattern(mon, world):
+    """Production, 2026-09-26 22:17-23:19 UTC: XAUUSD's supervisor killed ingest-binance 21 times in 62 min
+    (heartbeat unchanged ~176 s each time). The monitor run 15 min into the loop reports it."""
+    kills = [tuple(k) for k in json.loads((REAL / "xau_supervisor_kills_2026-09-26.json").read_text(encoding="utf-8"))]
+    assert len(kills) == 21 and {k[1:3] for k in kills} == {("supervisor:ingest-binance", "killed")}
+    at = kills[0][0] + 15 * MIN
+    seed(world["XAUUSD"], status=fresh(at), events=[k for k in kills if k[0] <= at])
+    (f,) = [x for x in run(mon, world, ["XAUUSD"], at=at).problems if x.key.startswith("restart:")]
+    assert (f.level, f.key, f.title) == ("warn", "restart:XAUUSD:ingest-binance", "XAUUSD: restart loop")
+    assert "ingest-binance exited or was killed 5× in the last hour (limit 3)" in f.text
+    assert "logs\\XAUUSD\\ingest-binance.stderr.log" in f.text and f.new
+    end = kills[-1][0] + MIN                                           # the end of the loop: the last hour's kills
+    seed(world["XAUUSD"], status=fresh(end), events=[k for k in kills if k[0] > at])
+    n = sum(1 for k in kills if k[0] >= end - MS_PER_HOUR)
+    (f,) = [x for x in run(mon, world, ["XAUUSD"], at=end).problems if x.key.startswith("restart:")]
+    assert n == 20 and f"{n}× in the last hour" in f.text and not f.new       # the same alert: already notified
+
+
+# ------------------------------------------------------------------ the supervisor tells the owner about a sleep
+def test_the_supervisor_notifies_once_per_sleep_on_resume_and_never_fails_for_it(tmp_path, monkeypatch):
+    from tradingsystem.core import notify as nt
+    monkeypatch.setenv(INSTANCE_ENV, "BTCUSDT")
+    monkeypatch.setattr(sv, "keep_awake", lambda on: False)
+    sup = sv.Supervisor(["engine"], str(tmp_path / "data"))
+    sup.term_for = {}
+    sent: list = []
+    monkeypatch.setattr(nt, "notify", lambda s, level, title, text, *, key=None, pair=None:
+                        sent.append((level, title, text, key, pair)))
+    sup.on_gap("stall", 30.0)                                          # not a sleep: no notification
+    sup.on_gap("clock_jump", 3600.0)
+    assert sent == []
+    sup.on_gap("suspend", 3137.4)                                      # the 52-min hibernate of 2026-09-26
+    ((level, title, text, key, pair),) = sent
+    assert (level, title, key, pair) == ("warn", "PC was asleep", sv.SUSPEND_NOTIFY_KEY, None)
+    assert key == "supervisor:system_suspend"                          # one key for every system: one toast a sleep
+    assert "the PC was asleep for ~52 min (3137 s) until 20" in text and "(seen by BTCUSDT)" in text
+
+    def boom(*a, **kw):                                                # noqa: ANN002, ANN003
+        raise RuntimeError("notifier broken")
+
+    monkeypatch.setattr(nt, "notify", boom)
+    sup.on_gap("suspend", 60.0)                                        # the watchdog goes on regardless
+    con = sqlite3.connect(tmp_path / "data" / "instances" / "BTCUSDT" / "app.db")
+    rows = con.execute("SELECT event, duration_ms FROM ingestion_events WHERE collector='supervisor:all' "
+                       "ORDER BY id").fetchall()
+    con.close()
+    assert rows == [("stall", 30_000), ("clock_jump", 3_600_000), ("system_suspend", 3_137_400),
+                    ("system_suspend", 60_000)]
+    assert sup.last_gap["kind"] == "suspend" and sup.grace_until > 0

@@ -37,7 +37,7 @@ from ..core.filelock import FileLock, locks_dir
 from ..core.instruments import InstrumentRegistry
 from ..core.logsetup import get_redactor, setup_from_settings, setup_logging
 from ..core.settings import PROJECT_ROOT, Settings, load_settings
-from ..core.timeutil import now_ms
+from ..core.timeutil import iso, now_ms
 from . import control, procs
 from .winops import JobObject, acquire_instance, in_job, instance_name, keep_awake, sample_clock, time_gap
 
@@ -60,6 +60,7 @@ UNREADABLE_ALERT = 6            # consecutive unreadable heartbeat passes (≈30
 TERMINAL_CHECK_S = 15.0         # how often a missing MT5 terminal is looked for / relaunched
 TERMINAL_RELAUNCH_S = 60.0      # minimum awake time between two launches of the same terminal
 TERMINAL_APPEAR_S = 10.0        # the launch lock is held until the new terminal shows (another system then sees it)
+SUSPEND_NOTIFY_KEY = "supervisor:system_suspend"    # one key for every system: one notification per machine sleep
 _STATUS_DDL = ("CREATE TABLE IF NOT EXISTS collector_status (collector TEXT PRIMARY KEY, state TEXT NOT NULL, "
                "last_data_ms INTEGER, last_error TEXT, last_error_ms INTEGER, detail TEXT, updated_ms INTEGER NOT NULL)")
 _EVENTS_DDL = ("CREATE TABLE IF NOT EXISTS ingestion_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, "
@@ -286,6 +287,25 @@ class Supervisor:
         self._event("all", {"suspend": "system_suspend"}.get(kind, kind), text, int(abs(seconds) * 1000))
         for c in self.children.values():
             c.changed = {b: now for b in c.beats}
+        if kind == "suspend":
+            self._notify_suspend(seconds)
+
+    def _notify_suspend(self, seconds: float) -> None:
+        """Phase 5 A4: a sleep is told to the owner on resume (core/notify.py: log line + toast, Telegram when set) —
+        the 52-min hibernate of 2026-09-26 was found by analysis, not by an alarm. One machine-wide key: every system
+        sees the same sleep, and the notifier's dedupe shared by the systems (``notify.dedupe_minutes``) lets the first
+        one's message through — one toast per sleep, not one per pair right when the resume needs the RAM. Imported
+        here, at the first sleep: a supervisor that never sleeps never loads the notifier (httpx). Never raises."""
+        try:
+            from ..core.notify import notify
+            who = self.s.paths.instance or "the all-pairs system"
+            notify(self.s, "warn", "PC was asleep",
+                   f"the PC was asleep for ~{seconds / 60:.0f} min ({seconds:.0f} s) until {iso(now_ms())} (seen by "
+                   f"{who}) — no market data, no screening and no trade management meanwhile (open positions kept "
+                   "their SL/TP at the broker); keep the charger in and the PC awake (scripts\\check_ops.bat)",
+                   key=SUSPEND_NOTIFY_KEY, pair=None)
+        except Exception:  # noqa: BLE001 — a notification never stops the watchdog
+            log.debug("suspend notification failed", exc_info=True)
 
     # ------------------------------------------------------------------ MT5 terminal (OPS-04)
     def ensure_terminals(self, wait_s: float = 0.0) -> None:

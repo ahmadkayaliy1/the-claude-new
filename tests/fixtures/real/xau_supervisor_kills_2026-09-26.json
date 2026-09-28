@@ -1,0 +1,23 @@
+[
+[1790461042035, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 172s of awake time (> 120s; wall age 173s)", null],
+[1790461229262, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 177s of awake time (> 120s; wall age 177s)", null],
+[1790461415886, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 178s)", null],
+[1790461601759, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 176s)", null],
+[1790461787606, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 178s)", null],
+[1790461973291, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 177s)", null],
+[1790462159094, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 178s)", null],
+[1790462345140, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 178s)", null],
+[1790462531409, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 179s)", null],
+[1790462717361, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 178s)", null],
+[1790462903157, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 179s)", null],
+[1790463088966, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 179s)", null],
+[1790463274691, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 178s)", null],
+[1790463460727, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 177s)", null],
+[1790463646527, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 179s)", null],
+[1790463832527, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 179s)", null],
+[1790464018749, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 179s)", null],
+[1790464204728, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 179s)", null],
+[1790464390470, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 178s)", null],
+[1790464576946, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 179s)", null],
+[1790464763098, "supervisor:ingest-binance", "killed", "heartbeat unchanged for 176s of awake time (> 120s; wall age 179s)", null]
+]

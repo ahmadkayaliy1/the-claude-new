@@ -10,7 +10,13 @@ are file writes only: a pair's ``data/instances/<PAIR>/KILL_SWITCH`` (order burs
 and never turns a switch OFF (``scripts\\kill_switch_off.bat``). With at least one new warning and no diagnosis for
 ``monitor.diagnose_every_hours`` it starts one Claude diagnosis session (``tools/operator/run_session.py --kind
 diagnose --reason <the new findings>``, detached) unless ``monitor.diagnose_enabled`` is false,
-``TS_MONITOR_NO_DIAGNOSE`` is set or an operator session (a review) holds the session lock.
+``TS_MONITOR_NO_DIAGNOSE`` is set, the day's budget is used up (``monitor.diagnose_max_per_day`` sessions per UTC day),
+the usage gauge is above ``monitor.diagnose_max_gauge_level`` (or cannot be read) or an operator session (a review)
+holds the session lock.
+
+Phase 5 (A3/A4) machine rules: the laptop on battery (longer than ``on_battery_warn_min``, below ``battery_warn_pct``,
+critical below ``battery_critical_pct``), the Windows commit charge above ``commit_warn_pct`` and the P1.12 price
+recorder without a flush for ``recorder_stall_min`` (docs/monitoring.md §3).
 
 Suspend-aware: after a sleep, a reboot or a clock jump every wall-clock heartbeat looks stale by the time asleep.
 The age of a beat older than the supervisor's last suspend is corrected by the time asleep, and while a system is
@@ -84,6 +90,7 @@ CONFIG_ERROR_EXIT = 3                       # load_settings() failed: nothing wa
 CONFIG_ERROR_LOG = ROOT / "logs" / "monitor-config-error.log"     # fixed: without Settings there is no logs dir
 CONFIG_ERROR_LOG_MAX = 1_000_000            # bytes; then it is rotated once (.1)
 CONFIG_TOAST_TIMEOUT_S = 15.0
+DIAGNOSE_KEEP_MS = 2 * MS_PER_DAY           # diagnosis starts remembered this long (the per-UTC-day budget)
 
 
 def _load_health_report():
@@ -118,6 +125,47 @@ def _free_disk_gb(path: Path) -> float:
 def _adapters() -> dict[str, bool]:
     """Network adapter name → up (VPN watch)."""
     return {n: bool(st.isup) for n, st in psutil.net_if_stats().items()}
+
+
+def _battery() -> tuple[float, bool | None] | None:
+    """(percent, on mains — None when Windows cannot tell) of the laptop battery; None without one (a desktop)."""
+    return hr.battery()
+
+
+def _commit() -> tuple[int, int] | None:
+    """(committed bytes, commit limit) of Windows; None when it cannot be read."""
+    return hr.commit_charge()
+
+
+def _gauge_level(base: Settings, chosen: list[Settings], now: int) -> tuple[int | None, str]:
+    """The usage gauge (ai/usage_gauge.py) over the AI ledger the systems write — the review pack's gauge on the
+    review pack's ledger (the shared ``data/shared/ai_usage.db`` for per-pair systems, else the all-pairs app.db):
+    ``(level, reason)``; ``(0, "no ledger yet")`` before any call; ``(None, why)`` when it cannot be read."""
+    systems = chosen or [base]
+    ledger = (base.paths.shared() / "ai_usage.db" if any(x.paths.instance for x in systems)
+              else systems[0].paths.state() / "app.db")
+    if not ledger.exists():
+        return 0, "no ledger yet"
+    try:
+        from tradingsystem.ai.budget import UsageStore
+        from tradingsystem.ai.usage_gauge import UsageGauge
+    except Exception as exc:  # noqa: BLE001
+        return None, f"unavailable ({type(exc).__name__})"
+    store = None
+    try:
+        store = UsageStore(ledger)
+        st = UsageGauge(base, store).state(now)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"[:200]
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001
+                pass
+    if getattr(st, "error", None):                      # the gauge says level 0 on a failed read: unknown here
+        return None, str(st.error)[:200]
+    return int(st.level), str(st.reason or "")
 
 
 def _spawn(cmd: list[str], cwd: Path):
@@ -378,6 +426,7 @@ class Monitor:
         for s in self.chosen:
             self._system(s)
         for name, fn in (("equity", self._equity), ("drawdown", self._drawdown), ("resources", self._resources),
+                         ("power", self._power), ("commit", self._commit_charge), ("recorder", self._recorder),
                          ("vpn", self._vpn), ("reviews", self._reviews)):
             self._guard(None, name, fn)
         self._dispatch()
@@ -790,6 +839,86 @@ class Monitor:
             self.add(Finding("warn", "disk", "Low free disk", f"{disk:.1f} GB free on the data drive (warning below "
                                                               f"{m.free_disk_warn_gb:g} GB)"))
 
+    def _power(self) -> None:
+        """The laptop on battery (Phase 5 A4: the outages of 2026-09-26/27 were critical-battery hibernates). psutil
+        tells the percent and the power source, not how long it has run on battery: the first run that sees it on
+        battery records ``battery.on_battery_since`` in the state and later runs carry it. Warn once it is on battery
+        longer than ``on_battery_warn_min`` or below ``battery_warn_pct``; critical below ``battery_critical_pct``.
+        Plugged in, an unknown power source or no battery (a desktop): nothing. Each unplugged episode is a key of
+        its own (a new unplug is news, not a flapping condition); a level rise within it is sent again."""
+        m = self.base.monitor
+        prev = self.prev.get("battery") if isinstance(self.prev.get("battery"), dict) else {}
+        self.state["battery"] = dict(prev)                  # kept as it was if the probe fails below
+        b = _battery()
+        if b is None:
+            self.state["battery"] = {"present": False, "ts": self.now}
+            return
+        pct, plugged = b
+        since = None
+        if plugged is False:
+            since = int(_num(prev.get("on_battery_since")) or self.now) if prev.get("plugged") is False else self.now
+            since = min(since, self.now)
+        self.state["battery"] = {"present": True, "percent": round(pct, 1), "plugged": plugged,
+                                 "on_battery_since": since, "ts": self.now}
+        if since is None:
+            return
+        on_ms = self.now - since
+        crit = pct < m.battery_critical_pct
+        warn = pct < m.battery_warn_pct or on_ms > m.on_battery_warn_min * MS_PER_MINUTE
+        if not (crit or warn):
+            self.res.held.append(f"machine on battery ({pct:.0f} %) since {iso(since)} — a warning after "
+                                 f"{m.on_battery_warn_min} min on battery or below {m.battery_warn_pct} %")
+            return
+        seen = f"on battery for {_mins(on_ms)} at least" if on_ms else "on battery (first seen on this run)"
+        if crit:
+            self.add(Finding("critical", f"battery:{since}", "Battery critical",
+                             f"{pct:.0f} % left, {seen} — plug the charger in now: at 5 % Windows hibernates and every "
+                             f"system stops (critical below {m.battery_critical_pct} %)"))
+        else:
+            self.add(Finding("warn", f"battery:{since}", "Running on battery",
+                             f"the charger is unplugged: {seen}, {pct:.0f} % left — plug it in (warning after "
+                             f"{m.on_battery_warn_min} min on battery or below {m.battery_warn_pct} %, critical below "
+                             f"{m.battery_critical_pct} %)"))
+
+    def _commit_charge(self) -> None:
+        """Committed memory (RAM + page file reserved by programs) above ``commit_warn_pct`` of the commit limit: at
+        the limit Windows refuses allocations and services die with MemoryError, whatever the free RAM says."""
+        c = _commit()
+        if not c:
+            return
+        used, limit = c
+        pct = used / limit * 100
+        lim = self.base.monitor.commit_warn_pct
+        if pct > lim:
+            self.add(Finding("warn", "commit", "High memory commit",
+                             f"{used / 2**30:.1f} of {limit / 2**30:.1f} GB committed ({pct:.0f} %, warning above "
+                             f"{lim:g} %) — at 100 % Windows refuses new memory and services crash; close programs "
+                             "(a browser, the desktop app) or enlarge the page file"))
+
+    def _recorder(self) -> None:
+        """The P1.12 price recorder (outside the supervisors; the TradingSystemOps-Recorder task keeps it alive): its
+        ``status.json`` not rewritten for ``recorder_stall_min`` (0 = not watched) while the owner has not stopped it
+        (no ``STOP`` file). No status file (it never ran here) or one caught half-written: nothing. It dies at every
+        suspend and its keep-alive needs up to 10 min to bring back a flush, so the two-run rule applies while the
+        machine settles."""
+        lim = self.base.monitor.recorder_stall_min
+        if lim <= 0:
+            return
+        r = hr.recorder_state(self.base, self.now)
+        if r is None or r["stop"] or not r["readable"]:
+            return
+        items: dict[str, str] = {}
+        if r["age_min"] > lim:
+            alive = {True: "alive but not flushing (hung): create its STOP file, wait for it to exit, then "
+                           "scripts\\start_recorder.bat",
+                     False: "not running: the TradingSystemOps-Recorder task restarts it every 5 min while MT5 runs "
+                            "(install_operator_tasks.bat; by hand: scripts\\start_recorder.bat)",
+                     None: "its state is unknown: scripts\\start_recorder.bat"}[r["alive"]]
+            items["stall"] = (f"last flush {r['age_min']:.0f} min ago ({iso(r['updated_ms'])}, limit "
+                              f"{lim} min); pid {r['pid']} {alive}")
+        for text in self._hold("machine", "recorder", items, self.machine_settle).values():
+            self.add(Finding("warn", "recorder", "Price recorder stalled", f"the P1.12 price recorder's {text}"))
+
     def _vpn(self) -> None:
         names = self.base.monitor.vpn_adapter_names
         prev = self.prev.get("vpn") or {}
@@ -968,15 +1097,45 @@ class Monitor:
         lock.release()
         return False
 
+    def _launches(self) -> list[int]:
+        """Diagnosis sessions started within ``DIAGNOSE_KEEP_MS`` (the per-UTC-day budget). A state from before the
+        budget has no list: its ``last_diagnose_ms`` counts."""
+        raw = self.prev.get("diagnose_launches")
+        if not isinstance(raw, list):
+            raw = [self.prev.get("last_diagnose_ms")]
+        return sorted(int(t) for t in raw if _num(t) is not None and self.now - int(t) < DIAGNOSE_KEEP_MS)
+
+    def _gauge_block(self) -> str | None:
+        """Why the usage gauge holds a diagnosis back, None when it does not: its level above
+        ``diagnose_max_gauge_level``, or a gauge that cannot be read — a billed session on the shared Max plan starts
+        only while the plan's use is known to be low."""
+        m = self.base.monitor
+        try:
+            level, reason = _gauge_level(self.base, self.chosen, self.now)
+        except Exception as exc:  # noqa: BLE001 — unknown = held back
+            level, reason = None, f"{type(exc).__name__}: {exc}"[:200]
+        if level is None:
+            return f"usage gauge unreadable ({reason}) — no billed diagnosis while the plan's use is unknown"
+        if level > m.diagnose_max_gauge_level:
+            return (f"usage gauge at level {level}, above monitor.diagnose_max_gauge_level "
+                    f"{m.diagnose_max_gauge_level}" + (f" ({reason})" if reason else ""))
+        return None
+
     def _diagnose(self) -> dict:
-        """At most one Claude diagnosis per ``diagnose_every_hours``, for this run's new warnings. One put off because
-        an operator session holds the lock (or whose start failed) stays wanted (``diagnose_wanted``): the next runs
-        retry it for the findings that persist, for ``WANTED_MS``, although those are no longer new."""
+        """At most one Claude diagnosis per ``diagnose_every_hours``, for this run's new warnings, and within the
+        budget (Phase 5 A4): at most ``diagnose_max_per_day`` starts per UTC day (``diagnose_launches``), none while
+        the usage gauge is above ``diagnose_max_gauge_level``. A budget refusal is final for those findings (not
+        wanted: a new day or a lower gauge serves the next new warning). One put off because an operator session
+        holds the lock (or whose start failed) stays wanted (``diagnose_wanted``): the next runs retry it for the
+        findings that persist, for ``WANTED_MS``, although those are no longer new."""
         m = self.base.monitor
         last = int(self.prev.get("last_diagnose_ms") or 0)
         self.state["last_diagnose_ms"] = last or None
         if self.prev.get("diagnose"):
             self.state["diagnose"] = self.prev["diagnose"]
+        launches = self._launches()
+        self.state["diagnose_launches"] = launches
+        today = [t for t in launches if t // MS_PER_DAY == self.now // MS_PER_DAY]
         wanted = self.prev.get("diagnose_wanted") if isinstance(self.prev.get("diagnose_wanted"), dict) else {}
         since = int(wanted.get("ts") or 0)
         again = set(wanted.get("findings") or []) if self.now - since < WANTED_MS else set()
@@ -1002,29 +1161,38 @@ class Monitor:
         elif last and self.now - last < m.diagnose_every_hours * MS_PER_HOUR:
             why = (f"last diagnosis {(self.now - last) / MS_PER_HOUR:.1f} h ago "
                    f"(every {m.diagnose_every_hours:g} h at most)")
+        elif len(today) >= m.diagnose_max_per_day:
+            why = (f"daily budget used: {len(today)} diagnosis session(s) started today (UTC), "
+                   f"monitor.diagnose_max_per_day {m.diagnose_max_per_day}")
         elif not RUN_SESSION.exists():
             why = f"{RUN_SESSION} not found"
-        elif self._session_running():               # it would end 'busy' at once; the next run (15 min) retries
-            return put_off("a review session is running")
+        else:
+            why = self._gauge_block()
+            if why is None and self._session_running():     # it would end 'busy' at once; the next run retries
+                return put_off("a review session is running")
         if why:
+            if why.startswith(("daily budget", "usage gauge")):
+                log.info("diagnosis held back: %s", why)
             return {"launched": False, "why": why}
         reason = "; ".join(f"{f.level}: {f.title} — {f.text}" + (f" ({f.action})" if f.action else "") for f in new)
         cmd = [control.console_python(), str(RUN_SESSION), "--kind", "diagnose", "--reason",
                " ".join(reason.split())[:1500]]          # one line (a command-line argument), never empty
         # persisted BEFORE the start: a state that cannot be saved would start a session on every run
-        kept = (self.state.get("last_diagnose_ms"), self.state.get("diagnose"))
+        kept = (self.state.get("last_diagnose_ms"), self.state.get("diagnose"), self.state.get("diagnose_launches"))
         self.state["last_diagnose_ms"] = self.now
         self.state["diagnose"] = {"ts": self.now, "pid": None, "findings": [f.key for f in new]}
+        self.state["diagnose_launches"] = launches + [self.now]
         try:
             save_state(self.path, self.state)
         except OSError as exc:
-            self.state["last_diagnose_ms"], self.state["diagnose"] = kept
+            self.state["last_diagnose_ms"], self.state["diagnose"], self.state["diagnose_launches"] = kept
             log.warning("diagnosis session not started: %s could not be written: %s", self.path, exc)
             return {"launched": False, "why": "state not persisted"}
         try:
             proc = _spawn(cmd, ROOT)
         except OSError as exc:
-            self.state["last_diagnose_ms"], self.state["diagnose"] = kept     # the next run tries again
+            # the next run tries again: a start that failed does not use up the day's budget
+            self.state["last_diagnose_ms"], self.state["diagnose"], self.state["diagnose_launches"] = kept
             log.warning("diagnosis session could not be started: %s", exc)
             return put_off(f"start failed: {exc}")
         self.state["diagnose"]["pid"] = getattr(proc, "pid", None)
