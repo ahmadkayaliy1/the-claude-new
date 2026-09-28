@@ -1,6 +1,7 @@
 @echo off
-rem Restart every pair's system: stop each one, then start_all.bat. The all-pairs system is not touched (to switch
-rem from it to one system per pair use switch_to_pairs.bat).
+rem Restart every pair's system: back up the state (tools\backup_state.py; a failure only warns), stop each one, then
+rem start_all.bat. The all-pairs system is not touched (to switch from it to one system per pair use
+rem switch_to_pairs.bat).
 setlocal
 cd /d "%~dp0.."
 set "PY=.venv\Scripts\python.exe"
@@ -16,6 +17,15 @@ if errorlevel 1 (
     set "RC=1"
     goto end
 )
+if not exist "tools\backup_state.py" goto nobackup
+echo ===== backing up the state first (backups\, logs\backup.jsonl)
+"%PY%" tools\backup_state.py --quiet
+set "BRC=%ERRORLEVEL%"
+if "%BRC%"=="0" (echo backup done) else (echo WARNING: the backup ended with exit code %BRC% - restarting anyway. See logs\backup.jsonl)
+goto stopping
+:nobackup
+echo WARNING: tools\backup_state.py not found - no backup before the restart
+:stopping
 set "N=0"
 for /f "usebackq delims=" %%P in (`%PY% -m tradingsystem config --instances`) do (
     set /a N+=1 >nul

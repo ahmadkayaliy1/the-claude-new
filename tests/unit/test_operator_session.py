@@ -505,7 +505,8 @@ def test_install_autostart_never_matches_the_operator_task_names():
 
     ops = ROOT / "scripts" / "install_operator_tasks.ps1"
     names = re.findall(r'"(TradingSystemOps-[A-Za-z]+)"', ops.read_text(encoding="ascii"))
-    assert sorted(set(names)) == ["TradingSystemOps-Monitor", "TradingSystemOps-ReviewDaily", "TradingSystemOps-ReviewWeekly"]
+    assert sorted(set(names)) == ["TradingSystemOps-Backup", "TradingSystemOps-Monitor", "TradingSystemOps-Recorder",
+                                  "TradingSystemOps-ReviewDaily", "TradingSystemOps-ReviewWeekly"]   # Phase 5 A2/A3
     assert not any(matched(n) for n in names)
     assert matched("TradingSystem-Review-Daily") and matched("TradingSystem-BTCUSDT")   # the filter itself works
 

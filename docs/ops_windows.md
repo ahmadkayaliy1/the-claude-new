@@ -382,9 +382,12 @@ normal priority, and as soon as possible after a missed run:
 - **Verify:** `scripts\check_ops.bat`, or `taskschd.msc` → Task Scheduler Library → `TradingSystem*`.
 - **Remove:** `scripts\uninstall_autostart.bat` (removes every `TradingSystem*` task, per-pair ones too). Stop
   the system first with `stop.bat` (or `stop_all.bat`).
-- **The Phase 4 tasks are separate** (`TradingSystemOps-Monitor`, `-ReviewDaily`, `-ReviewWeekly`, §8):
+- **The operator tasks are separate** (`TradingSystemOps-Monitor`, `-ReviewDaily`, `-ReviewWeekly`, §8; since
+  Phase 5 also `TradingSystemOps-Backup`, daily 03:30 UTC, and `TradingSystemOps-Recorder`, every 5 min, §9):
   `scripts\install_operator_tasks.bat` registers them, `scripts\install_operator_tasks.bat -Uninstall` removes them.
-  `uninstall_autostart.bat` leaves them alone, and `check_ops.bat` lists them too.
+  `uninstall_autostart.bat` leaves them alone, and `check_ops.bat` lists them too. The recorder keep-alive is an
+  operator task on purpose, although the plan named it `TradingSystem-Recorder` in `install_autostart.ps1`: that
+  script deletes every `TradingSystem-*` task it does not recognise as a pair when the layout changes.
 
 ### 6.2 Stop, start and autostart
 
@@ -414,6 +417,8 @@ restart, the autostart brings everything back once you sign in.
 | `logs\supervisor-ctl.jsonl` | `start.bat`, `stop.bat` and autostart actions. |
 | `logs\<service>.jsonl` | The service's own log. An uncaught exception appears as `uncaught <Type>` with the full traceback. |
 | `logs\<service>.stderr.log` | Raw stdout/stderr of the service: errors before logging started, native crash dumps (faulthandler), library warnings. Rolled to `.1`/`.2` at a restart above 5 MB. **Not redacted**, so do not share it publicly. |
+| `logs\backup.jsonl`, `backups\` | The state backups (§9): each zip written, verified or restored, and why one failed. |
+| `logs\recorder-keepalive.jsonl`, `data\research\price_matching\keepalive.json` | The price recorder keep-alive (§9.5): starts, failed starts, a crash loop, a recorder that stopped flushing. |
 | Dashboard → events | `supervisor:all` system_suspend / clock_jump / stall; `supervisor:<service>` started / exited / killed / heartbeat_unreadable; `supervisor:mt5` terminal_started / terminal_in_job. |
 
 **Exit codes in `exited` events:**
@@ -505,3 +510,150 @@ has no monitor or session runner), then remove every Phase 4 key from `config\co
 `adaptive`, `notify`, `monitor`, `operator`, and the same keys under `instances.*.overrides`) — the older code refuses
 unknown keys and no service would start. The databases need nothing: the older code ignores the new tables and
 columns. `data\adaptive\`, `data\reviews\` and `data\shared\{monitor_state,notify_state}.json` can stay.
+
+---
+
+## 9. Backup and restore (Phase 5)
+
+The code is on the private remote (`origin`, H29). What exists **only on this laptop** is the state, and
+`tools\backup_state.py` puts it into one zip. It never copies `.env`: the secrets come from your password manager.
+
+### 9.1 What is in a backup
+
+| In the zip | Not in the zip |
+|---|---|
+| every system's `app.db` (`data\instances\<PAIR>\app.db`, and the all-pairs system's `data\app.db` kept since the switch), with the rows still in its WAL | `.env` (never; a `.env*` file anywhere is skipped) |
+| the shared AI ledger `data\shared\ai_usage.db` | logs (`logs\`), every `*stderr*` file (for example `data\reviews\*.cli.stderr.txt`) |
+| `data\shared\account_peak.json` and `.bak` (the account high-water mark and a drawdown stop) | market data: `data\hot`, `data\cold`, the Vision cache (downloaded again) |
+| `config\config.local.yaml` | `data\research` (568 MB today; the recorder's parquet cannot be recorded again — copy it by hand if you want to keep it) |
+| `data\adaptive\**` (the tuning overlay), `data\reviews\**` (packs and session results) | any single file above 20 MB (listed as skipped in the manifest) |
+| `data\shared\monitor_state.json`, `notify_state.json`, `proposals.jsonl` | kill-switch files, `STOP_ALL`, `run\` (the running systems' own flags) |
+| the Claude CLI capability file (`data\shared\cli_capabilities.json`, or its old place in `%TEMP%\tradingsystem-claude-code`) | |
+
+- **Databases are copied live** with SQLite's backup API from a read-only connection: a consistent snapshot while the
+  systems keep writing, including the rows still in the `-wal` file. The copy is one self-contained file, checked
+  (`integrity_check`) and its rows counted.
+- **`manifest.json`** inside the zip lists every file with its size and SHA-256, the integrity result and the row
+  count of every table of each database, what was skipped and why, the git commit and the config hash.
+
+### 9.2 When and where
+
+- **Every day at 03:30 UTC** by the task `TradingSystemOps-Backup` (`pythonw tools\backup_state.py --quiet`, time
+  limit 30 min), registered by `scripts\install_operator_tasks.bat` (§6.1, §8). A missed run (laptop off) starts as
+  soon as possible.
+- **Before every `scripts\restart_all.bat`**: it runs one before it stops the systems. A failed backup prints
+  `WARNING: the backup ended with exit code N` and the restart goes on.
+- **By hand**: `.venv\Scripts\python.exe tools\backup_state.py` (`--dry-run` lists what it would copy, writes nothing).
+- **Where**: `backups\<UTC stamp>.zip` in the project folder (git-ignored). The newest 14 are kept (`backup.keep`); older
+  ones are deleted. Another drive: `backup: {dir: "D:/ts-backups"}` in `config\config.local.yaml` (no restart: the
+  tool reads the config at every run). `backup: {enabled: false}` turns the backups off (a run then does nothing).
+- **A backup whose copy failed** is kept as `<stamp>.incomplete.zip` (exit code 1, the reason in `logs\backup.jsonl`).
+  It is never deleted by the rotation and never used by default; delete it yourself once you know why.
+- **Copy the newest zip off the laptop once a week** (a USB stick or a private cloud folder): `backups\` is on the same
+  disk as everything else. The zip has no password or key, but it does contain your MT5 login number
+  (`account_peak.json`) and your trading history: keep it private. This replaces H29's weekly manual state copy.
+- Exit codes: 0 done (also: disabled, `--dry-run`), 1 failed, 2 wrong arguments, 3 the config could not be read,
+  4 another backup was running (nothing done), 5 a restore was refused.
+
+### 9.3 Check a backup
+
+```bat
+.venv\Scripts\python.exe tools\backup_state.py --verify
+.venv\Scripts\python.exe tools\backup_state.py --verify backups\20260928T033000Z.zip
+```
+
+Without a file name it checks the newest backup. It unpacks the zip into a temporary folder, compares every file with
+the manifest (size and SHA-256), runs `integrity_check` on every database and compares its row counts, and prints
+the `ai_decisions` and `ai_usage` rows per database. Exit code 0 = good, 1 = something is wrong (every problem is
+printed).
+
+### 9.4 Restore
+
+The systems must be stopped: the restore refuses while any supervisor runs on the target data folder (their
+single-instance locks, `supervisor.json`, and the command lines of older builds).
+
+```bat
+scripts\stop_all.bat
+.venv\Scripts\python.exe tools\backup_state.py --verify backups\<stamp>.zip
+.venv\Scripts\python.exe tools\backup_state.py --restore backups\<stamp>.zip --target data --config-dir config --overwrite
+scripts\start_all.bat
+```
+
+- The zip is verified again first; a zip that does not verify is never restored.
+- **Without `--overwrite`** it refuses as soon as one of the files exists (it lists them). **With `--overwrite`** every
+  file it replaces is moved aside to `<name>.pre-restore-<stamp>` first, nothing is deleted. For a database its
+  `-wal` and `-shm` files are moved aside too (an old WAL next to the restored database would be replayed into it).
+- **Leave out `--config-dir config`** to keep your current `config\config.local.yaml` (the output says it was not
+  restored).
+- **The account peak is never rolled back:** when `data\shared\account_peak.json` (or its `.bak`) exists, both stay as
+  they are, even with `--overwrite`. The high-water mark only rises and a drawdown stop that tripped after the backup
+  must survive the restore (`scripts\reset_drawdown_stop.bat` is the only way to re-arm trading). On a fresh
+  machine (no peak file yet) the backup's file is restored.
+- `.env` is never written. A zip with a file outside `data\`, `config\config.local.yaml` and the capability file
+  is treated as damaged.
+- Afterwards: `scripts\status_all.bat`, `.venv\Scripts\python.exe tools\health_report.py --hours 1`, the dashboard.
+  Positions and the account history live at the broker; the systems read them again at the start.
+
+**Rehearsed on 2026-09-28** from the Phase 5 worktree: a backup of production, read-only (`--root C:\the_claude_new
+--dest <scratch>`), while the three pair systems and the recorder ran, then `--verify`, then `--restore` into a
+scratch data folder:
+
+| Step | Time (inside the tool / whole command) | Result |
+|---|---|---|
+| backup | 0.5–0.7 s / 1.7 s | 21 files, zip 2.0 MB (2,053,493 bytes); 2 `*.cli.stderr.txt` files skipped |
+| verify | 0.1–0.2 s / 1.3 s | 5 databases `integrity_check` ok, every row count equal to the manifest |
+| restore | 5.2–5.6 s / 6.7 s (≈ 5 s of it is the scan for running supervisors) | 21 files; `ai_decisions` BTCUSDT 77, ETHUSDT 73, XAUUSD 5, all-pairs 52; `ai_usage` 147 — the same as production at that minute (the 147 ledger rows were all still in the WAL) |
+
+A restore aimed at the live data folder (`--target C:\the_claude_new\data`) was refused, as it must be: "a supervisor
+runs on C:\the_claude_new\data: BTCUSDT (single-instance lock held), ETHUSDT …, XAUUSD …".
+
+### 9.5 The price recorder keep-alive
+
+The P1.12 recorder (`research\price_matching\recorder.py`, H5/P7.1 need 72 h of it) stops at every sleep and shutdown.
+The task `TradingSystemOps-Recorder` runs `pythonw tools\recorder_keepalive.py --quiet` every 5 minutes (time limit
+4 min). Each run:
+
+1. `data\research\price_matching\STOP` exists → nothing. That is how you stop the recorder; the keep-alive never
+   removes the file. `scripts\start_recorder.bat` removes it and starts the recorder again.
+2. The MT5 terminal is not running → nothing. The recorder would start the terminal itself as its own child; our
+   processes never start MT5 (§5).
+3. A recorder is already running → nothing, so there are never two. A recorder that runs but has not written
+   `status.json` for 15 minutes is reported once in `logs\recorder-keepalive.jsonl` and left alone: stop it with the
+   STOP file, wait until it has exited, then run `start_recorder.bat`.
+4. It started the recorder 3 times in 60 minutes and none of them flushed → it stops trying (logged) until the hour
+   has passed: look at `logs\recorder.jsonl` and `logs\recorder-mt5.jsonl`.
+5. Otherwise it starts the recorder hidden (no window), with the same arguments as `start_recorder.bat`, outside the
+   task, and checks a few seconds later that it still runs.
+
+The outcome of the last run is in `data\research\price_matching\keepalive.json`. To turn the keep-alive off, disable
+the task in Task Scheduler (or `install_operator_tasks.bat -Uninstall`, which removes all five operator tasks);
+creating the STOP file is enough to keep the recorder down.
+
+### 9.6 Rebuild from zero (a new or reinstalled Windows machine)
+
+1. **Install** Python 3.12 (python.org, 64-bit, "Add to PATH"), Git, the Claude Code CLI, and MetaTrader 5 in
+   `C:\Program Files\MetaTrader 5` (the path in `config\config.yaml`). Log into the demo account once with "Save
+   password" (§5).
+2. **Clone the code** from the private remote:
+   `git clone https://github.com/ahmadkayaliy1/the-claude-new.git C:\the_claude_new`, then `cd /d C:\the_claude_new`.
+3. **Python environment:** `py -3.12 -m venv .venv`, then `.venv\Scripts\pip install -r requirements.lock`, then
+   `.venv\Scripts\pip install -e . --no-deps`.
+4. **Restore the newest backup** (copied back from the USB stick or cloud folder into `backups\`):
+   `.venv\Scripts\python.exe tools\backup_state.py --restore backups\<stamp>.zip --target data --config-dir config`.
+   Nothing runs yet, so neither `--overwrite` nor `stop_all.bat` is needed.
+5. **`.env`** from your password manager: copy `.env.example` to `.env` and fill in the values.
+6. **Sign the Claude CLI in:** `claude auth login` in a terminal (your subscription, not an API key; H11).
+7. **Autostart:** `scripts\install_autostart.bat -AllPairs -DryRun`, read it, then
+   `scripts\install_autostart.bat -AllPairs` (one system per pair, §1a, §6.1). Say `-AllPairs` explicitly: the
+   restored data has no record that the pairs were switched, and without an option the script would pick the
+   all-pairs system on a fresh machine.
+8. **Operator tasks:** `scripts\install_operator_tasks.bat -DryRun`, then `scripts\install_operator_tasks.bat`.
+9. **Start and check:** `scripts\start_all.bat`, then `scripts\check_ops.bat` (fix every `FIX`: power, Wi-Fi, time,
+   §2–§4) and `scripts\status_all.bat`.
+
+### 9.7 Going back to the code before Phase 5
+
+Remove the two tasks while the Phase 5 code is still checked out (the older installer does not know them):
+`scripts\install_operator_tasks.bat -Uninstall`; after going back, `scripts\install_operator_tasks.bat` registers the
+three Phase 4 tasks again. Remove a `backup:` block from `config\config.local.yaml` (the older code refuses unknown
+sections). `backups\` and `keepalive.json` can stay.

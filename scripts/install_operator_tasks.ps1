@@ -1,24 +1,31 @@
 <#
 .SYNOPSIS
-    Registers the Phase 4 operator tasks in Task Scheduler (H19). YOU run it, once, from C:\the_claude_new:
+    Registers the operator tasks in Task Scheduler (Phase 4: H19; Phase 5: backup + recorder keep-alive, H26a).
+    YOU run it, from C:\the_claude_new (again after a merge that adds a task - it re-registers all of them):
         scripts\install_operator_tasks.bat -DryRun      (look first)
         scripts\install_operator_tasks.bat              (register)
         scripts\install_operator_tasks.bat -Uninstall   (remove them again)
 
 .DESCRIPTION
-    Three tasks for the current Windows account (normal rights, "run only when user is logged on": the Claude CLI
-    sign-in lives in your user profile). Details: docs\operator_sessions.md, docs\monitoring.md.
+    Five tasks for the current Windows account (normal rights, "run only when user is logged on": the Claude CLI
+    sign-in lives in your user profile). Details: docs\operator_sessions.md, docs\monitoring.md, docs\ops_windows.md.
 
     TradingSystemOps-Monitor       every 15 minutes: pythonw tools\monitor.py --quiet (no AI; writes only kill
                                    switch files and its state; may start a diagnosis session)
     TradingSystemOps-ReviewDaily   04:30 UTC every day: tools\operator\run_session.ps1 -Kind daily (Claude, ~30 k tokens)
     TradingSystemOps-ReviewWeekly  Sunday 06:00 UTC: tools\operator\run_session.ps1 -Kind weekly
+    TradingSystemOps-Backup        03:30 UTC every day: pythonw tools\backup_state.py --quiet (no AI; a zip of the
+                                   state in backups\, the newest backup.keep kept; docs\ops_windows.md section 9)
+    TradingSystemOps-Recorder      every 5 minutes: pythonw tools\recorder_keepalive.py --quiet (starts the P1.12 price
+                                   recorder when the MT5 terminal runs, no STOP file exists and no recorder runs)
 
     The names are deliberately NOT "TradingSystem-...": install_autostart.ps1 treats every TradingSystem-* task
-    (except TradingSystem-MT5) as a per-pair keep-alive and would delete them when the layout changes.
-    The review times are set in UTC (StartBoundary ending in "Z" = synchronized across time zones), so they do not
-    move with daylight saving time; the script reads the stored StartBoundary back to verify it.
-    Time limits: monitor 10 min; daily review 130 min, weekly review 190 min. The review limits are only a backstop
+    (except TradingSystem-MT5) as a per-pair keep-alive and would delete them when the layout changes (that is why
+    the recorder keep-alive lives here and not in install_autostart.ps1).
+    The review and backup times are set in UTC (StartBoundary ending in "Z" = synchronized across time zones), so they
+    do not move with daylight saving time; the script reads the stored StartBoundary back to verify it.
+    Time limits: monitor 10 min; recorder keep-alive 4 min; backup 30 min; daily review 130 min, weekly review 190 min.
+    The review limits are only a backstop
     (a hung runner): a session ends itself at operator.daily_timeout_min / weekly_timeout_min (config, default 20 / 40),
     and these limits lie 10 min beyond the largest value the config accepts (120 / 180), so the config's own deadline
     always governs and raising *_timeout_min needs no re-install. -DailyLimitMinutes / -WeeklyLimitMinutes override
@@ -29,7 +36,7 @@
 .PARAMETER DryRun
     Show what would be registered or removed, change nothing.
 .PARAMETER Uninstall
-    Remove the three tasks.
+    Remove the five tasks.
 #>
 [CmdletBinding()]
 param(
@@ -42,7 +49,11 @@ param(
     [string]$WeeklyDay = "Sunday",
     [int]$MonitorLimitMinutes = 10,
     [int]$DailyLimitMinutes = 130,
-    [int]$WeeklyLimitMinutes = 190
+    [int]$WeeklyLimitMinutes = 190,
+    [string]$BackupUtc = "03:30",
+    [int]$BackupLimitMinutes = 30,
+    [int]$RecorderMinutes = 5,
+    [int]$RecorderLimitMinutes = 4
 )
 $ErrorActionPreference = "Stop"
 
@@ -58,7 +69,10 @@ $py = Join-Path $root ".venv\Scripts\python.exe"
 $pyw = Join-Path $root ".venv\Scripts\pythonw.exe"
 $monitorPy = Join-Path $root "tools\monitor.py"
 $sessionPs1 = Join-Path $root "tools\operator\run_session.ps1"
-$names = @("TradingSystemOps-Monitor", "TradingSystemOps-ReviewDaily", "TradingSystemOps-ReviewWeekly")
+$backupPy = Join-Path $root "tools\backup_state.py"
+$recorderPy = Join-Path $root "tools\recorder_keepalive.py"
+$names = @("TradingSystemOps-Monitor", "TradingSystemOps-ReviewDaily", "TradingSystemOps-ReviewWeekly",
+    "TradingSystemOps-Backup", "TradingSystemOps-Recorder")
 # the names the spec text used first; they collide with install_autostart.ps1's per-pair pattern - removed if found
 $legacy = @("TradingSystem-Monitor", "TradingSystem-Review-Daily", "TradingSystem-Review-Weekly")
 
@@ -110,7 +124,9 @@ $problems = @()
 foreach ($f in $py, $pyw, $sessionPs1) {
     if (-not (Test-Path $f)) { $problems += "missing: $f" }
 }
-if (-not (Test-Path $monitorPy)) { $problems += "missing: $monitorPy (the monitor task would fail until it exists)" }
+foreach ($f in $monitorPy, $backupPy, $recorderPy) {
+    if (-not (Test-Path $f)) { $problems += "missing: $f (its task would fail until it exists)" }
+}
 $limitNotes = @()
 foreach ($lim in @(@{ kind = "daily"; minutes = $DailyLimitMinutes }, @{ kind = "weekly"; minutes = $WeeklyLimitMinutes })) {
     $floor = $ConfigMaxMinutes[$lim.kind] + $MarginMinutes
@@ -124,6 +140,7 @@ if ($problems.Count -and -not $DryRun) {
 }
 $dailyAt = Get-NextUtc $DailyUtc ""
 $weeklyAt = Get-NextUtc $WeeklyUtc $WeeklyDay
+$backupAt = Get-NextUtc $BackupUtc ""
 $fmt = "yyyy-MM-dd'T'HH:mm:ss'Z'"
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $legacyPresent = @($legacy | Where-Object { Test-Task $_ })
@@ -133,6 +150,8 @@ Write-Host "account : $user (interactive, not elevated)"
 Write-Host ("task    : {0} -> {1} `"{2}`" --quiet (every {3} min, limit {4} min)" -f $names[0], $pyw, $monitorPy, $MonitorMinutes, $MonitorLimitMinutes)
 Write-Host ("task    : {0} -> powershell -File `"{1}`" -Kind daily (daily {2} UTC, first {3}, limit {4} min)" -f $names[1], $sessionPs1, $DailyUtc, $dailyAt.ToString($fmt), $DailyLimitMinutes)
 Write-Host ("task    : {0} -> powershell -File `"{1}`" -Kind weekly ({2} {3} UTC, first {4}, limit {5} min)" -f $names[2], $sessionPs1, $WeeklyDay, $WeeklyUtc, $weeklyAt.ToString($fmt), $WeeklyLimitMinutes)
+Write-Host ("task    : {0} -> {1} `"{2}`" --quiet (daily {3} UTC, first {4}, limit {5} min)" -f $names[3], $pyw, $backupPy, $BackupUtc, $backupAt.ToString($fmt), $BackupLimitMinutes)
+Write-Host ("task    : {0} -> {1} `"{2}`" --quiet (every {3} min, limit {4} min)" -f $names[4], $pyw, $recorderPy, $RecorderMinutes, $RecorderLimitMinutes)
 foreach ($n in $legacyPresent) { Write-Host "remove  : $n (old name - collides with install_autostart.ps1)" }
 foreach ($p in $problems) { Write-Host "WARNING : $p" }
 foreach ($p in $limitNotes) { Write-Host "WARNING : $p" }
@@ -169,17 +188,32 @@ Register-ScheduledTask -TaskName $names[2] -Action $weeklyAction -Trigger $weekl
     -Settings (New-OpsSettings $WeeklyLimitMinutes) -Force `
     -Description "Trading system: weekly Claude review, $WeeklyDay $WeeklyUtc UTC (docs\operator_sessions.md)" | Out-Null
 
+# backup: daily in UTC like the reviews (the zip names are UTC stamps too)
+$backupTrigger = New-ScheduledTaskTrigger -Daily -At $backupAt.ToLocalTime()
+$backupTrigger.StartBoundary = $backupAt.ToString($fmt)
+$backupAction = New-ScheduledTaskAction -Execute $pyw -Argument "`"$backupPy`" --quiet" -WorkingDirectory $root
+Register-ScheduledTask -TaskName $names[3] -Action $backupAction -Trigger $backupTrigger -Principal $principal `
+    -Settings (New-OpsSettings $BackupLimitMinutes) -Force `
+    -Description "Trading system: state backup at $BackupUtc UTC, never .env (docs\ops_windows.md section 9)" | Out-Null
+
+# recorder keep-alive: a repetition that never ends, like the monitor
+$recTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(3) -RepetitionInterval (New-TimeSpan -Minutes $RecorderMinutes)
+$recAction = New-ScheduledTaskAction -Execute $pyw -Argument "`"$recorderPy`" --quiet" -WorkingDirectory $root
+Register-ScheduledTask -TaskName $names[4] -Action $recAction -Trigger $recTrigger -Principal $principal `
+    -Settings (New-OpsSettings $RecorderLimitMinutes) -Force `
+    -Description "Trading system: P1.12 price recorder keep-alive every $RecorderMinutes min (docs\ops_windows.md section 9)" | Out-Null
+
 # ---------------------------------------------------------------- verify (schtasks, not Get-ScheduledTask)
 $bad = 0
 foreach ($name in $names) {
     $q = & { $ErrorActionPreference = "Continue"; schtasks /Query /TN $name /FO LIST 2>$null } | Select-String "Status|Next Run"
     Write-Host ("registered: {0}  {1}" -f $name, (($q | ForEach-Object { $_.Line.Trim() }) -join " | "))
 }
-foreach ($name in $names[1], $names[2]) {
+foreach ($name in $names[1], $names[2], $names[3]) {
     $sb = Get-StartBoundary $name
     if ($sb.EndsWith("Z")) { Write-Host "verified  : $name StartBoundary $sb (UTC)" }
     else { Write-Host "WARNING   : $name StartBoundary '$sb' is not UTC - the run time will move with daylight saving"; $bad++ }
 }
-Write-Host "Done. Check: scripts\check_ops.bat | logs\operator-session.jsonl | data\reviews\ | remove: scripts\install_operator_tasks.bat -Uninstall"
+Write-Host "Done. Check: scripts\check_ops.bat | logs\operator-session.jsonl | data\reviews\ | backups\ | logs\recorder-keepalive.jsonl | remove: scripts\install_operator_tasks.bat -Uninstall"
 if ($bad) { exit 1 }
 exit 0
