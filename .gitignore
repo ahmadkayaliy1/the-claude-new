@@ -39,3 +39,4 @@ Thumbs.db
 
 # agent worktrees (Claude Code)
 .claude/worktrees/
+backups/                 # tools/backup_state.py (Phase 5 A2)

@@ -15,6 +15,7 @@ storage:                             # D-020: SQLite hot window, then daily Parq
   hot_days: {agg_trades: 2, ticks: 3, book_ticker: 2, liquidations: 30, depth: 30}
   rollover_grace_hours: 2
   min_free_disk_gb: 10
+  cold_archive_min_free_gb: 2        # the live writers' daily cold rollover waits below this (the hot store keeps the rows)
 
 logging:
   level: INFO
@@ -29,20 +30,12 @@ supervisor:                          # `run all` (P5.1/P5.3) — docs/ops_window
   child_log_max_bytes: 5242880       # logs/<service>.stderr.log (child stdout/stderr) rolled at (re)start above this
   child_log_backups: 2
 
-resources:
+resources:                           # SQLite page cache per store and the Vision CSV parse block (P5.2)
   low:
-    duckdb_memory_mb: 256
-    duckdb_threads: 1
     sqlite_cache_mb: 8
-    engine_cycle_in_subprocess: true
-    vision_download_concurrency: 1
     parse_chunk_rows: 200000
   standard:
-    duckdb_memory_mb: 512
-    duckdb_threads: 2
     sqlite_cache_mb: 16
-    engine_cycle_in_subprocess: false
-    vision_download_concurrency: 2
     parse_chunk_rows: 500000
 
 mt5:
@@ -204,6 +197,10 @@ ai:
   review_floor_minutes: 5              # next_review price/candle triggers: once per decision, >= this after the last call
   max_backoff_minutes: 120             # spacing doubles after each failed cycle of a pair, up to this
   cycle_deadline_s: 600                # an AI cycle is cut off after this (unfinished pairs stored as 'error')
+  skip_closed_market: true             # Phase 5: no trader call while the execution market is closed and nothing is open
+  transient_retry_s: 60                # OAuth refresh race / 403 "Request not allowed": one retry after this (0 = off)
+  quota_reserve_share: 0.4             # keep 40 % of daily_calls_per_pair for the busy hours below (0 = no reserve)
+  quota_reserve_hours_utc: [12, 21]    # [start, end) UTC: London afternoon + New York
   daily_calls_per_pair: 40             # D-043: every attempt counts (first call, repair, escalation)
   event_calls_per_day: 6               # calls woken by a fill / close / outcome, per pair and day
   screen_timeframe: 5m                 # Python screens every 5m close; Claude only on change (new setup / condition / event)
@@ -361,9 +358,25 @@ monitor:                               # Phase 4: tools/monitor.py every 15 min 
   free_ram_warn_mb: 300
   snapshot_build_warn_ms: 3000         # engine payload build time (5-min screening)
   vpn_adapter_names: []                # e.g. ["Local Area Connection 4"] (ExpressVPN TUN)
-  diagnose_enabled: true               # a warning starts a Claude diagnosis session (at most every 3 h)
+  diagnose_enabled: true               # a warning starts a Claude diagnosis session (at most every 3 h) …
+  diagnose_max_per_day: 2              # … and at most this many per UTC day (shared Max plan)
+  diagnose_max_gauge_level: 0          # … and none while the usage gauge is above this level
+  battery_warn_pct: 30                 # on battery below this → warn; below battery_critical_pct → critical
+  battery_critical_pct: 15
+  on_battery_warn_min: 5               # on battery longer than this → warn (the charger is out)
+  commit_warn_pct: 85                  # committed memory above this share of the commit limit → warn
+  recorder_stall_min: 30               # the P1.12 price recorder's last flush older than this → warn (0 = off)
 
 operator:                              # Phase 4: Claude review sessions from Task Scheduler (tools/operator, H19)
   daily_max_turns: 30
   weekly_max_turns: 40
   diagnose_max_turns: 12
+
+backup:                                # Phase 5 A2: tools/backup_state.py (daily task + restart_all.bat); never .env
+  enabled: true
+  dir: backups                         # relative to the project root (git-ignored) or an absolute path
+  keep: 14
+
+evaluation:                            # the demo evaluation window (D-046/D-047): tools/demo_report.py, go_live_inputs.py
+  demo_start_utc: "2026-09-27T21:50:00Z"   # the Phase 4 restart (H20)
+  demo_days: 5

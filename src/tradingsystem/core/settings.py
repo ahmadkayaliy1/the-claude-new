@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import hashlib
 import json
 import os
@@ -102,6 +103,9 @@ class StorageCfg(_Model):
     rollover_grace_hours: int = 2
     # stop backfills (not live capture) when free disk falls below this
     min_free_disk_gb: float = 10.0
+    # live writers skip the daily cold-archive rollover below this (the hot store keeps the rows; a later day rolls
+    # them once there is room) — Phase 5 A7
+    cold_archive_min_free_gb: float = Field(2.0, ge=0)
 
 
 class LoggingCfg(_Model):
@@ -112,11 +116,9 @@ class LoggingCfg(_Model):
 
 
 class ResourceProfileCfg(_Model):
-    duckdb_memory_mb: int = 512
-    duckdb_threads: int = 2
+    # Phase 5 A7: duckdb_memory_mb, duckdb_threads, engine_cycle_in_subprocess and vision_download_concurrency were
+    # removed — nothing read them (the profiles only size the SQLite cache and the Vision CSV parse blocks)
     sqlite_cache_mb: int = 16
-    engine_cycle_in_subprocess: bool = False
-    vision_download_concurrency: int = 2
     parse_chunk_rows: int = 500_000
 
 
@@ -394,6 +396,14 @@ class AICfg(_Model):
     review_floor_minutes: int = 5           # next_review price/candle triggers: not sooner after the last call
     max_backoff_minutes: int = 120          # per-pair back-off cap after failed cycles (spacing doubles per failure)
     cycle_deadline_s: float = 600.0         # an AI cycle is cut off after this; unfinished pairs stored as 'error'
+    # Phase 5 A5 (D-046): no trader call while the pair's execution market is closed and nothing of the pair is open
+    # or pending (the setup signature still advances, so the reopen does not fire on the closed session's structure)
+    skip_closed_market: bool = True
+    transient_retry_s: float = Field(60.0, ge=0, le=600)   # OAuth refresh race / 403: one retry after this; 0 = off
+    # share of daily_calls_per_pair kept for the busy UTC hours [start, end): outside them a pair may use at most
+    # (1 − share) × cap, so the afternoon sessions keep calls; 0 = no reserve
+    quota_reserve_share: float = Field(0.4, ge=0, le=0.9)
+    quota_reserve_hours_utc: list[int] = Field(default_factory=lambda: [12, 21])
     consensus_providers: list[str] = Field(default_factory=list)
     providers: dict[str, AIProviderCfg]
     budget: AIBudgetCfg = AIBudgetCfg()
@@ -415,6 +425,9 @@ class AICfg(_Model):
         if self.fallback_provider is not None and self.fallback_provider not in self.providers:
             raise ValueError(f"ai.fallback_provider {self.fallback_provider!r} not configured")
         Timeframe.parse(self.screen_timeframe)
+        h = self.quota_reserve_hours_utc
+        if len(h) != 2 or not 0 <= h[0] < h[1] <= 24:
+            raise ValueError("ai.quota_reserve_hours_utc must be [start, end) with 0 <= start < end <= 24")
         return self
 
     @property
@@ -492,11 +505,21 @@ class MonitorCfg(_Model):
     snapshot_build_warn_ms: int = Field(3000, ge=100)   # the engine's payload build (5-min screening cost)
     diagnose_enabled: bool = True                       # a warning or worse starts a Claude diagnosis session …
     diagnose_every_hours: float = Field(3.0, ge=0.5)    # … at most this often
+    # Phase 5 A4: the machine (the outages of 2026-09-26/27 were critical-battery hibernates and shutdowns)
+    battery_warn_pct: int = Field(30, ge=0, le=100)     # on battery and below this → warn …
+    battery_critical_pct: int = Field(15, ge=0, le=100)  # … below this → critical
+    on_battery_warn_min: int = Field(5, ge=1)           # running on battery longer than this → warn (charger out)
+    commit_warn_pct: float = Field(85.0, gt=0, le=100)  # committed memory / commit limit (RAM + page file)
+    recorder_stall_min: int = Field(30, ge=0)           # the P1.12 recorder's last flush older → warn; 0 = not watched
+    diagnose_max_per_day: int = Field(2, ge=0)          # billed diagnosis sessions per UTC day (shared Max plan)
+    diagnose_max_gauge_level: int = Field(0, ge=0, le=2)    # no diagnosis while the usage gauge is above this level
 
     @model_validator(mode="after")
     def _drops(self) -> "MonitorCfg":
         if self.equity_drop_warn_pct >= self.equity_drop_kill_pct:
             raise ValueError("monitor.equity_drop_warn_pct must be below equity_drop_kill_pct")
+        if self.battery_critical_pct > self.battery_warn_pct:
+            raise ValueError("monitor.battery_critical_pct must not be above battery_warn_pct")
         return self
 
 
@@ -513,6 +536,30 @@ class OperatorCfg(_Model):
     weekly_pack_hours: int = Field(168, ge=1, le=720)
     summary_max_chars: int = Field(1500, ge=100, le=4000)
     record_usage: bool = True            # sessions are written to the shared AI ledger (role review / diagnose)
+
+
+class BackupCfg(_Model):
+    """``tools/backup_state.py`` (Phase 5 A2): WAL-consistent copies of the state that exists only on this machine
+    (the pairs' app.db, the shared ledger, the account peak, config.local.yaml, the adaptive overlay, reviews and the
+    monitor/notify state) — never ``.env``. docs/ops_windows.md §9."""
+    enabled: bool = True
+    dir: str = "backups"             # relative to the project root (git-ignored) or absolute (e.g. another drive)
+    keep: int = Field(14, ge=1, le=365)
+
+
+class EvaluationCfg(_Model):
+    """The demo evaluation window (D-046, D-047) read by tools/demo_report.py and tools/go_live_inputs.py."""
+    demo_start_utc: str | None = None    # ISO-8601 UTC, e.g. "2026-09-27T21:50:00Z" (the Phase 4 restart, H20)
+    demo_days: int = Field(5, ge=1, le=90)
+
+    @model_validator(mode="after")
+    def _start(self) -> "EvaluationCfg":
+        if self.demo_start_utc is not None:
+            v = self.demo_start_utc.strip()
+            if not (v.endswith("Z") or v[-6:-5] in "+-"):
+                raise ValueError("evaluation.demo_start_utc must carry a UTC offset (…Z)")
+            dt.datetime.fromisoformat(v.replace("Z", "+00:00"))
+        return self
 
 
 # --------------------------------------------------------------------------- root
@@ -545,6 +592,8 @@ class Settings(_Model):
     notify: NotifyCfg = NotifyCfg()
     monitor: MonitorCfg = MonitorCfg()
     operator: OperatorCfg = OperatorCfg()
+    backup: BackupCfg = BackupCfg()
+    evaluation: EvaluationCfg = EvaluationCfg()
 
     # populated by the loader, not by YAML
     config_hash: str = ""
@@ -701,8 +750,6 @@ def _apply_instance(raw: dict[str, Any], instance: str) -> dict[str, Any]:
     n = max(1, len(out.get("instances") or {}))
     b = out.setdefault("binance", {})
     b["rest_weight_budget_per_min"] = max(300, int(b.get("rest_weight_budget_per_min", 3000)) // n)
-    for prof in (out.get("resources") or {}).values():
-        prof["vision_download_concurrency"] = 1
     return out
 
 
