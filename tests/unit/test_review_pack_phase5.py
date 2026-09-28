@@ -167,7 +167,7 @@ def test_the_weekly_pack_carries_the_go_live_evidence_and_the_daily_does_not(rp,
     weekly = rp.build_pack(base, hours=168, kind="weekly", systems=[s], notes=[], now=now, write=False)
     gl = weekly.data["go_live"]
     assert "error" not in gl, gl
-    assert len(gl["items"]) == 18 and set(gl["summary"]) == {"pass", "FAIL", "n.a."}
+    assert len(gl["items"]) == 19 and set(gl["summary"]) == {"pass", "FAIL", "n.a."}
     assert "## Go-live evidence so far (tools/go_live_inputs.py; thresholds: docs/go_live_checklist.md)" in weekly.md
     assert re.search(r"^- \[(pass|FAIL|n\.a\.)\] the 5 demo days on Phase 4\+ code complete", weekly.md, re.M)
     daily = rp.build_pack(base, hours=24, kind="daily", systems=[s], notes=[], now=now, write=False)

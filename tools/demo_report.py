@@ -1,6 +1,8 @@
 """Demo evaluation report (Phase 5 A8, D-046/D-047): what the demo window showed, per pair and in total.
 
-    python tools/demo_report.py                        → docs/runs/demo.md over settings.evaluation's window
+    python tools/demo_report.py                        → docs/runs/demo.md over settings.evaluation's window (refused
+                                                         in a checkout whose data root holds a system's app.db: there
+                                                         use --print or --out data\\reviews\\demo.md)
     python tools/demo_report.py --since 2026-09-27T21:50:00Z --until 2026-10-02T21:50:00Z --out FILE [--json FILE]
     python tools/demo_report.py --print [--pair ETHUSDT]           → the markdown on stdout, no file written
     python tools/demo_report.py --root C:\\the_claude_new --print   → another checkout's data and logs (a worktree
@@ -22,18 +24,24 @@ in the window (market-open time of its execution instrument only: XAU's weekend 
 Saturday maintenance are excluded through ``core/sessions.py``) lost to a stopped system, a suspend, a killed or
 exited service, ``data_not_ready``, a stale-data skip, ``ai_not_ready``, ``ai_quota``, the subscription's session
 limit, an ``interrupted`` or failed AI call, a ``cycle_error``, or a slot without any 5-min screen in the engine log
-(where the log reaches back); an incident table (every warn/critical monitor finding with its first detection from
-``logs/monitor.jsonl`` and ``data/shared/monitor_state.json``, with the onset the finding names and the detection delay,
-plus suspends, restarts, kills, cycle errors and failed orders); the AI cost per UTC day from the shared ledger
+(where the log reaches back; the first cycle after a reopen, whose decision bar lies in closed time, is never lost:
+the engine waits for its first bar by design); an incident table (every warn/critical monitor finding with its first
+detection from ``logs/monitor.jsonl`` and ``data/shared/monitor_state.json``, with the onset the finding names and the
+detection delay, plus suspends, restarts, kills, cycle errors and failed orders), the supervisors' starts after a run
+that ended without a stop (a shutdown, restart, logoff or crash) and — best effort, read-only — the boots, sleeps and
+shutdowns of the Windows System log; the AI cost per UTC day from the shared ledger
 (calls, tokens raw and gauge-weighted, cache-read share, API-equivalent USD only where ``ai.providers.*.model_prices``
 has a price — the CLI's own figure beside it); the prompt / library / playbook / adaptive / config / git hashes seen;
 the tuning changes; and the sample-size statement. Every number states its n.
 
-Read-only everywhere: SQLite through ``file:…?mode=ro`` URIs, plain file reads, no ledger object (the usage store
-would run DDL); the only write is the report file (and ``--json``). Built to run in < 60 s and < 300 MB on
-production data (the engine logs are streamed, at most ``review_pack.SCREEN_LOG_MAX_BYTES`` per pair; measured
-2026-09-28 on the first demo night: 1.4 s, 68 MB peak). In the production checkout use ``--print`` or ``--out`` under
-the data root: a changed file under ``docs/`` makes the checkout dirty (docs/runs/README.md).
+Read-only everywhere: SQLite through ``file:…?mode=ro`` URIs, plain file reads, one ``wevtutil qe`` of the System
+log (a query, at most :data:`POWER_LOG_TIMEOUT_S`), no ledger object (the usage store would run DDL); the only write is
+the report file (and ``--json``). Built to run in < 60 s and < 300 MB on production data (the engine logs are
+streamed, at most ``review_pack.SCREEN_LOG_MAX_BYTES`` per pair; measured 2026-09-28 on the first demo night: 1.4 s,
+68 MB peak). In the production checkout use ``--print`` or ``--out`` under the data root: a changed file under
+``docs/`` makes the checkout dirty and can block the next ``git merge --ff-only`` (docs/runs/README.md) — the default
+``docs/runs/demo.md`` is refused (exit 3) when this checkout's data root holds a system's ``app.db`` and no ``--root``
+is given.
 ``tools/go_live_inputs.py`` judges the collected data against docs/go_live_checklist.md.
 Exit 0 written/printed, 1 unexpected error, 3 invalid arguments.
 """
@@ -44,8 +52,10 @@ import collections
 import datetime as dt
 import importlib.util
 import json
+import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 import types
@@ -56,7 +66,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from tradingsystem.ai.budget import CANCELLED_PREFIX, USAGE_UNKNOWN_PREFIX  # noqa: E402
-from tradingsystem.core.settings import INSTANCE_ENV, Settings, load_settings  # noqa: E402
+from tradingsystem.core.settings import INSTANCE_ENV, Settings, load_settings, system_state_dirs  # noqa: E402
 from tradingsystem.core.timeutil import MS_PER_DAY, MS_PER_MINUTE, iso, parse_date_spec  # noqa: E402
 from tradingsystem.core.timeutil import now_ms as _now_ms  # noqa: E402
 
@@ -69,6 +79,24 @@ GROUP_GAP_MS = 60 * MS_PER_MINUTE            # events of one kind this close are
 MERGE_GAP_MS = 10 * MS_PER_MINUTE            # the same event in several systems (one machine sleep) is one row
 MONITOR_LOG_MAX_BYTES = 20_000_000
 MT5_LOCK_WAIT_S = 120                        # as the MT5 backfill's history calls (ingest/mt5/backfill.py)
+RESTART_MAX_MS = 5 * MS_PER_MINUTE           # a service's exit/kill → its supervisor restarts it (backoff ≤ 120 s)
+SESSION_END_CODE = "0x40010004"              # a service's exit code when the console session ended (logoff/shutdown)
+SUPERVISOR_GAP_EVENTS = ("system_suspend", "stall", "clock_jump")    # rows only a supervisor that lived on writes
+POWER_LOG_TIMEOUT_S = 10                     # the System log query (measured 0.2 s on the production laptop)
+POWER_LOG_MAX_EVENTS = 500
+POWER_GROUP_MS = 5 * MS_PER_MINUTE           # System log rows of one shutdown / one boot this close are one episode
+# the Windows System log's power rows (read-only query): User32 1074 = a shutdown/restart requested (and by whom);
+# Kernel-General 13/12 = the OS stopped/started (a full shutdown and a cold boot); Kernel-Boot 27 = the boot type (0
+# cold, 1 Fast Startup = a Start-menu "shut down" on this laptop, 2 resume from hibernate); Kernel-Power 42 = entering
+# sleep (TargetState 4 sleep, 5 hibernate, 6 the hybrid shutdown of Fast Startup), 107 = resumed, 41 = rebooted
+# without a clean shutdown
+POWER_QUERY = ("*[System[((Provider[@Name='User32'] and EventID=1074) or "
+               "(Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=41 or EventID=42 or EventID=107)) or "
+               "(Provider[@Name='Microsoft-Windows-Kernel-General'] and (EventID=12 or EventID=13)) or "
+               "(Provider[@Name='Microsoft-Windows-Kernel-Boot'] and EventID=27)) and "
+               "TimeCreated[@SystemTime>='{since}' and @SystemTime<'{until}']]]")
+POWER_EVENT_RE = re.compile(r"<Event[ >].*?</Event>", re.S)
+POWER_COUNTED = ("shutdown", "boot", "sleep")        # what item 11 counts (a resume ends a sleep; 41 marks a boot)
 SESSION_LIMIT_RE = re.compile(r"subscription usage limit|session limit|usage limit", re.I)
 ONSET_RE = re.compile(r"since (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)")
 FINDING_RE = re.compile(r"^\[(warn|critical)\] (.+)$", re.S)
@@ -389,7 +417,10 @@ def availability(con: sqlite3.Connection, sp: Settings, pair: str, since: int, u
                  ledger: list[dict[str, Any]], screen_slots: set[int] | None, screen_from: int | None) -> dict[str, Any]:
     """The share of the pair's market-open 15-min cycles of ``[since, until)`` not lost to any :data:`LOSS_CLASSES`
     (from ``ingestion_events``, ``ai_decisions``, the ledger's session-limit rows and the engine's screen lines);
-    ``lost`` counts the open cycles per class (a cycle may carry several), ``lost_total`` each once."""
+    ``lost`` counts the open cycles per class (a cycle may carry several), ``lost_total`` each once. An open cycle
+    whose decision bar (the 15 minutes before it) lies in closed time — the first cycle after every reopen, XAU's
+    daily and Sunday one — is never lost: the engine waits for its first stored bar by design (no screen line, no
+    ``data_not_ready`` before the next close); ``reopen_waits`` counts them."""
     try:
         cal = pair_calendar(sp, pair)
         cal_name = cal.name
@@ -397,7 +428,8 @@ def availability(con: sqlite3.Connection, sp: Settings, pair: str, since: int, u
         cal, cal_name = None, f"unknown ({type(exc).__name__}: every cycle counted as open)"
     starts = _slots(since, until)
     open_ = [t for t in starts if cal is None or cal.is_open(t)]
-    open_set = set(open_)
+    waits = {t for t in open_ if cal is not None and not cal.is_open(t - SLOT_MS)}
+    open_set = set(open_) - waits                     # the cycles that can be lost
     lost: dict[str, set[int]] = collections.defaultdict(set)
 
     def mark(cls: str, t0: int, t1: int | None = None) -> None:
@@ -464,15 +496,18 @@ def availability(con: sqlite3.Connection, sp: Settings, pair: str, since: int, u
             mark("session_limit", r["ts"])
     if screen_slots is not None and screen_from is not None:
         for t in open_:
-            if t >= screen_from and t not in screen_slots:
+            if t >= screen_from and t not in screen_slots and t in open_set:
                 lost["no_screen"].add(t)
     elif screen_slots is not None:
         notes.append("no engine screen line read: the no_screen class is not measured")
+    if waits:
+        notes.append(f"{len(waits)} first cycle(s) after a reopen not counted as lost: the decision bar lies in "
+                     "closed time, the engine waits for its first stored bar")
     total = set().union(*lost.values()) if lost else set()
     n_open = len(open_)
     return {"calendar": cal_name, "cycles": len(starts), "open_cycles": n_open, "closed_cycles": len(starts) - n_open,
             "lost": {k: len(lost[k]) for k in LOSS_CLASSES if lost.get(k)}, "lost_total": len(total),
-            "share": round(1 - len(total) / n_open, 4) if n_open else None,
+            "share": round(1 - len(total) / n_open, 4) if n_open else None, "reopen_waits": len(waits),
             "screen_log_from": iso(screen_from) if screen_from else None, "notes": notes}
 
 
@@ -485,8 +520,10 @@ def gate_class(check: str, detail: str) -> str:
 
 
 def gate_rejections(con: sqlite3.Connection, pair: str, since: int, until: int) -> dict[str, Any]:
-    """Rejected ideas of the window by class: every failed check of the gate list; a rejection without one (no quote,
-    pair disabled, the order refused after the gate, an exception) is ``not_gated: <reason>``."""
+    """Rejected ideas of the window by class: every failed check of the gate list; an order the backend refused after
+    a passed gate (the executor stores the gate list, all ok, and ``backend`` with the broker's or the paper book's
+    reason — no top-level ``reason``) is ``not_placed: <that reason>``; a rejection without a gate record (no quote,
+    pair disabled, an exception) is ``not_gated: <reason>``."""
     by_class: collections.Counter = collections.Counter()
     ideas: collections.Counter = collections.Counter()
     examples: dict[str, str] = {}
@@ -502,12 +539,19 @@ def gate_rejections(con: sqlite3.Connection, pair: str, since: int, until: int) 
         gate = d.get("gate") if isinstance(d, dict) else None
         failed = [(str(g.get("check")), str(g.get("detail") or "")) for g in gate or []
                   if isinstance(g, dict) and not g.get("ok")] if isinstance(gate, list) else []
+        backend = d.get("backend") if isinstance(d, dict) else None
         if failed:
             classes = sorted({gate_class(c, x) for c, x in failed})
             for c, x in failed:
                 examples.setdefault(gate_class(c, x), f"{str(did)[:8]} {iso(ts)}: {_short(x, 140)}")
+        elif isinstance(gate, list) and gate and isinstance(backend, dict):
+            why = backend.get("reason") or backend.get("error") or "no reason recorded"
+            cls = f"not_placed: {_short(why, 80)}"
+            classes = [cls]
+            examples.setdefault(cls, f"{str(did)[:8]} {iso(ts)}: gate passed, the order refused: {_short(why, 140)}")
         else:
-            reason = _short((d.get("reason") if isinstance(d, dict) else None) or "no reason recorded", 80)
+            reason = _short((d.get("reason") if isinstance(d, dict) else None)
+                            or (backend.get("reason") if isinstance(backend, dict) else None) or "no reason recorded", 80)
             cls = f"not_gated: {reason}"
             classes = [cls]
             examples.setdefault(cls, f"{str(did)[:8]} {iso(ts)}")
@@ -806,6 +850,72 @@ def system_events(systems: list[tuple[str, Settings]], since: int, until: int) -
     return sorted(merged, key=lambda r: r["first_ms"])
 
 
+def unclean_starts(systems: list[tuple[str, Settings]], since: int, until: int) -> list[dict[str, Any]]:
+    """The supervisors' starts in the window after a run that ended WITHOUT a stop: the PC shut down or restarted,
+    the user logged off, or the supervisor crashed or was killed. A stop (``run --stop`` / STOP_ALL — stop_all,
+    restart_all — or Ctrl+C) writes ``supervisor:all stopped``; a supervisor that dies with the machine writes nothing,
+    and with Fast Startup on (this laptop) a Start-menu shutdown keeps ``psutil.boot_time()`` — 2026-09-27 09:11 was
+    found only this way. A service's ``started`` row is its supervisor's own start unless it follows that service's
+    ``exited``/``killed`` within :data:`RESTART_MAX_MS` or across a gap the supervisor lived through (a supervised
+    restart; an exit with :data:`SESSION_END_CODE` never is one: the session ended with it); such a start is unclean
+    when no ``supervisor:all stopped`` lies between the service's previous row and it (a service without an earlier
+    row is not judged). One row per start, merged across services and systems (:data:`MERGE_GAP_MS`: one shutdown
+    restarts every system). Rows before the window are read for the context (the cursor is streamed)."""
+    rp = pack_module()
+    found: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for _, sp in systems:
+        db = sp.paths.state() / "app.db"
+        if db in seen:
+            continue
+        seen.add(db)
+        con = rp.ro(db)
+        if con is None:
+            continue
+        last: dict[str, tuple[int, str, str]] = {}          # service → its previous (ts, event, detail)
+        last_stop = last_gap = None
+        try:
+            for ts, col, ev, det in con.execute(
+                    "SELECT ts, collector, event, detail FROM ingestion_events WHERE ts<? AND collector LIKE "
+                    "'supervisor:%' AND event IN ('started', 'exited', 'killed', 'stopped', 'system_suspend', 'stall', "
+                    "'clock_jump') ORDER BY ts", (until,)):
+                if col == "supervisor:all":
+                    if ev == "stopped":
+                        last_stop = ts
+                    elif ev in SUPERVISOR_GAP_EVENTS:
+                        last_gap = ts
+                    continue
+                svc = str(col).split(":", 1)[1]
+                prev = last.get(svc)
+                last[svc] = (ts, ev, str(det or ""))
+                if ev != "started" or prev is None or ts < since:
+                    continue
+                pts, pev, pdet = prev
+                if pev in ("exited", "killed") and SESSION_END_CODE not in pdet and (
+                        ts - pts <= RESTART_MAX_MS or (last_gap is not None and last_gap >= pts)):
+                    continue                                    # restarted by its own supervisor
+                if last_stop is not None and last_stop >= pts:
+                    continue                                    # the start after a stop
+                found.append({"ts": ts, "system": sp.paths.instance or "all-pairs", "service": svc,
+                              "previous": f"{pev} {iso(pts)}"})
+        except sqlite3.Error:
+            continue
+        finally:
+            con.close()
+    found.sort(key=lambda r: r["ts"])
+    merged: list[dict[str, Any]] = []
+    for r in found:
+        m = merged[-1] if merged else None
+        if m is not None and r["ts"] - m["last_ms"] <= MERGE_GAP_MS:
+            m["last_ms"] = r["ts"]
+            m["systems"] = sorted({*m["systems"], r["system"]})
+            m["services"] += 1
+            continue
+        merged.append({"first_ms": r["ts"], "last_ms": r["ts"], "first": iso(r["ts"]), "systems": [r["system"]],
+                       "services": 1, "previous": f"{r['service']}: {r['previous']}"})
+    return merged
+
+
 # --------------------------------------------------------------------------- account, equity, machine
 def account_state(base: Settings, systems: list[tuple[str, Settings]], pairs: dict[str, dict[str, Any]],
                   mon: dict[str, Any]) -> dict[str, Any]:
@@ -852,8 +962,117 @@ def equity_path(pairs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     return trades
 
 
+def _xml_attr(ev: str, pattern: str) -> str | None:
+    m = re.search(pattern, ev)
+    return m.group(1) if m else None
+
+
+def power_row(ev: str) -> dict[str, Any] | None:
+    """One System log ``<Event>`` (wevtutil's XML) → ``{"ms", "kind", "what"}``; kind is shutdown / boot / sleep /
+    resume / unclean, None for a row it does not know."""
+    prov = (_xml_attr(ev, r"<Provider Name=['\"]([^'\"]+)") or "").removeprefix("Microsoft-Windows-")
+    eid = _xml_attr(ev, r"<EventID[^>]*>(\d+)<")
+    t = re.search(r"SystemTime=['\"](\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z", ev)   # 7 fraction digits
+    ms = _ts_ms(f"{t.group(1)}.{(t.group(2) or '0')[:3].ljust(3, '0')}+00:00") if t else None
+    if ms is None or eid is None:
+        return None
+    data = dict(re.findall(r"<Data Name=['\"]([^'\"]+)['\"]>([^<]*)</Data>", ev))
+    key = (prov, int(eid))
+    if key == ("User32", 1074):
+        who = data.get("param1", "").split(" (")[0].replace("\\", "/").rsplit("/", 1)[-1] or "?"
+        return {"ms": ms, "kind": "shutdown", "what": f"{data.get('param5') or 'shutdown'} requested by {who} "
+                                                    f"({data.get('param3') or '-'})"}
+    if key == ("Kernel-General", 13):
+        return {"ms": ms, "kind": "shutdown", "what": "the OS shut down"}
+    if key == ("Kernel-General", 12):
+        return {"ms": ms, "kind": "boot", "what": "the OS started"}
+    if key == ("Kernel-Boot", 27):
+        bt = data.get("BootType")
+        if bt == "2":
+            return {"ms": ms, "kind": "resume", "what": "resumed from hibernate"}
+        return {"ms": ms, "kind": "boot", "what": {"0": "cold boot", "1": "Fast Startup boot (after a Start-menu shut "
+                                                                       "down)"}.get(str(bt), f"boot type {bt}")}
+    if key == ("Kernel-Power", 42):
+        st = data.get("TargetState")
+        if st == "6":
+            return {"ms": ms, "kind": "shutdown", "what": "hybrid shutdown (Fast Startup)"}
+        return {"ms": ms, "kind": "sleep", "what": {"4": "sleep", "5": "hibernate"}.get(str(st), f"sleep state {st}")}
+    if key == ("Kernel-Power", 107):
+        return {"ms": ms, "kind": "resume", "what": "resumed"}
+    if key == ("Kernel-Power", 41):
+        return {"ms": ms, "kind": "unclean", "what": "rebooted without a clean shutdown (Kernel-Power 41)"}
+    return None
+
+
+def power_episodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The System log rows in time order → episodes: one shutdown (1074 + 42/6 + 13), one boot (12 + 27, a 41 marks
+    it unclean), one sleep (42 → the next resume from hibernate; a resume without its sleep in the window is a sleep
+    that began before it). Rows of one kind within :data:`POWER_GROUP_MS` are one episode; 107 is left out (this
+    laptop logs it with the sleep's own time, seconds after the 42)."""
+    out: list[dict[str, Any]] = []
+    open_sleep: dict[str, Any] | None = None
+    for r in sorted(rows, key=lambda x: x["ms"]):
+        kind = r["kind"]
+        if kind == "resume":
+            if r["what"] == "resumed":
+                continue
+            if open_sleep is not None:
+                open_sleep["end_ms"] = r["ms"]
+                open_sleep = None
+            else:
+                out.append({"kind": "sleep", "first_ms": r["ms"], "last_ms": r["ms"], "end_ms": r["ms"],
+                            "what": [f"{r['what']} (asleep since before the window)"]})
+            continue
+        if kind == "unclean":
+            kind = "boot"                               # logged just after the boot it describes
+        prev = next((e for e in reversed(out) if e["kind"] == kind), None)
+        if kind != "sleep" and prev is not None and r["ms"] - prev["last_ms"] <= POWER_GROUP_MS:
+            prev["last_ms"] = r["ms"]
+            if r["what"] not in prev["what"]:
+                prev["what"].append(r["what"])
+            continue
+        e = {"kind": kind, "first_ms": r["ms"], "last_ms": r["ms"], "end_ms": None, "what": [r["what"]]}
+        out.append(e)
+        if kind == "sleep":
+            open_sleep = e
+    for e in out:
+        e["first"] = iso(e["first_ms"])
+        e["what"] = "; ".join(e["what"])
+        if e.get("end_ms"):
+            e["until"] = iso(e["end_ms"])
+    return out
+
+
+def power_events(since: int, until: int) -> dict[str, Any]:
+    """Best effort, read-only: the boots, sleeps and shutdowns the Windows System log holds for the window (one
+    ``wevtutil qe`` query, at most :data:`POWER_LOG_TIMEOUT_S`; not Windows, a timeout, an error → ``{"error"}``,
+    never raised — the log is evidence beside the supervisors' rows, not a precondition). ``counts`` per
+    :data:`POWER_COUNTED` kind."""
+    empty = {"episodes": [], "counts": {k: 0 for k in POWER_COUNTED}}
+    if os.name != "nt":
+        return {**empty, "error": "not read (not Windows)"}
+    q = POWER_QUERY.format(since=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(since / 1000)),
+                           until=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(until / 1000)))
+    try:
+        r = subprocess.run(["wevtutil", "qe", "System", f"/q:{q}", "/f:xml", "/rd:true",
+                            f"/c:{POWER_LOG_MAX_EVENTS}"], capture_output=True, timeout=POWER_LOG_TIMEOUT_S,
+                           stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {**empty, "error": f"not read: {type(exc).__name__}: {exc}"[:200]}
+    if r.returncode != 0:
+        err = (r.stderr or b"").decode("utf-8", "replace").strip()
+        return {**empty, "error": f"not read: wevtutil exit {r.returncode}: {err}"[:200]}
+    rows = [x for x in (power_row(ev) for ev in POWER_EVENT_RE.findall((r.stdout or b"").decode("utf-8", "replace")))
+            if x is not None and since <= x["ms"] < until]
+    eps = power_episodes(rows)
+    return {"episodes": eps, "counts": {k: sum(1 for e in eps if e["kind"] == k) for k in POWER_COUNTED},
+            "rows": len(rows), "error": None}
+
+
 def machine_now() -> dict[str, Any]:
-    """This machine now: free RAM and the boot time (a boot inside the window = a shutdown or restart in it)."""
+    """This machine now: free RAM and the last boot time (a boot inside the window = a shutdown or restart in it —
+    but not every one: Fast Startup keeps the boot time over a Start-menu shutdown, and only the last boot is seen;
+    :func:`unclean_starts` and :func:`power_events` see the others)."""
     try:
         import psutil
         vm = psutil.virtual_memory()
@@ -955,7 +1174,9 @@ def collect(s: Settings, *, since: int | None = None, until: int | None = None, 
         "incidents": incidents, "monitor": {k: v for k, v in mon.items() if k != "episodes"},
         "account": account, "equity_path": equity_path(pairs),
         "mt5": mt5_deals(s, w["since_ms"], w["until_ms"]) if mt5 else None,
-        "machine": machine_now(), "sample_size": SAMPLE_SIZE.format(days=w["days"]),
+        "unclean_starts": unclean_starts(systems, w["since_ms"], w["until_ms"]),
+        "machine": {**machine_now(), "power": power_events(w["since_ms"], w["until_ms"])},
+        "sample_size": SAMPLE_SIZE.format(days=w["days"]),
     }
 
 
@@ -1133,6 +1354,22 @@ def render(d: dict[str, Any]) -> str:
     else:
         p("No incident in the window.")
     p("")
+    us = d.get("unclean_starts") or []
+    p("Supervisor starts after a run that ended without a stop (a shutdown, restart, logoff, crash or a killed "
+      "supervisor — Fast Startup keeps the boot time over a Start-menu shutdown): "
+      + ("; ".join(f"{_hm(u['first_ms'])} {', '.join(u['systems'])} ({u['services']} services; the previous row "
+                    f"{u['previous']})" for u in us) if us else "none"))
+    mach = d.get("machine") or {}
+    pw = mach.get("power") or {}
+    if pw.get("error"):
+        p(f"Windows System log (boots, sleeps, shutdowns): {pw['error']}")
+    else:
+        p("Windows System log (boots, sleeps, shutdowns): " + ("; ".join(
+            f"{_hm(e['first_ms'])} {e['kind']}" + (f" → {_hm(e['end_ms'])}" if e.get("end_ms") else "")
+            + f" ({e['what']})" for e in pw.get("episodes") or []) or "none in the window"))
+    if mach.get("boot_ms"):
+        p(f"Last boot (psutil): {iso(mach['boot_ms'])}")
+    p("")
     # ---- cost
     c = d.get("cost") or {}
     led = d.get("ledger") or {}
@@ -1217,7 +1454,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--since", type=_utc_arg, help="window start (default: evaluation.demo_start_utc)")
     ap.add_argument("--until", type=_utc_arg, help="window end (default: start + evaluation.demo_days)")
     ap.add_argument("--pair", help="only this pair")
-    ap.add_argument("--out", help=f"markdown file (default {DEFAULT_OUT.relative_to(ROOT)})")
+    ap.add_argument("--out", help=f"markdown file (default {DEFAULT_OUT.relative_to(ROOT)}, refused when this "
+                                  "checkout's data root holds a system's app.db and no --root is given — the "
+                                  "production checkout: use --print or --out data\\reviews\\demo.md there)")
     ap.add_argument("--json", dest="json_out", help="also write the data as JSON to this file")
     ap.add_argument("--print", dest="print_only", action="store_true", help="print the markdown, write nothing")
     ap.add_argument("--root", help="read another checkout's data/ and logs/ (read-only) with this checkout's config")
@@ -1228,6 +1467,11 @@ def main(argv: list[str] | None = None) -> int:
         if a.root and not (Path(a.root) / "data").is_dir():
             raise Invalid(f"--root {a.root}: no data/ folder there")
         s = with_root(load_settings(), Path(a.root) if a.root else None)
+        if not a.out and not a.print_only and not a.root:
+            dbs = [d / "app.db" for d in system_state_dirs(s) if (d / "app.db").exists()]
+            if dbs:                     # the production checkout: docs/ would turn dirty and can block the next ff-merge
+                raise Invalid(f"this checkout runs a system ({dbs[0]}): the default {DEFAULT_OUT} would make it dirty "
+                              "and can block the next git merge --ff-only — use --print or --out data\\reviews\\demo.md")
         t0 = time.monotonic()
         data = collect(s, since=a.since, until=a.until, pair=a.pair, mt5=a.mt5)
         data["build_s"] = round(time.monotonic() - t0, 1)

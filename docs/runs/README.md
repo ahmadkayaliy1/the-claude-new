@@ -10,8 +10,9 @@ PYTHONPATH=src C:/the_claude_new/.venv/Scripts/python.exe tools/demo_report.py -
 ```
 
 In the production checkout (`C:\the_claude_new`) do not write here: a changed file under `docs/` makes the checkout
-dirty (the review packs flag it) and can block the next `git merge --ff-only`. Print it instead, or write it under
-the data root (git-ignored):
+dirty (the review packs flag it) and can block the next `git merge --ff-only`. `demo_report.py` refuses its default
+output there (exit 3: this checkout's data root holds a system's `app.db` and no `--root` is given). Print it
+instead, or write it under the data root (git-ignored):
 
 ```
 .venv\Scripts\python.exe tools\demo_report.py --print

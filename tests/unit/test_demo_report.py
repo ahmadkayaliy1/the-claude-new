@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import sqlite3
+import subprocess
 import sys
 import types
 from collections import namedtuple
@@ -39,6 +40,8 @@ def dr(monkeypatch):
     m = tool("demo_report")
     rp = m.pack_module()
     monkeypatch.setattr(rp, "git_info", lambda root: {"sha": "abc1234", "branch": "main", "dirty": False})
+    # this machine's own System log is not the report's subject here (test_power_events_… reads a recorded one)
+    monkeypatch.setattr(m, "power_events", lambda since, until: {"episodes": [], "counts": {}, "error": "not read"})
     return m
 
 
@@ -166,12 +169,54 @@ def test_closed_market_cycles_are_not_counted_and_their_events_are_ignored(dr, t
     assert av["calendar"] == "ny_metals_fx"
     assert av["open_cycles"] == 8 and av["closed_cycles"] == av["cycles"] - 8     # Fri 20–21 and Sun 22–23 UTC
     assert av["lost"] == {"data_not_ready": 1} and av["share"] == 0.875
+    assert av["reopen_waits"] == 1                                               # Sun 22:00: its bar 21:45 is closed
     assert any("no_screen" in n for n in av["notes"])                            # no engine log: not measured
     _, bdb = system_db(dr, base, "BTCUSDT")
     data = dr.collect(base, since=T("2026-10-03T04:00:00Z"), until=T("2026-10-03T09:00:00Z"),
                       now=T("2026-10-05T00:00:00Z"), pair="BTCUSDT")
     av = data["per_pair"]["BTCUSDT"]["availability"]
     assert (av["cycles"], av["closed_cycles"], av["open_cycles"]) == (20, 12, 8)
+
+
+# the XAU engine's screen lines around the daily reopen of 2026-09-28 (production logs/XAUUSD/engine.jsonl, the msg
+# cut after the trigger): the market closes 21:00 and reopens 22:00 UTC; the first screen after it is 22:15:07
+XAU_REOPEN_LOG = [
+    ("2026-09-28T20:51:33.579+00:00", "XAUUSD 15m close 2026-09-28T20:30:00.000Z: trigger=True (review) review "
+                                      "condition: 15m close below 4115.29"),
+    ("2026-09-28T22:15:07.071+00:00", "XAUUSD 15m close 2026-09-28T22:00:00.000Z: trigger=True (review) next_review "
+                                      "time reached (30 min after 2026-09-28T17:25:56.541Z)"),
+    ("2026-09-28T22:20:06.868+00:00", "XAUUSD 5m close 2026-09-28T22:15:00.000Z: trigger=False (none) price inside "
+                                      "15m bearish order_block 4116.46-4147.94"),
+    ("2026-09-28T22:25:07.503+00:00", "XAUUSD 5m close 2026-09-28T22:20:00.000Z: trigger=False (none) price inside "
+                                      "15m bearish order_block 4116.46-4147.94")]
+
+
+def test_the_first_cycle_after_a_reopen_is_not_lost_the_engine_waits_for_its_first_bar(dr, tmp_path):
+    """The real reopen of 2026-09-28: at 22:00 the calendar is open but the decision bar (21:45) lies in the daily
+    break, so the engine logs nothing before 22:15 — by design, not a loss. Before the fix the 22:00 cycle was
+    'no_screen' (reproduced on production: open 1, lost 1). A later cycle without a screen still is lost."""
+    base = base_at(tmp_path)
+    sp, _ = system_db(dr, base, "XAUUSD")
+    logs = sp.paths.logs()
+    logs.mkdir(parents=True)
+    (logs / "engine.jsonl").write_text("\n".join(json.dumps({"ts": ts, "level": "INFO", "proc": "engine",
+                                                             "logger": "engine", "msg": msg})
+                                                 for ts, msg in XAU_REOPEN_LOG) + "\n", encoding="utf-8")
+    now = T("2026-09-29T00:00:00Z")
+    av = dr.collect(base, since=T("2026-09-28T21:00:00Z"), until=T("2026-09-28T22:15:00Z"), now=now,
+                    pair="XAUUSD")["per_pair"]["XAUUSD"]["availability"]
+    assert av["calendar"] == "ny_metals_fx" and (av["open_cycles"], av["reopen_waits"]) == (1, 1)
+    assert av["lost"] == {} and av["lost_total"] == 0 and av["share"] == 1.0
+    assert any("first cycle(s) after a reopen" in n for n in av["notes"])
+    av = dr.collect(base, since=T("2026-09-28T21:00:00Z"), until=T("2026-09-28T22:45:00Z"), now=now,
+                    pair="XAUUSD")["per_pair"]["XAUUSD"]["availability"]
+    assert av["open_cycles"] == 3 and av["lost"] == {"no_screen": 1}          # 22:30 has no line; 22:15 has three
+    _, db = system_db(dr, base, "XAUUSD")                                       # a stop over the reopen: only 22:15
+    add_events(db, [{"ts": T("2026-09-28T21:30:00Z"), "collector": "supervisor:all", "event": "stopped"},
+                    {"ts": T("2026-09-28T22:20:00Z"), "collector": "supervisor:engine", "event": "started"}])
+    av = dr.collect(base, since=T("2026-09-28T21:00:00Z"), until=T("2026-09-28T22:45:00Z"), now=now,
+                    pair="XAUUSD")["per_pair"]["XAUUSD"]["availability"]
+    assert av["lost"] == {"stopped": 1, "no_screen": 1} and av["lost_total"] == 2
 
 
 # --------------------------------------------------------------------------- gate, SL, outcomes
@@ -216,6 +261,35 @@ def test_gate_rejections_are_classified_with_the_min_lot_split_and_not_gated(dr,
     assert data["per_pair"]["ETHUSDT"]["sl_proof"] == {"placed": 2, "sl_not_proven": 1, "ids": [ids[6][:8]]}
     md = dr.render(data)
     assert "gate rejections 4 by class:" in md and "gate class position_size_min_lot: e.g." in md
+
+
+def test_an_order_refused_after_a_passed_gate_is_not_placed_with_the_backends_reason(dr, tmp_path):
+    """The executor stores a broker refusal after an approved gate as the gate list (all ok) + ``backend`` with the
+    reason, and no top-level ``reason``: the class names that reason instead of 'not_gated: no reason recorded'."""
+    from tradingsystem.execution.backends.mt5_backend import tag
+    from tradingsystem.execution.retcodes import describe
+    base = base_at(tmp_path)
+    sp, db = system_db(dr, base, "ETHUSDT")
+    since, until = T("2026-09-28T00:00:00Z"), T("2026-09-29T00:00:00Z")
+    store = DecisionStore(db, config_hash="c" * 16)
+    refused, quoteless = idea(store, "ETHUSDT", since + MS_PER_HOUR), idea(store, "ETHUSDT", since + 2 * MS_PER_HOUR)
+    store.close()
+    why = f"order_send {tag(refused, 0)}: {describe(10019)}"                   # as MT5Backend.place words it
+    passed = {"gate": [{"check": "stop_loss_present", "ok": True, "detail": "SL present"},
+                       {"check": "position_size", "ok": True, "detail": "0.01 lots, risk 1.20% ($1.22)"}],
+              "backend": {"ok": False, "reason": why, "attempts": [], "placed": [], "note": None}, "mode": "demo"}
+    con = sqlite3.connect(db)
+    for did, det in ((refused, passed), (quoteless, {"reason": "no execution quote"})):
+        con.execute("UPDATE ai_decisions SET execution_state='rejected', execution_detail=? WHERE id=?",
+                    (json.dumps(det), did))
+    con.commit()
+    con.close()
+    g = dr.collect(base, since=since, until=until, now=until, pair="ETHUSDT")["per_pair"]["ETHUSDT"]["gate"]
+    cls = f"not_placed: {dr._short(why, 80)}"
+    assert "10019 NO_MONEY: not enough money" in why
+    assert g["by_class"] == {cls: 1, "not_gated: no execution quote": 1}
+    assert g["examples"][cls].endswith(f"gate passed, the order refused: {dr._short(why, 140)}")
+    assert not any(k.startswith("not_gated: no reason recorded") for k in g["by_class"])
 
 
 def test_realised_counts_outcomes_settled_in_the_window_and_unknown_costs_stay_unknown(dr, tmp_path):
@@ -299,6 +373,142 @@ def test_one_sleep_recorded_by_every_system_is_one_incident_row(dr, tmp_path):
     sleep, start = rows
     assert sleep["systems"] == ["BTCUSDT", "ETHUSDT"] and sleep["first_ms"] == resumed - 3_122_207
     assert start["systems"] == ["BTCUSDT", "ETHUSDT"] and start["n"] == 6
+
+
+SERVICES = ("ingest-binance", "ingest-mt5", "engine", "executor", "api")
+EXIT_SESSION = "code 1073807364 (0x40010004) after 206s; restart in 4s"
+
+
+def _start(at: str, svcs=SERVICES) -> list[tuple]:
+    return [(at, svc, "started", "pid 1") for svc in svcs]
+
+
+# the supervisors' rows of production 2026-09-26 → 09-28 (data/instances/*/app.db, read-only): the Start-menu shutdown
+# of 09-27 06:10 (Fast Startup: boot 09:11, psutil's boot time unchanged) left no row — BTC and ETH simply started
+# again at 09:12/09:13 (XAU had been stopped cleanly at 09-26 23:22); stop_all/restart_all write 'supervisor:all
+# stopped'; the kills after the 20:44 resume are supervised restarts; the 20:54 session end (0x40010004 exits) and
+# the cold boot at 21:38 (Kernel-Power 41) end in the 21:40-21:41 starts
+SUPERVISOR_ROWS = {
+    "BTCUSDT": [*_start("2026-09-26T22:13:47Z"), *_start("2026-09-27T09:12:48Z"),
+                ("2026-09-27T09:14:11Z", "all", "stopped", "supervisor shutdown"), *_start("2026-09-27T09:18:30Z"),
+                ("2026-09-27T19:24:52Z", "all", "system_suspend", "PC was asleep for ~3122s"),
+                ("2026-09-27T21:26:25Z", "all", "stopped", "supervisor shutdown"), *_start("2026-09-27T22:16:33Z"),
+                ("2026-09-28T16:32:32Z", "all", "system_suspend", "PC was asleep for ~9711s"),
+                ("2026-09-28T20:44:41Z", "all", "system_suspend", "PC was asleep for ~2756s"),
+                ("2026-09-28T20:47:41Z", "ingest-mt5", "killed", "heartbeat unchanged for 116s"),
+                ("2026-09-28T20:47:41Z", "executor", "killed", "heartbeat unchanged for 116s"),
+                *_start("2026-09-28T20:47:46Z", ("ingest-mt5", "executor")),
+                ("2026-09-28T20:54:19Z", "ingest-mt5", "exited", EXIT_SESSION),
+                ("2026-09-28T20:54:19Z", "executor", "exited", EXIT_SESSION), *_start("2026-09-28T21:40:09Z")],
+    "ETHUSDT": [*_start("2026-09-26T22:14:00Z"), *_start("2026-09-27T09:13:26Z"),
+                ("2026-09-27T09:14:29Z", "all", "stopped", "supervisor shutdown"), *_start("2026-09-27T09:18:44Z"),
+                ("2026-09-27T21:26:43Z", "all", "stopped", "supervisor shutdown"), *_start("2026-09-27T22:16:45Z"),
+                ("2026-09-28T20:44:40Z", "all", "system_suspend", "PC was asleep for ~2756s"),
+                ("2026-09-28T20:50:48Z", "executor", "killed", "heartbeat unchanged for 181s"),
+                *_start("2026-09-28T20:50:53Z", ("executor",)), *_start("2026-09-28T21:41:05Z")],
+    "XAUUSD": [*_start("2026-09-26T22:14:19Z"), ("2026-09-26T22:17:22Z", "ingest-binance", "killed", "heartbeat"),
+               *_start("2026-09-26T22:17:27Z", ("ingest-binance",)),
+               ("2026-09-26T23:22:08Z", "all", "stopped", "supervisor shutdown"), *_start("2026-09-27T09:19:12Z"),
+               ("2026-09-27T21:27:02Z", "all", "stopped", "supervisor shutdown"), *_start("2026-09-27T22:17:04Z"),
+               *((("2026-09-28T20:54:18Z", svc, "exited", EXIT_SESSION) for svc in SERVICES)),
+               *_start("2026-09-28T21:41:36Z")]}
+
+
+def test_supervisor_starts_after_a_run_without_a_stop_are_the_shutdowns_the_boot_time_misses(dr, tmp_path):
+    base = base_at(tmp_path)
+    for pair, rows in SUPERVISOR_ROWS.items():
+        _, db = system_db(dr, base, pair)
+        add_events(db, [{"ts": T(at), "collector": f"supervisor:{svc}", "event": ev, "detail": det}
+                        for at, svc, ev, det in rows])
+    systems = dr.report_systems(base)
+    out = dr.unclean_starts(systems, T("2026-09-26T20:00:00Z"), T("2026-09-29T06:00:00Z"))
+    assert [(u["first"], u["systems"], u["services"]) for u in out] == [
+        ("2026-09-27T09:12:48.000Z", ["BTCUSDT", "ETHUSDT"], 10),                 # the Fast Startup shutdown
+        ("2026-09-28T21:40:09.000Z", ["BTCUSDT", "ETHUSDT", "XAUUSD"], 15)]       # the cold boot after 20:54
+    assert out[0]["previous"] == "ingest-binance: started 2026-09-26T22:13:47.000Z"
+    demo = dr.unclean_starts(systems, T("2026-09-27T21:50:00Z"), T("2026-09-29T06:00:00Z"))    # the D-047 window
+    assert [u["first"] for u in demo] == ["2026-09-28T21:40:09.000Z"]
+    # a quick reboot after the session ended is no supervised restart (the 0x40010004 exits): XAU alone, 3 min later
+    xau = [(p, sp) for p, sp in systems if p == "XAUUSD"]
+    _, xdb = system_db(dr, base, "XAUUSD")
+    add_events(xdb, [*({"ts": T("2026-09-29T08:00:00Z"), "collector": f"supervisor:{s}", "event": "exited",
+                        "detail": EXIT_SESSION} for s in SERVICES),
+                     *({"ts": T("2026-09-29T08:03:00Z"), "collector": f"supervisor:{s}", "event": "started",
+                        "detail": "pid 2"} for s in SERVICES),
+                     # a kill, a sleep, the restart after the resume: the supervisor lived through it
+                     {"ts": T("2026-09-29T09:00:00Z"), "collector": "supervisor:engine", "event": "killed"},
+                     {"ts": T("2026-09-29T10:00:00Z"), "collector": "supervisor:all", "event": "system_suspend",
+                      "duration_ms": 3_500_000},
+                     {"ts": T("2026-09-29T10:00:05Z"), "collector": "supervisor:engine", "event": "started"}])
+    late = dr.unclean_starts(xau, T("2026-09-29T06:00:00Z"), T("2026-09-29T12:00:00Z"))
+    assert [(u["first"], u["services"]) for u in late] == [("2026-09-29T08:03:00.000Z", 5)]
+    data = dr.collect(base, since=T("2026-09-27T21:50:00Z"), until=T("2026-09-29T06:00:00Z"),
+                      now=T("2026-09-29T06:00:00Z"))
+    assert [u["first"] for u in data["unclean_starts"]] == ["2026-09-28T21:40:09.000Z"]
+    assert "Supervisor starts after a run that ended without a stop" in dr.render(data) and \
+        "09-28 21:40 BTCUSDT, ETHUSDT, XAUUSD (15 services" in dr.render(data)
+
+
+def _win_event(provider: str, eid: int, at: str, **data: str) -> str:
+    """One event as ``wevtutil qe System /f:xml`` prints it (the elements the report reads)."""
+    fields = "".join(f"<Data Name='{k}'>{v}</Data>" for k, v in data.items())
+    return (f"<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='{provider}'"
+            f"/><EventID>{eid}</EventID><TimeCreated SystemTime='{at}'/><Channel>System</Channel></System><EventData>"
+            f"{fields}</EventData></Event>")
+
+
+# the production laptop's System log 2026-09-26 → 09-28 (read-only query, values as logged; newest first, /rd:true)
+SYSTEM_LOG = [
+    _win_event("Microsoft-Windows-Kernel-Power", 41, "2026-09-28T21:38:34.1234567Z"),
+    _win_event("Microsoft-Windows-Kernel-Boot", 27, "2026-09-28T21:38:31.5000000Z", BootType="0"),
+    _win_event("Microsoft-Windows-Kernel-General", 12, "2026-09-28T21:38:31.5000000Z",
+               StartTime="2026-09-28T21:38:31.5000000Z"),
+    _win_event("Microsoft-Windows-Kernel-Boot", 27, "2026-09-28T20:44:37.0000000Z", BootType="2"),
+    _win_event("Microsoft-Windows-Kernel-Power", 107, "2026-09-28T19:58:40.0000000Z", TargetState="5"),
+    _win_event("Microsoft-Windows-Kernel-Power", 42, "2026-09-28T19:58:39.0000000Z", TargetState="5", Reason="2"),
+    _win_event("Microsoft-Windows-Kernel-Boot", 27, "2026-09-27T09:11:09.0000000Z", BootType="1"),
+    _win_event("Microsoft-Windows-Kernel-Power", 107, "2026-09-27T06:10:57.0000000Z", TargetState="6"),
+    _win_event("Microsoft-Windows-Kernel-Power", 42, "2026-09-27T06:10:56.0000000Z", TargetState="6", Reason="4"),
+    _win_event("User32", 1074, "2026-09-27T06:10:49.0000000Z",
+               param1="C:\\WINDOWS\\SystemApps\\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\\"
+                      "StartMenuExperienceHost.exe (DESKTOP-M8JTHQ2)", param3="Other (Unplanned)", param5="power off"),
+    _win_event("Microsoft-Windows-Kernel-Boot", 27, "2026-09-26T20:18:45.0000000Z", BootType="2")]
+
+
+def test_power_events_read_the_system_log_best_effort_and_group_its_episodes(monkeypatch):
+    m = tool("demo_report", "demo_report_power_under_test")
+    calls: list = []
+
+    def run(args, **kw):
+        calls.append((args, kw))
+        return subprocess.CompletedProcess(args, 0, "".join(SYSTEM_LOG).encode("utf-8"), b"")
+    monkeypatch.setattr(m, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(m.subprocess, "run", run)
+    out = m.power_events(T("2026-09-26T20:00:00Z"), T("2026-09-29T06:00:00Z"))
+    args, kw = calls[0]
+    assert args[:3] == ["wevtutil", "qe", "System"] and kw["timeout"] == m.POWER_LOG_TIMEOUT_S
+    assert "@SystemTime>='2026-09-26T20:00:00.000Z'" in args[3] and "EventID=1074" in args[3]
+    assert not {"cl", "clear-log", "sl", "set-log"} & set(args)                         # a query, nothing else
+    assert out["error"] is None and out["counts"] == {"shutdown": 1, "boot": 2, "sleep": 2}
+    eps = [(e["first"][5:16], e["kind"], e["what"]) for e in out["episodes"]]
+    assert eps == [
+        ("09-26T20:18", "sleep", "resumed from hibernate (asleep since before the window)"),
+        ("09-27T06:10", "shutdown", "power off requested by StartMenuExperienceHost.exe (Other (Unplanned)); hybrid "
+                                    "shutdown (Fast Startup)"),
+        ("09-27T09:11", "boot", "Fast Startup boot (after a Start-menu shut down)"),
+        ("09-28T19:58", "sleep", "hibernate"),
+        ("09-28T21:38", "boot", "cold boot; the OS started; rebooted without a clean shutdown (Kernel-Power 41)")]
+    assert out["episodes"][3]["until"] == "2026-09-28T20:44:37.000Z"
+    # never fails its caller: a timeout, a refused query, not Windows
+    def slow(args, **kw):
+        raise subprocess.TimeoutExpired(args, kw["timeout"])
+    monkeypatch.setattr(m.subprocess, "run", slow)
+    assert m.power_events(0, 1)["error"].startswith("not read: TimeoutExpired")
+    monkeypatch.setattr(m.subprocess, "run", lambda a, **kw: subprocess.CompletedProcess(a, 5, b"", b"Access denied"))
+    assert m.power_events(0, 1) == {"episodes": [], "counts": {"shutdown": 0, "boot": 0, "sleep": 0},
+                                    "error": "not read: wevtutil exit 5: Access denied"}
+    monkeypatch.setattr(m, "os", types.SimpleNamespace(name="posix"))
+    assert m.power_events(0, 1)["error"] == "not read (not Windows)"
 
 
 # --------------------------------------------------------------------------- the ledger
@@ -414,6 +624,30 @@ def test_the_report_is_read_only_bounded_to_the_window_and_written_by_the_cli(dr
     assert dr.main(["--pair", "DOGEUSDT", "--print"]) == dr.EXIT_INVALID
     assert dr.main(["--since", "yesterday-ish", "--print"]) == dr.EXIT_INVALID
     assert dr.main(["--root", str(tmp_path / "nowhere"), "--print"]) == dr.EXIT_INVALID
+
+
+def test_the_docs_default_is_refused_in_a_checkout_that_runs_a_system(dr, tmp_path, monkeypatch, capsys):
+    """docs/runs/demo.md written in the production checkout makes it dirty and can block the next ff-merge: with no
+    --out/--print/--root and a system's app.db under this checkout's data root, the default is refused (exit 3)."""
+    base = base_at(tmp_path)
+    since, until = T("2026-09-20T00:00:00Z"), T("2026-09-20T12:00:00Z")
+    real = dr.load_settings
+    monkeypatch.setattr(dr, "load_settings", lambda **kw: real(**kw) if kw else base)
+    default = tmp_path / "checkout" / "docs" / "runs" / "demo.md"
+    monkeypatch.setattr(dr, "ROOT", tmp_path / "checkout")
+    monkeypatch.setattr(dr, "DEFAULT_OUT", default)
+    window = ["--since", iso(since), "--until", iso(until)]
+    (tmp_path / "data").mkdir()
+    assert dr.main(window) == dr.EXIT_OK and default.exists()                   # a worktree without a system
+    default.unlink()
+    seed_pair(dr, base, "ETHUSDT", since, until)                               # data/instances/ETHUSDT/app.db
+    capsys.readouterr()
+    assert dr.main(window) == dr.EXIT_INVALID and not default.exists()
+    out = capsys.readouterr().out
+    assert "would make it dirty" in out and "--out data\\reviews\\demo.md" in out
+    assert dr.main([*window, "--out", str(tmp_path / "reviews" / "demo.md")]) == dr.EXIT_OK
+    assert dr.main([*window, "--print"]) == dr.EXIT_OK
+    assert dr.main([*window, "--root", str(tmp_path)]) == dr.EXIT_OK and default.exists()   # a worktree → production
 
 
 # --------------------------------------------------------------------------- --mt5

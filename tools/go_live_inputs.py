@@ -7,7 +7,8 @@
 It collects ``tools/demo_report.py``'s data over ``evaluation.demo_start_utc`` + ``demo_days`` (cut at now) and judges
 every checklist item: ``pass`` / ``FAIL`` / ``n.a.``, each with the measured value and its n. What the files cannot
 prove — the monitor drill, a restored backup, P7.2, the tests on the live commit, the live-refusal rehearsal, the
-signed sample-size statement, the go-live scope — is ``n.a.`` with what the owner does, plus whatever evidence exists.
+signed sample-size statement, the go-live scope, the decision role separated from development — is ``n.a.`` with
+what the owner does, plus whatever evidence exists.
 The thresholds are this file's constants and docs/go_live_checklist.md's table (D-046, D-047); change both together.
 
 Read-only (as the demo report). Exit 0 always — it informs, the owner decides; an error is one line (``"error"`` in
@@ -44,7 +45,8 @@ RISK_LIMITS = {"risk_per_trade_pct": 1.0, "max_risk_per_trade_pct": 3.0, "max_da
                "max_correlated_risk_pct": 4.0, "max_open_positions": 3}      # D-036, unchanged at go-live (D-046 d)
 # gate rejections that are the gate doing its job at ≈ $100 (docs/go_live_checklist.md lists why); any other class —
 # stop_loss_present, sl_side, is_trade, quote_fresh, basis, daily_loss_limit, account_drawdown, position_size for
-# another reason than the minimum lot, a rejection without a gate record — is a defect or a trip to explain first
+# another reason than the minimum lot, a rejection without a gate record (not_gated: …), an order the broker refused
+# after a passed gate (not_placed: …) — is a defect or a trip to explain first
 EXPECTED_GATE_CLASSES = {
     "position_size_min_lot": "the 0.01-lot minimum risks more than max_risk_per_trade_pct at ≈ $100 (D-046 d)",
     "rr_after_costs": "reward-to-risk after spread and commission below risk.min_rr",
@@ -248,18 +250,41 @@ def check_ram(d: dict[str, Any]) -> dict[str, Any]:
 
 
 def check_sleep(d: dict[str, Any]) -> dict[str, Any]:
+    """Four sources, any one fails the item: the supervisors' ``system_suspend`` rows; their starts after a run that
+    ended without a stop (a shutdown, restart, logoff or crash — the only trace of a Start-menu shutdown under Fast
+    Startup, which keeps the boot time); every boot, sleep and shutdown of the Windows System log (best effort: an
+    unread log is said, not counted); the last boot time. A stop_all/restart_all (``supervisor shutdown``) is listed,
+    not counted."""
     w = d["window"]
+    m = d.get("machine") or {}
     sleeps = [e for e in d["incidents"] if e.get("kind") == "event" and str(e.get("title", "")).startswith("PC asleep")]
-    boot = (d.get("machine") or {}).get("boot_ms")
+    unclean = d.get("unclean_starts") or []
+    power = m.get("power") or {}
+    counted = [e for e in power.get("episodes") or [] if e.get("kind") in ("shutdown", "boot", "sleep")]
+    boot = m.get("boot_ms")
     booted_in = boot is not None and w["since_ms"] <= boot < w["until_ms"]
     stops = [e for e in d["incidents"] if e.get("title") == "supervisor shutdown"]
-    ok = not sleeps and not booted_in
+    ok = not sleeps and not unclean and not counted and not booted_in
+    if power.get("error"):
+        log_part = f"; System log: {power['error']}"
+    elif "episodes" in power:
+        log_part = "; System log: " + ", ".join(f"{k}s {sum(1 for e in counted if e['kind'] == k)}"
+                                                for k in ("shutdown", "boot", "sleep"))
+        log_part += (" (" + ", ".join(f"{e['first'][5:16]} {e['kind']}: {e['what']}" for e in counted) + ")"
+                     if counted else "")
+    else:
+        log_part = "; System log: not read"
     return _item("no_sleep_shutdown", "sleep / shutdown events in the window", "0", "auto", PASS if ok else FAIL,
                  f"suspends {len(sleeps)}" + (" (" + ", ".join(f"{e['first'][5:16]} {e['title']}" for e in sleeps)
                                               + ")" if sleeps else "")
+                 + f"; supervisor starts without a stop (shutdown / restart / logoff / crash) {len(unclean)}"
+                 + (" (" + ", ".join(f"{u['first'][5:16]} {', '.join(u['systems'])}" for u in unclean) + ")"
+                    if unclean else "")
+                 + log_part
                  + f"; last boot {iso(boot) if boot else 'unknown'}" + (" — INSIDE the window (a shutdown or restart)"
                                                                          if booted_in else "")
-                 + f"; supervisor shutdowns {len(stops)} (planned restarts; not counted)", len(sleeps))
+                 + f"; supervisor shutdowns {len(stops)} (planned restarts; not counted)",
+                 len(sleeps) + len(unclean) + len(counted) + int(booted_in))
 
 
 def check_backup(s: Settings, root: Path) -> dict[str, Any]:
@@ -303,13 +328,19 @@ def owner_items(d: dict[str, Any]) -> list[dict[str, Any]]:
         _item("p7_2", "P7.2 decided or explicitly deferred", "a D entry", "owner", NA,
               "owner: PROJECT_STATUS P7.2 (de facto venue: Windsor MT5)"),
         _item("tests_green", "tests green on the live commit", "the full unit suite", "owner", NA,
-              f"owner/lead: run the unit suite on the commit that goes live (this checkout: {g.get('sha', '-')}"
+              "owner/lead: .venv\\Scripts\\python.exe -m pytest tests/unit -q -p no:cacheprovider on the exact commit "
+              "that goes live, from a worktree or with production stopped (or the lead's recorded green run of that "
+              f"sha) — never beside the running systems (RAM) (this checkout: {g.get('sha', '-')}"
               + (", DIRTY" if g.get("dirty") else "") + ")"),
         _item("live_refusal", "the live-refusal rehearsal", "fails with 'account mismatch'", "owner", NA,
               "owner: docs/go_live_checklist.md 'Live-refusal rehearsal' on a scratch root"),
         _item("sample_size", "the sample-size statement signed", "signed knowingly", "owner", NA, d["sample_size"]),
         _item("go_live_scope", "go-live = ONE pair (ETH) at the minimum lot, capital ≈ $100", "the owner's setup",
               "owner", NA, "owner: live account ≈ $100, only ETHUSDT switched to live, everything else stays demo"),
+        _item("decision_role", "the decision role separated from development",
+              "a second Claude account or an API key with hard USD caps (D-046 e), or a D entry deferring it", "owner",
+              NA, "owner: a D entry. Also reconcile in a D entry (not a gate): D-046 moves production off the "
+                  "development laptop 'before go-live', handoff §3.9.1's sequence puts it under 'Later'"),
     ]
 
 

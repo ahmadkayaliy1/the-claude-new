@@ -57,7 +57,9 @@ def demo_ok() -> dict:
                         "exposure_without_sl": []},
             "session_limits": {"rows": 0, "events": []},
             "monitor": {"runs": 480, "max_gap_min": 15.4, "ram_min_mb": None},
-            "machine": {"available_mb": 2048, "total_mb": 7929, "boot_ms": START - MS_PER_DAY},
+            "machine": {"available_mb": 2048, "total_mb": 7929, "boot_ms": START - MS_PER_DAY,
+                        "power": {"episodes": [], "counts": {"shutdown": 0, "boot": 0, "sleep": 0}, "error": None}},
+            "unclean_starts": [],
             "git": {"sha": "abc1234", "dirty": False},
             "sample_size": "5 days show the absence of catastrophic behaviour and the execution quality, not a "
                            "statistical edge"}
@@ -73,7 +75,7 @@ def test_every_checklist_row_is_judged_in_the_documents_order_with_a_value_and_n
     assert [i["id"] for i in items] == ["demo_days", "outcomes", "availability", "no_position_without_sl",
                                         "no_loss_trip", "gate_classes", "calls_cap", "monitor_mttd", "snapshot_build",
                                         "free_ram", "no_sleep_shutdown", "backup_restored", "risk_limits", "p7_2",
-                                        "tests_green", "live_refusal", "sample_size", "go_live_scope"]
+                                        "tests_green", "live_refusal", "sample_size", "go_live_scope", "decision_role"]
     rows = [ln for ln in DOC.read_text(encoding="utf-8").splitlines() if re.match(r"^\| \d+ \| ", ln)]
     assert len(rows) == len(items)                                               # one tool row per document row
     st = {i["id"]: i["status"] for i in items}
@@ -81,7 +83,7 @@ def test_every_checklist_row_is_judged_in_the_documents_order_with_a_value_and_n
             "snapshot_build", "free_ram", "no_sleep_shutdown", "risk_limits")
     assert all(st[k] == gl.PASS for k in auto), st
     owner = ("outcomes", "monitor_mttd", "backup_restored", "p7_2", "tests_green", "live_refusal", "sample_size",
-             "go_live_scope")
+             "go_live_scope", "decision_role")
     assert all(st[k] == gl.NA for k in owner), st
     b = by_id(items)
     assert "BTCUSDT 97.0 % (n 480" in b["availability"]["measured"] and b["availability"]["n"] == 960
@@ -103,8 +105,56 @@ def test_the_thresholds_in_the_code_are_the_checklist_documents(gl):
     for cls in gl.EXPECTED_GATE_CLASSES:
         assert f"`{cls}`" in table, cls
     for bad in ("stop_loss_present", "sl_side", "is_trade", "quote_fresh", "basis", "daily_loss_limit",
-                "account_drawdown", "position_size_other", "not_gated"):
+                "account_drawdown", "position_size_other", "not_gated", "not_placed"):
         assert bad not in gl.EXPECTED_GATE_CLASSES and f"`{bad}" in doc, bad
+
+
+def test_the_owners_commands_run_in_cmd_and_never_dirty_or_starve_production(gl):
+    """Review fixes: the demo report's production command writes under the data root (the docs/ default dirties the
+    checkout and can block the next ff-merge); item 15's command is the Windows form (no POSIX env prefix) and runs
+    on the live commit from a worktree or with production stopped, never beside the running systems."""
+    doc = DOC.read_text(encoding="utf-8")
+    block = doc.split("```", 2)[1]
+    assert "tools\\demo_report.py --out data\\reviews\\demo.md" in block and "docs\\runs" not in block
+    row15 = next(ln for ln in doc.splitlines() if ln.startswith("| 15 |"))
+    assert "PYTHONPATH" not in row15
+    assert "`.venv\\Scripts\\python.exe -m pytest tests/unit -q -p no:cacheprovider`" in row15
+    assert "worktree" in row15 and "production stopped" in row15 and "never beside the running systems" in row15
+    item = by_id(gl.owner_items({"git": {"sha": "abc1234", "dirty": True}, "sample_size": "-"}))["tests_green"]
+    assert ".venv\\Scripts\\python.exe -m pytest tests/unit -q -p no:cacheprovider" in item["measured"]
+    assert "PYTHONPATH" not in item["measured"] and "abc1234, DIRTY" in item["measured"]
+
+
+def test_the_monitor_drill_edits_the_existing_disk_key_and_sets_it_back(tmp_path):
+    """Production's monitor block already holds ``free_disk_warn_gb: 8`` (H30): the drill changes that line and sets
+    it back — a second line is a duplicate key that fails every config load (the monitor and every service start)."""
+    import yaml
+
+    from tradingsystem.core.settings import _load_yaml
+    drill = DOC.read_text(encoding="utf-8").split("### The monitor drill", 1)[1].split("\n### ", 1)[0]
+    assert "add `free_disk_warn_gb" not in drill and "Remove the line" not in drill
+    assert "change the EXISTING line `free_disk_warn_gb: 8`" in drill and "back to `free_disk_warn_gb: 8`" in drill
+    assert "Never add a second `free_disk_warn_gb` line" in drill and "never delete it" in drill
+    assert drill.count("`.venv\\Scripts\\python.exe -m tradingsystem config`") == 2      # after each edit
+    block = "monitor:\n  free_disk_warn_gb: 8\n  diagnose_enabled: false\n"
+    p = tmp_path / "config.local.yaml"
+    p.write_text(block.replace("free_disk_warn_gb: 8", "free_disk_warn_gb: 9999"), encoding="utf-8")
+    assert _load_yaml(p)["monitor"] == {"free_disk_warn_gb": 9999, "diagnose_enabled": False}
+    p.write_text(block + "  free_disk_warn_gb: 9999\n", encoding="utf-8")                  # the old step 2, literally
+    with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key 'free_disk_warn_gb'"):
+        _load_yaml(p)
+
+
+def test_the_decision_role_row_and_the_machine_note_are_the_owners(gl):
+    """D-046 (e): before go-live the decision role gets a second account or a capped API key (or a D entry defers
+    it); the machine move's 'before go-live' vs §3.9.1's 'Later' is reconciled by the owner, not a gate."""
+    doc = DOC.read_text(encoding="utf-8")
+    row = next(ln for ln in doc.splitlines() if ln.startswith("| 19 |"))
+    assert "second Claude account or an API key with hard USD caps (D-046 e), or a D entry deferring it" in row
+    flat = " ".join(doc.split())
+    assert "**Open point, not a gate:**" in flat and '"before go-live"' in flat and 'under "Later"' in flat
+    item = by_id(gl.owner_items({"git": {}, "sample_size": "-"}))["decision_role"]
+    assert item["status"] == gl.NA and "D-046 e" in item["threshold"] and "not a gate" in item["measured"]
 
 
 def test_an_incomplete_window_or_fewer_than_five_days_fails(gl, tmp_path):
@@ -217,6 +267,40 @@ def test_snapshot_ram_and_sleep_items_fail_on_their_evidence(gl, tmp_path):
     assert by_id(gl.measure(d, s))["no_sleep_shutdown"]["status"] == gl.PASS            # a planned restart
 
 
+def test_a_shutdown_the_boot_time_cannot_see_still_fails_the_sleep_item(gl, tmp_path):
+    """Fast Startup is on the production laptop: the Start-menu shutdown of 2026-09-27 06:10 → 09:11 UTC kept
+    psutil's boot time (2026-09-26T17:06Z, before the window). The supervisors' starts without a stop and the
+    System log see it — and every boot, not only the last one (the 09-28 21:38 cold boot below)."""
+    s = base_at(tmp_path)
+    fast_startup = {"first_ms": parse_date_spec("2026-09-27T09:12:48Z"), "first": "2026-09-27T09:12:48.000Z",
+                    "systems": ["BTCUSDT", "ETHUSDT"], "services": 10,
+                    "previous": "ingest-binance: started 2026-09-26T22:13:47.958Z"}
+    d = demo_ok()
+    d["window"].update(since_ms=parse_date_spec("2026-09-26T20:00:00Z"))
+    d["machine"]["boot_ms"] = parse_date_spec("2026-09-26T17:06:05Z")                   # unchanged by the shutdown
+    assert by_id(gl.measure(d, s))["no_sleep_shutdown"]["status"] == gl.PASS            # what the old check saw
+    d["unclean_starts"] = [fast_startup]
+    item = by_id(gl.measure(d, s))["no_sleep_shutdown"]
+    assert item["status"] == gl.FAIL and item["n"] == 1
+    assert "supervisor starts without a stop (shutdown / restart / logoff / crash) 1 (09-27T09:12 BTCUSDT, ETHUSDT)" \
+        in item["measured"]
+    d = demo_ok()                                            # the System log alone: two boots, the last one later
+    d["machine"]["boot_ms"] = START + 6 * MS_PER_DAY                                     # after the window
+    d["machine"]["power"] = {"error": None, "episodes": [
+        {"kind": "shutdown", "first": "2026-09-27T06:10:49.000Z", "what": "power off requested by "
+                                                                          "StartMenuExperienceHost.exe (Other (Unplanned))"},
+        {"kind": "boot", "first": "2026-09-27T09:11:09.000Z", "what": "Fast Startup boot (after a Start-menu shut down)"},
+        {"kind": "sleep", "first": "2026-09-28T13:50:39.000Z", "what": "hibernate"},
+        {"kind": "boot", "first": "2026-09-28T21:38:31.000Z", "what": "cold boot"}]}
+    item = by_id(gl.measure(d, s))["no_sleep_shutdown"]
+    assert item["status"] == gl.FAIL and item["n"] == 4 and "System log: shutdowns 1, boots 2, sleeps 1" in \
+        item["measured"] and "09-28T21:38 boot: cold boot" in item["measured"]
+    d = demo_ok()                                            # an unread log is said, never a pass or a fail by itself
+    d["machine"]["power"] = {"error": "not read: TimeoutExpired: …", "episodes": []}
+    item = by_id(gl.measure(d, s))["no_sleep_shutdown"]
+    assert item["status"] == gl.PASS and "System log: not read: TimeoutExpired" in item["measured"]
+
+
 def test_a_logged_restore_passes_the_backup_item_else_the_owner_ticks(gl, tmp_path):
     s = base_at(tmp_path)
     d = demo_ok()
@@ -253,7 +337,7 @@ def test_the_cli_exits_zero_always_and_prints_the_table_or_json(gl, tmp_path, mo
                           "(complete)") and "| 3 | availability of the 15-min cycles" in out and "**pass**" in out
     assert gl.main(["--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
-    assert len(doc["items"]) == 18 and doc["summary"] == {"pass": 10, "FAIL": 0, "n.a.": 8}
+    assert len(doc["items"]) == 19 and doc["summary"] == {"pass": 10, "FAIL": 0, "n.a.": 9}
 
     def boom(*a, **k):
         raise RuntimeError("database is locked")
