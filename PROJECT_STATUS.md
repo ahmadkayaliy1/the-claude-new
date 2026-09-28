@@ -6,7 +6,7 @@
 
 ## Overview
 - **Started:** 2026-09-25. **Approx. completion:** 91%.
-- **Current milestone:** v2 Phase 4 (P12.4) is LIVE in production since 2026-09-27 21:50 UTC (H20 + H19 done; three per-pair systems; the 5-day demo window D-047 runs to 2026-10-02). Next: Phase 5 (P12.5) per the approved plan (D-046/D-047, docs/handoff_operator_v2.md §3.9.1 — two checkpoints A/B) on worktree `C:\the_claude_new_wt\phase5`, branch `feat/phase5-goes-deeper` from `main`; the kickoff text is at the end of §3.9.1.
+- **Current milestone:** v2 Phase 5 (P12.5) checkpoint A "ready and safe" is being built on branch `feat/phase5-goes-deeper` (worktree `C:	he_claude_new_wt\phase5`, D-046/D-047/D-048, handoff §3.9.1); production runs Phase 4 since 2026-09-27 21:50 UTC (three per-pair systems; the 5-day demo window runs to 2026-10-02).
 - **Summary:** M0–M10 built; demo/auto execution with Claude via the user's subscription (D-030…D-037). v2 target (D-038…D-040, docs/handoff_operator_v2.md): Phase 1 (P12.1) — venue costs and stop bounds in the snapshot, compact model view (−37 %), operator memory, gate reasons, 30-day record per pair. Phase 2 (P12.2, D-042) — every pair runs as its own system (`start.bat BTCUSDT`): own app.db, logs, dashboard port and MT5 magic (10 %/day per pair), account-wide 25 % drawdown stop, same-direction guard, live account + positions in the model's payload, shared AI ledger with a per-pair share, machine-wide locks (MT5 terminal/history/placement, Claude CLI starts), one-time migration. Both are merged and run in production (three per-pair systems since 2026-09-27). Phase 3 (P12.3, D-043/D-044) — charts sent to Claude, 5-minute screening with calls only on change (≤ 40/pair/day), position management by Python from the rules Claude declares plus Claude's bounded actions on live trades, per-role models with optional escalation, prompts v6 — is merged and running since 2026-09-27 09:18 UTC (H16 done). Phase 4 (P12.4, D-045) — decision metrics and attribution, a bounded per-pair tuning overlay and playbook written only by `tools/tune.py`, daily/weekly Claude (Opus) review sessions and a diagnosis from Task Scheduler with a read-only allow-list, proposals in separate worktrees, a pure-Python 15-min monitor that engages kill switches, notifications (log + toast + optional Telegram), a usage gauge (observe only), dashboard tabs — is done on its branch, awaiting H20/H19.
 
 Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Blocked (reason) · 👤 needs a human action
@@ -15,22 +15,22 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 | # | Action | Needed by | Status |
 |---|---|---|---|
 | H1 | MT5 terminal → Tools → Options → Charts → **Max bars in chart = Unlimited**, then restart terminal | P1.6 | ✅ done by the agent at the user's request (common.ini MaxBars → terminal now reports 100,000,000; backup `common.ini.bak-20260925`) |
-| H2 | Stop the laptop from sleeping (lid close = Do nothing on AC **and** battery, keep the charger in, Wi-Fi power saving off) — double-click `scripts\apply_power_settings.bat` (run as administrator if refused); exact steps and `powercfg` commands in `docs/ops_windows.md` §2–§4; `scripts\check_ops.bat` verifies. The 41-min stall on 2026-09-25 and the 21:39 one were lid-close sleeps | P1.12 / P5.3 | ⏳ |
+| H2 | Stop the laptop from sleeping (lid close = Do nothing on AC **and** battery, keep the charger in, Wi-Fi power saving off) — double-click `scripts\apply_power_settings.bat` (run as administrator if refused); exact steps and `powercfg` commands in `docs/ops_windows.md` §2–§4; `scripts\check_ops.bat` verifies. The 41-min stall on 2026-09-25 and the 21:39 one were lid-close sleeps | P1.12 / P5.3 | ✅ settings (check_ops all ok 2026-09-27) · operational: the outages of 2026-09-26/27 were three critical-battery hibernates (charger unplugged) and two Start-menu shutdowns → H27 |
 | H3 | Allow one close/reopen of the MT5 terminal during the multi-client probe | P1.9 | ✅ |
-| H4 | Put `GOOGLE_API_KEY` in `.env` and copy the actual free-tier RPM/RPD limits from AI Studio into config (since D-030 Gemini is the *fallback* provider, used while Claude is unavailable) | P8.2 | ⏳ |
-| H5 | Review the price-matching decision (Binance vs Windsor execution for BTC/ETH) | P7.2 | ⏳ |
+| H4 | Put `GOOGLE_API_KEY` in `.env` and copy the actual free-tier RPM/RPD limits from AI Studio into config (since D-030 Gemini is the *fallback* provider, used while Claude is unavailable) | P8.2 | ⏳ optional — without it a Claude outage means skipped cycles, never a wrong trade |
+| H5 | Review the price-matching decision (Binance vs Windsor execution for BTC/ETH) | P7.2 | ⏳ blocked by P7.1 (≥ 72 h of recorder data; ≈ 29 h on 2026-09-28) |
 | H6 | Approve demo-account orders | P9.5 | ✅ user 2026-09-26: run automatically on the MT5 demo account and monitor (D-036) |
-| H7 | Start the system yourself with `scripts\start.bat` (then `scripts\start_recorder.bat`); optional autostart: `scripts\install_autostart.bat` (try `-DryRun` first); time sync per `docs/ops_windows.md` | P5.3 | ⏳ |
+| H7 | Start the system yourself with `scripts\start.bat` (then `scripts\start_recorder.bat`); optional autostart: `scripts\install_autostart.bat` (try `-DryRun` first); time sync per `docs/ops_windows.md` | P5.3 | ✅ superseded by H13 (autostart) — except the recorder → H28 / P12.5 A3 |
 | H8 | Risk parameters | P9.1 | ✅ user 2026-09-26: never lose more than 10 %/day — D-036 (1 % target / 3 % max per trade / 10 % daily incl. worst case / 4 % correlated / 3 open) |
 | H9 | Any switch to LIVE trading is the user's decision only | P9.7 / P11.4 | ⏳ |
 | H10 | Demo balance vs intended live capital | P9.5 | ✅ user's intended live capital ≈ $100 (all 3 pairs); the current demo (≈$158) is close enough for realistic tests |
 | H11 | Sign the Claude Code CLI in with your Claude subscription once: `claude auth login` in a terminal (or `claude setup-token` and put the token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`) | P8.9 | ✅ signed in (verified 2026-09-26, §2 of the handoff) |
 | H12 | **Remove the crypto-miner** found on the laptop (2026-09-26): `C:\ProgramData\WindowsTask\` (MicrosoftHost.exe, AppHost.exe, audiodg.exe, WinRing0x64.sys, winlogon.bat/new.xml), persistence `HKLM\...\Run "Realtek HD Audio" = C:\ProgramData\ReaItekHD\taskhostw.exe` and the Startup shortcut `WindowsFormsApp10 - Shortcut.lnk`; 2.1 GB RSS, 50 % CPU. Defender full/offline scan as administrator, remove the entries, reboot, change passwords (Windows, e-mail, broker, Claude). The agent never touches it | all | 🔄 cleanup done 2026-09-26 20:03 (`check_miner` CLEAN); the remainder (Defender offline scan, password rotation, `C:\ProgramData\KMSAuto`) deferred by the user 2026-09-28 (D-047) |
 | H13 | After every reboot nothing auto-starts: run `scripts\start.bat` + `scripts\start_recorder.bat`, or install autostart once with `scripts\install_autostart.bat` (`-DryRun` first) | P5.3 | ✅ autostart installed 2026-09-26; per-pair tasks since 2026-09-27 |
-| H14 | Apply v2 Phases 1+2 and switch to one system per pair: `git merge --ff-only feat/instances` in `C:\the_claude_new`, then double-click `scripts\switch_to_pairs.bat` (stops the all-pairs system, copies each pair's history, one autostart task per pair, starts every pair), then `scripts\start_recorder.bat`. Staying on the all-pairs system is also possible: `scripts\restart.bat` after the merge | P12.2 | ✅ done 2026-09-27: merged, `switch_to_pairs.bat` run, three systems up; XAUUSD stopped for the weekend by the user |
-| H15 | Phase 3 prerequisite: `.venv\Scripts\pip install -r requirements.lock` (matplotlib/pillow become declared; already installed, so a no-op — verified: the live call rendered charts with the production venv) | P12.3 | ⏳ (optional) |
+| H14 | Apply v2 Phases 1+2 and switch to one system per pair: `git merge --ff-only feat/instances` in `C:\the_claude_new`, then double-click `scripts\switch_to_pairs.bat` (stops the all-pairs system, copies each pair's history, one autostart task per pair, starts every pair), then `scripts\start_recorder.bat`. Staying on the all-pairs system is also possible: `scripts\restart.bat` after the merge | P12.2 | ✅ done 2026-09-27: merged, `switch_to_pairs.bat` run, three systems up; XAUUSD running again since the Sunday 22:00 UTC reopen |
+| H15 | Phase 3 prerequisite: `.venv\Scripts\pip install -r requirements.lock` (matplotlib/pillow become declared; already installed, so a no-op — verified: the live call rendered charts with the production venv) | P12.3 | ✅ no-op (matplotlib/pillow already in the venv; the Phase 3 live call rendered charts with it) |
 | H16 | Apply Phase 3: in `C:\the_claude_new`: `git merge --ff-only feat/phase3-sees-manages`, then `.venv\Scripts\python.exe -m tradingsystem config` (the "phase 3:" line shows charts/management/actions on), then `scripts\restart_all.bat`; then `scripts\status_all.bat` | P12.3 | ✅ done 2026-09-27 09:17 UTC (merge) + 09:18 UTC (restart_all): `config` shows charts=on management=on position_actions=on calls/pair/day=40; first cycles with 6 charts valid (ETH 60 s, BTC 144 s) |
-| H17 | Optional after Phase 3: in `config\config.local.yaml` put `escalation: {enabled: true}` under ONE `ai:` block (a second `ai:` line is refused) for Opus confirmation of strong setups; `models: {escalation: {model: fable}}` in the same block to use Fable | P12.3 | ⏳ |
+| H17 | Optional after Phase 3: in `config\config.local.yaml` put `escalation: {enabled: true}` under ONE `ai:` block (a second `ai:` line is refused) for Opus confirmation of strong setups; `models: {escalation: {model: fable}}` in the same block to use Fable | P12.3 | ⏳ optional — each escalation is one more Opus call inside the 30/day cap |
 | H18 | Phase 4, optional, any time after H20 — Telegram (docs/notifications.md §1): a bot from @BotFather, press Start in its chat, the chat id from `getUpdates`, then `TELEGRAM_BOT_TOKEN=` and `TELEGRAM_CHAT_ID=` in `C:\the_claude_new\.env` (no restart); test: `.venv\Scripts\python.exe tools\notify.py --level info --title Test --text Hello`. Without it: log line + Windows toast | P12.4 | ⏸ deferred by the user 2026-09-28 (D-047); log + toast work |
 | H19 | Phase 4, AFTER H20, in `C:\the_claude_new`: `scripts\install_operator_tasks.bat -DryRun`, then `scripts\install_operator_tasks.bat` — `TradingSystemOps-Monitor` (every 15 min), `-ReviewDaily` (04:30 UTC), `-ReviewWeekly` (Sunday 06:00 UTC); `scripts\check_ops.bat` lists them; `-Uninstall` removes them. Then retire the desktop app's 3-hourly monitor task | P12.4 | ✅ done 2026-09-27 ≈ 22:15 UTC: `TradingSystemOps-Monitor/-ReviewDaily/-ReviewWeekly` registered (first monitor run 22:20 UTC, exit 1: low RAM) |
 | H20 | Apply Phase 4 (BEFORE H19), in `C:\the_claude_new`, with the systems stopped: `scripts\stop_all.bat`, `git merge --ff-only feat/phase4-watches-learns`, `.venv\Scripts\python.exe -m tradingsystem config` (the new "phase 4:" line: adaptive=on notify=on toast=on telegram=… monitor=on diagnose=on sessions=on gauge=observe only), `scripts\start_all.bat`, then `scripts\status_all.bat` (merge-then-restart would let the running Phase 3 engines re-read the new trader template, which they cannot fill, until the restart) | P12.4 | ✅ done 2026-09-27 21:26 UTC (stop_all) → merge → 21:50 UTC start_all; `config` shows the "phase 4:" line; the three systems up on Phase 4 code, metrics backfilled (BTC 59, ETH 66 rows), first monitor run 22:20 UTC |
@@ -108,6 +108,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - [2026-09-27] **D-045** Phase 4 implementation choices (P12.4, within D-039/D-043; as-built list in docs/handoff_operator_v2.md §3.8 4.8). (1) Operator sessions run from a Python runner (`tools/operator/run_session.py`; `run_session.ps1` only launches it) under Task Scheduler tasks named `TradingSystemOps-*` (a `TradingSystem-*` name is deleted by `install_autostart.ps1`), UTC start boundaries, task time limits 130/190 min as a backstop beyond every `operator.*_timeout_min`. (2) Session bounds: Bash only for `Bash(.venv/Scripts/python.exe tools/<tool>.py *)` — a space before the `*` (a glued `*` matched `tools/tune.py/../<any file>`), the diagnosis adds `kill_switch.py --pair *` (one pair per session, never the last pair still trading); no git rules (`--output=<file>`); reads bounded to the checkout and the data root, `.env`, credential paths and the user profile denied; a scrubbed environment; the marker `TS_OPERATOR_SESSION=1` makes the tools refuse file arguments and the global switch (tune.py playbook only as `--text`, propose.py no `--body-file` and base `main` only, kill_switch.py no `--all`, review_pack `--out` only under data/reviews, demo_order_test.py refuses) and records the actor as `operator-session:<review id>`; every text tune.py stores is refused when it holds a configured secret or a key-looking token; a diff guard compares `git status` before and after. (3) Sessions are ledger rows (role review/diagnose, pair NULL) outside the pairs' 40/day quota but inside the usage gauge; the gauge counts only `claude_code` providers, weights a cache-read token 0.1 (its budgets are in weighted tokens), has a 5-point step-down in the engines, and only observes until H21 (`ai.usage.enforce: false`). (4) Tuning: revert is always allowed and never counts as the day's change; the spec's `$$` lint rule dropped (values are inserted verbatim); a wider denylist (confidence 80–99, avoid/never NO_TRADE, disregard, mixed-script words, invisible marks, Unicode hyphens and digits); tune.py exit codes 0 applied / 2 refused / 3 invalid / 1 error; `adaptive.yaml` guarded against aliases, size, nesting depth (32; evidence ≤ 8), value count and unexpected keys everywhere it is read (services, API, pack), parsed with libyaml. (5) Notifier: critical never rate-limited, info and warn have separate 20/h budgets, the toast goes before Telegram, the Telegram values follow `.env` without a restart (a change needs two agreeing reads). (6) Monitor: per-pair switch on an order burst or the daily loss, the global switch only for a real MT5 account's drop > 10 % against a recent baseline; 'system not running' (and that pair's stale heartbeats) need two runs; undelivered notifications are re-sent without re-detecting the event; a diagnosis at most every 3 h and never while a review holds the session lock; a config it cannot read exits 3 with a log file and a toast. (7) Paper settlement emits `outcome` events like MT5 (they wake the model). (8) Metrics: an executed trade is scored only after the bar it closed in is closed and stored; the backfill of older decisions runs 20 per 60-s pass. (9) `prompt_versions` keyed by (prompt_hash, library_hash). (10) The review-session budget: the live daily review was 27.3 k unique context + 7.4 k output (34.7 k, the ≤ 30 k target missed by 16 %; the ledger records 204 k input because every turn re-reads the context) — accepted, the levers are the turn limits and the pack size. (11) Phase 4 is applied with the systems stopped (stop_all → merge → start_all): the v5 trader template adds `$tp_hint`, which a running Phase 3 engine cannot fill.
 - [2026-09-28] **D-046** (user) Phase 5 plan approved as docs/handoff_operator_v2.md §3.9.1 — two ff-merge checkpoints (A "ready and safe": tracker reconciliation, backup + restore runbook, recorder keep-alive, monitor battery/RAM/recorder/diagnosis-budget rules, interrupted cycles and transient OAuth retries, quota reserve, OI/ratio fix, demo report + go-live checklist; B "goes deeper": §3.9 items 1, 3, 6, 12, 5, 4, 7 with the ONE live call, then 10, 11, 13) after the user's H20. The user's choices: (a) no MQL5 compiling — the XAU news blackout reads a public weekly calendar feed (no key; verified first) or falls back to prompt text; H23 closed. (b) The persistent session (#8) and MCP tools (#9) are deferred (RAM; no evidence of data-starved decisions; +25–30 k tokens per extra turn); a counter in the review pack decides later; H22/H24 not now. (c) The new payload blocks are paid for by dropping the 1m timeframe from the model view (net-neutral tokens per decision, measured by replay). (d) Capital stays ≈ $100, on the live account too; the risk limits of D-036 are NOT raised — ideas whose 0.01-lot minimum risks more than 3 % are refused by design ("professional, normal trading — no craziness"); go-live starts with one pair (ETH). (e) Default, changeable: the shared Max plan for the decision role with `daily_calls_per_pair 30` / `min_minutes_between_calls 30` / `review_floor_minutes 20` (H30) and development after the 5-hour resets; a second account or an API key with hard USD caps before go-live. ExpressVPN stays as it is (the user's requirement); the monitor only learns its adapter name. Also decided: P11.1 is superseded by D-036 (virtual outcomes are the paper-equivalent measure); P8.8/P11.2 are obsolete; the demo evaluation window is 28 days from the H20 date; the execution venue is Windsor MT5 pending P7.2; the analysis families are code modules registered in `registry.ANALYSES` (spec §9 "by configuration" note); production must move to a machine that is not the development laptop before go-live.
 - [2026-09-28] **D-047** (user) Amends D-046: the demo evaluation window is **5 days** (2026-09-27 21:50 UTC → 2026-10-02), not 28 — the go-live checklist reports the resolved outcomes it has instead of requiring 30 per pair, and the owner signs the sample-size statement knowingly (five days show the absence of catastrophic behaviour and the execution quality, not an edge); checkpoint A of Phase 5 must therefore deliver `demo_report.py` and the checklist inside the window. H18 (Telegram) and the remaining H12 items (Defender offline scan, password rotation, KMSAuto) are deferred by the user; notifications stay log + toast. Phase 4 has been live since 2026-09-27 21:50 UTC (H20, H19 done the same evening); `monitor.diagnose_enabled: false` until Phase 5 A4 adds the diagnosis budget.
+- [2026-09-28] **D-048** Corrections found at the start of P12.5 (supersede the wording, not the decisions, of the 2026-09-28 entries): (1) XAU's first-ever call (2026-09-27 22:22 UTC) came 22 minutes after gold's normal **Sunday** 22:00 UTC reopen, on an open market — not on a closed Saturday market as §0b and §3.9.1 A5 said (2026-09-27 was a Sunday). A5's closed-market rule stays for what it is worth (Windsor's crypto maintenance on Saturdays 05:00–08:00 UTC, holidays, a feed that keeps printing while the venue is closed), not for XAU's first call. (2) `tools/check_integrity.py --since-hours N` took N as DATA_DIR and printed OK after checking nothing, so every earlier "48-h integrity OK" with that flag proved nothing; fixed (a580283), and the real 48-h run (2026-09-28 05:48 UTC) found 0 gaps except one 3-minute ETHUSD@ 1m gap (P4.6).
 
 ## Phases
 
@@ -269,31 +270,31 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P1.11: Gold flow-proxy study
-- Status: ⏳ Not Started
+- Status: ⏳ Not Started — folded into P12.5 checkpoint B item 11 (§3.9.1 B9)
 - Description: XAUUSDT perp vs XAUUSD@: basis, lead-lag (1 s/1 m), does perp delta predict XAUUSD@ returns, weekend drift/Monday gap → include/exclude decision.
 - Affected files: `research/gold_flow/study.py`, `docs/exploration/gold_flow_proxy.md`
-- What was done: —
+- What was done: (2026-09-28, P12.5 A1) The data window is ready: XAUUSDT-perp aggTrades (since 2025-12-11) × XAUUSD@ ticks (since 2024-08-17) overlap ≈ 290 days in the cold Parquet store; one output name: docs/exploration/gold_flow.md.
 - Why this way: spec §3.2 — no substitute data unless it demonstrably helps and is flagged.
 - Notes/open issues: —
-- The exact next step: write study once P1.3/P1.7 are done.
+- The exact next step: P12.5 B9 (`research/gold_flow/study.py`, idle-time, one day-file at a time); H25 only on |corr| ≥ 0.5 with 4-week sign stability.
 
 ### Phase P1.12: Price-matching recorder (3–7 days) 👤
-- Status: ⏳ Not Started
+- Status: 🔄 In Progress — running again since 2026-09-27 21:50 UTC
 - Description: background recorder of Binance spot+perp bookTicker (BTC, ETH, XAUUSDT) and MT5 ticks (BTCUSD@, ETHUSD@, XAUUSD@) with local receive time + clock offset per minute → hourly Parquet.
 - Affected files: `research/price_matching/recorder.py`, `data/research/price_matching/`
-- What was done: —
+- What was done: (2026-09-28, P12.5 A1) The recorder ran in 8 sessions 2026-09-25 → 2026-09-27 06:06 UTC (≈ 21 h of MT5 ticks / 23 h of books, 1,142 parquet files, 29 MB) and again since 2026-09-27 21:50 UTC (status.json updated 2026-09-28 05:45 UTC: 334 k MT5 ticks, 60 k perp and 40 k spot book rows in this session) — ≈ 29 h in total; status in `data/research/price_matching/status.json`; it dies at every suspend/shutdown (no keep-alive until P12.5 A3).
 - Why this way: spec §7.2 — decide by measurement; wall-clock bound, so start early.
 - Notes/open issues: depends on H2.
-- The exact next step: write recorder, start it.
+- The exact next step: Keep it running (H28); P12.5 A3 adds the `TradingSystemOps-Recorder` keep-alive task; P7.1 once ≥ 72 h exist.
 
 ### Phase P1.13: Data-availability table
-- Status: ⏳ Not Started
+- Status: ✅ Completed — docs/data_availability.md (2026-09-25) + docs/capability_matrix.md (generated)
 - Description: consolidate "Actual Data Available per Pair" + preliminary "What is computable" matrix; each cell cites a probe report.
 - Affected files: `docs/data_availability.md`, this file
-- What was done: —
+- What was done: (2026-09-28, P12.5 A1) Built before P6; its "preliminary / P1.6 pending" header is refreshed with P1.6's measured depth.
 - Why this way: spec §1.3 — foundation of the analysis layer.
 - Notes/open issues: —
-- The exact next step: after P1.1–P1.11.
+- The exact next step: —
 
 ### M2 — Storage
 
@@ -444,13 +445,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P3.9: Binance 24 h soak 👤
-- Status: ⏳ Not Started
+- Status: ✅ Completed — superseded by production (24/7 since 2026-09-26)
 - Description: RSS flat, WAL bounded, zero gaps/dupes.
 - Affected files: `docs/benchmarks/soak_binance.md`
-- What was done: —
+- What was done: (2026-09-28, P12.5 A1) A read-only `tools\check_integrity.py C:\the_claude_new\data --since-hours 48` on 2026-09-28 05:48 UTC: 0 candle gaps, 0 aggTrade id gaps, 0 duplicates in every Binance spot and USDⓈ-M table of BTCUSDT, ETHUSDT and XAUUSDT (48 h: 1.08 M BTC spot and 1.28 M BTC perp aggTrades, 0.71 M / 1.16 M ETH, 0.38 M XAUUSDT). The tool itself mis-parsed `--since-hours` (the value became DATA_DIR and it printed OK after checking nothing) — fixed in P12.5 (a580283).
 - Why this way: —
 - Notes/open issues: needs PC on 24 h.
-- The exact next step: after P3.8.
+- The exact next step: —
 
 ### M4 — MT5 ingestion
 
@@ -500,13 +501,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P4.6: MT5 24 h soak 👤
-- Status: ⏳ Not Started
+- Status: ✅ Completed — superseded by production (24/7 since 2026-09-26)
 - Description: soak incl. a daily break.
 - Affected files: `docs/benchmarks/soak_mt5.md`
-- What was done: —
+- What was done: (2026-09-28, P12.5 A1) The same 48-h run: 0 gaps in BTCUSD@ and XAUUSD@ (since the Sunday 22:00 UTC reopen) and one 3-minute gap in ETHUSD@ 1m (server 2026-09-26 22:18 = 19:18 UTC, the only MT5 gap in 48 h; cause not investigated — the execution instrument's candles, not the analysis feed).
 - Why this way: —
 - Notes/open issues: —
-- The exact next step: after P4.5.
+- The exact next step: —
 
 ### M5 — Operations
 
@@ -525,17 +526,17 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - Affected files: `config/config.yaml` (`resources`), dashboard Health tab
 - What was done: measured on the dev PC (2026-09-25 11:14 UTC, all services + both backfills + research recorder): executor 154 MB, binance backfill worker 126 MB, ingest-binance 85, engine 82, api 78, mt5 backfill worker 74, ingest-mt5 63, supervisor 35 MB → core services ≈ 500 MB, ≈ 700 MB while backfilling; MT5 terminal 392 MB. The PC itself was at 97.8 % RAM because of other apps (Claude desktop 1.4 GB, MicrosoftHost 1.4 GB, ChatGPT, Edge…).
 - Why this way: spec §11.8 (must run on 4 GB).
-- Notes/open issues: on a 4 GB PC the budget is ≈ Windows 2–2.5 GB + MT5 0.4 GB + our ≈0.5–0.7 GB → workable only with other apps closed; `low` profile knobs (DuckDB limits, smaller SQLite cache, engine-in-subprocess) not yet wired into every service.
-- The exact next step: wire `resources.<profile>` into engine/backfill (DuckDB memory, cache sizes) and re-measure with `RESOURCE_PROFILE=low`.
+- Notes/open issues: on a 4 GB PC the budget is ≈ Windows 2–2.5 GB + MT5 0.4 GB + our ≈0.5–0.7 GB → workable only with other apps closed; `low` profile knobs (DuckDB limits, smaller SQLite cache, engine-in-subprocess) not yet wired into every service. (2026-09-28, P12.5 A1) The four dead keys (`duckdb_memory_mb`, `duckdb_threads`, `engine_cycle_in_subprocess`, `vision_download_concurrency`) were read by nothing and are removed (P12.5 A0, 2390a31); the profiles size the SQLite cache and the Vision parse blocks only.
+- The exact next step: Measure one documented low-profile layout (spec §11: 4 GB RAM) on a scratch root — P12.5 checkpoint B or later; the RAM facts of 2026-09-28: 330–470 MB free with three pair systems + the Claude desktop app + Chrome.
 
 ### Phase P5.3: Ops runbook 👤
-- Status: 🔄 In Progress
+- Status: ✅ Completed — docs/ops_windows.md §1–§8 (+ §9 backup/restore in P12.5 A2); check_ops all ok (2026-09-27)
 - Description: sleep off, Task Scheduler autostart, time sync, MT5 settings.
 - Affected files: `docs/ops_windows.md`, `scripts/{start,stop,restart,status,start_recorder,check_ops,install_autostart,uninstall_autostart}.bat`
-- What was done: runbook with exact power (lid/sleep buttons/Wi-Fi power saving), time-sync, Windows Update and MT5 steps; double-click scripts: start (detached), stop, restart, status, start_recorder (P1.12), check_ops (verifies the settings); autostart installer/uninstaller for Task Scheduler (written, never run by the agent).
+- What was done: runbook with exact power (lid/sleep buttons/Wi-Fi power saving), time-sync, Windows Update and MT5 steps; double-click scripts: start (detached), stop, restart, status, start_recorder (P1.12), check_ops (verifies the settings); autostart installer/uninstaller for Task Scheduler (written, never run by the agent). (2026-09-28, P12.5 A1) The remaining operational items are the owner's H27 (charger in, never Shut down/Sleep while trading) and H28 (the recorder; its keep-alive task in P12.5 A3).
 - Why this way: the audit proved the 41-min stall was a lid-close sleep on battery (not software); OPS-01/OPS-08/BF-13.
 - Notes/open issues: power settings and autostart are the user's to apply (H2/H7).
-- The exact next step: user applies `docs/ops_windows.md` §2–§4 and starts with `scripts\start.bat`; then `scripts\check_ops.bat` should be all green.
+- The exact next step: —
 
 ### M6 — Quantitative analysis
 
@@ -666,11 +667,11 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P6.15: Replay + trade-rate study
-- Status: ⏳ Not Started
+- Status: 🔄 In Progress (partial)
 - Description: replay harness; setup-event stats → target trades/day per pair (spec §6); confirm decision TF.
 - Affected files: `src/tradingsystem/analysis/replay.py`, `docs/trade_rate_study.md`
-- What was done: — · Why this way: spec §6. · Notes/open issues: —
-- The exact next step: after P6.13.
+- What was done: (2026-09-28, P12.5 A1) The call budget was replayed in P12.3 (`tools/replay_triggers.py`: 21–36 calls/pair/day); the trades/day target and the 15m decision-TF confirmation come from Phase 4's `decision_metrics` after enough outcomes. · Why this way: spec §6. · Notes/open issues: —
+- The exact next step: Derive from `decision_metrics` once ≥ 2–4 weeks of outcomes exist (not a new harness).
 
 ### M7 — Price matching (spec §7.2)
 
@@ -678,14 +679,14 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - Status: ⏳ Not Started
 - Description: basis by session, MT5 spread distribution, lead-lag at 100 ms/1 s, stale quotes, weekends, spot vs perp reference.
 - Affected files: `research/price_matching/analyze.py`, `docs/price_matching.md`
-- What was done: — · Why this way: — · Notes/open issues: needs P1.12 data.
-- The exact next step: after P1.12 ≥ 72 h.
+- What was done: — · Why this way: — · Notes/open issues: needs P1.12 data. (2026-09-28, P12.5 A1) ≈ 29 h of recorder data by 2026-09-28 05:45 UTC (P1.12).
+- The exact next step: P12.5 B9: `research/price_matching/analyze.py` over the recorder Parquet once ≥ 72 h exist → docs/price_matching.md with a proposed `max_basis_deviation_pct` (H5).
 
 ### Phase P7.2: Execution-venue decision 👤
 - Status: ⏳ Not Started
 - Description: A / B / hybrid with dynamic thresholds; decision log with numbers.
 - Affected files: this file
-- What was done: — · Why this way: — · Notes/open issues: H5.
+- What was done: — · Why this way: — · Notes/open issues: H5. (2026-09-28, P12.5 A1) De-facto venue: Windsor MT5 for every pair (D-002, `execution.venue_by_pair`) until P7.1 → H5.
 - The exact next step: after P7.1.
 
 ### Phase P7.3: Price-space translation + basis check
@@ -698,7 +699,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P7.4: Binance execution backend (only if Option B) 👤
-- Status: ⏳ Not Started
+- Status: ⏳ Not Started — conditional: only if P7.2 chooses Option B (Binance execution)
 - Description: Binance backend on testnet.
 - Affected files: `src/tradingsystem/execution/backends/binance.py`
 - What was done: — · Why this way: — · Notes/open issues: conditional.
@@ -716,13 +717,13 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P8.2: Provider adapters
-- Status: 🔄 In Progress
+- Status: ✅ Completed — adapters built and unit-tested
 - Description: Gemini first; Anthropic, OpenAI, OpenAI-compatible (Grok, Groq, OpenRouter, DeepSeek, Ollama).
 - Affected files: `src/tradingsystem/ai/providers/{base,gemini,anthropic_claude,openai_chat,__init__}.py`, `config/config.yaml`
-- What was done: common `LLMProvider` (latency, JSON extraction, per-model pricing, `priced`), provider-specific transport schemas (unsupported keywords stripped; full contract validated client-side). Gemini via google-genai (`response_json_schema`); Anthropic via the official SDK (`output_config.format` json_schema + effort, cached system prompt, server-side refusal fallbacks `fallbacks="default"`, default model `claude-opus-5`, prices opus-5 5/25, sonnet-5 2/10, haiku-4-5 1/5 USD/MTok); OpenAI chat completions with `structured_output` native/json_object/prompt per endpoint. SDK parameter names verified by introspection of the installed packages.
+- What was done: common `LLMProvider` (latency, JSON extraction, per-model pricing, `priced`), provider-specific transport schemas (unsupported keywords stripped; full contract validated client-side). Gemini via google-genai (`response_json_schema`); Anthropic via the official SDK (`output_config.format` json_schema + effort, cached system prompt, server-side refusal fallbacks `fallbacks="default"`, default model `claude-opus-5`, prices opus-5 5/25, sonnet-5 2/10, haiku-4-5 1/5 USD/MTok); OpenAI chat completions with `structured_output` native/json_object/prompt per endpoint. SDK parameter names verified by introspection of the installed packages. (2026-09-28, P12.5 A1) Gemini, Anthropic, OpenAI, OpenAI-compatible and `claude_code` (P8.9) exist and are unit-tested; the Gemini live path stays untested until H4 (`GOOGLE_API_KEY`) — without it a Claude outage means skipped cycles, never a wrong trade.
 - Why this way: spec §4.1 — switch provider with one line (`ACTIVE_AI_PROVIDER`).
 - Notes/open issues: no live call made yet — needs H4 (`GOOGLE_API_KEY`). OpenAI/Grok/DeepSeek prices not configured → blocked by the Cost Governor until set.
-- The exact next step: when the user adds `GOOGLE_API_KEY` (and RPM/RPD) run a live contract-valid generation on a real snapshot (after P6.13).
+- The exact next step: — (H4 optional)
 
 ### Phase P8.3: Repair/retry, rate limits, cost accounting, Cost Governor
 - Status: ✅ Completed
@@ -770,20 +771,20 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P8.8: Live run of all modes (Gemini free)
-- Status: ⏳ Not Started
+- Status: ⛔ Obsolete — superseded by D-030/D-043 (Claude via the subscription in `agent_per_pair`; the other modes stay built and unit-tested, not run live)
 - Description: every mode on live data; valid outputs; requests/cost per cycle recorded.
 - Affected files: `docs/ai_modes_run.md`
 - What was done: — · Why this way: — · Notes/open issues: —
 - The exact next step: after P8.7.
 
 ### Phase P8.9: Claude on the user's subscription (Claude Code CLI)
-- Status: 🔄 In Progress
+- Status: ✅ Completed — production since 2026-09-26 (per-pair since 2026-09-27)
 - Description: use the user's existing Claude subscription as the AI brain instead of pay-per-token APIs; Gemini free as fallback.
 - Affected files: `src/tradingsystem/ai/providers/claude_code.py`, `ai/providers/{base,__init__}.py`, `ai/orchestrator.py`, `analysis/engine.py`, `core/settings.py`, `config/config.yaml`, `.env.example`, `tests/unit/test_claude_code_provider.py`, `tests/fixtures/real/claude_code_*.json`
-- What was done: provider `claude_code` spawns `claude -p` with our system prompt file, snapshot on stdin, `--json-schema`, `--tools ""`, `--strict-mcp-config`, `--setting-sources ""`, `--no-session-persistence`, empty working dir (pure analysis). Allow-listed child env: none of our secrets, no `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`; API-key sign-ins refused (`authMethod`/`apiKeySource`). Login checked with `claude auth status` (first check inline, later ones in a background thread); "not signed in" → 5-min cooldown; usage limit → cooldown until reset; calls serialized; a cancelled/timed-out call kills its CLI process; timeout 180 s. Orchestrator routes to `ai.fallback_provider` (gemini) while unavailable; a fallback equal to the active provider is ignored (never a startup error). Reviewed adversarially twice (billing safety, secret isolation, subprocess behaviour). Verified against the real CLI (full prompt, full schema, real 26 k payload).
+- What was done: provider `claude_code` spawns `claude -p` with our system prompt file, snapshot on stdin, `--json-schema`, `--tools ""`, `--strict-mcp-config`, `--setting-sources ""`, `--no-session-persistence`, empty working dir (pure analysis). Allow-listed child env: none of our secrets, no `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`; API-key sign-ins refused (`authMethod`/`apiKeySource`). Login checked with `claude auth status` (first check inline, later ones in a background thread); "not signed in" → 5-min cooldown; usage limit → cooldown until reset; calls serialized; a cancelled/timed-out call kills its CLI process; timeout 180 s. Orchestrator routes to `ai.fallback_provider` (gemini) while unavailable; a fallback equal to the active provider is ignored (never a startup error). Reviewed adversarially twice (billing safety, secret isolation, subprocess behaviour). Verified against the real CLI (full prompt, full schema, real 26 k payload). (2026-09-28, P12.5 A1) 154 stored decisions by 2026-09-28 05:50 UTC (BTC 77, ETH 72, XAU 5); the shared Max plan caused the two session-limit errors of 2026-09-26 20:45 UTC (a development workflow on the same plan) — D-046 (e).
 - Why this way: D-030 — the subscription is already paid; the same load via the API ≈ $50–100/month, too much for a $100 account.
 - Notes/open issues: shares the plan's 5-hour/weekly limits with interactive use (`rpd: 120`). The success-path parser test uses the real envelope structure; replace with a real capture after H11. First live cycle 2026-09-26 00:45 UTC: BTCUSDT SELL_LIMIT (RR 1.99, conf 57) and ETHUSDT NO_TRADE — valid, but slow/expensive until D-035.
-- The exact next step: after H11 (sign-in) and the restart, run `engine --once --pairs BTCUSDT` (one real call), save its CLI output as a fixture, measure latency/RSS/tokens, then watch one day of paper cycles for limit usage.
+- The exact next step: —
 
 ### M9 — Execution
 
@@ -833,20 +834,20 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P9.6: Executor service
-- Status: 🔄 In Progress
+- Status: ✅ Completed — delivered in P12.3 (D-044)
 - Description: manual/auto queues, re-validation, paper simulation, outcomes.
 - Affected files: `src/tradingsystem/execution/executor.py`
-- What was done: `python -m tradingsystem executor` — candidates (manual: queued by the dashboard; auto: every new valid trade), live quotes, basis check + translation, gate, backend placement (paper / MT5), full gate detail stored on the decision, paper tick advancement from the stored execution ticks, outcome settlement (pips / USD / %), heartbeat. Smoke-tested live in paper mode ($100 paper account).
+- What was done: `python -m tradingsystem executor` — candidates (manual: queued by the dashboard; auto: every new valid trade), live quotes, basis check + translation, gate, backend placement (paper / MT5), full gate detail stored on the decision, paper tick advancement from the stored execution ticks, outcome settlement (pips / USD / %), heartbeat. Smoke-tested live in paper mode ($100 paper account). (2026-09-28, P12.5 A1) MT5 position manager + deal-based outcomes shipped with P12.3; 3 BTC trades settled at the broker (+4.07 / −2.52 USD, net +1.55).
 - Why this way: spec §7.1.
 - Notes/open issues: MT5 position management (breakeven/trailing on live positions) and outcome settlement from `history_deals_get` for demo/live still to be written (needed before P9.5/P11.3).
-- The exact next step: implement MT5 position manager + deal-based outcomes, then run P9.5 with the user's approval.
+- The exact next step: —
 
 ### Phase P9.7: Mode guards + kill switch 👤
-- Status: ⏳ Not Started
+- Status: ✅ Completed — live path unexercised by design until H9
 - Description: live requires Real-server match + flag + typed confirmation.
 - Affected files: `src/tradingsystem/execution/executor.py`
-- What was done: — · Why this way: D-012. · Notes/open issues: H9.
-- The exact next step: after P9.6.
+- What was done: (2026-09-28, P12.5 A1) Live guards: `execution.mode=live` requires `execution.live_confirmation` = the exact phrase (settings.py `_live` check) and `MT5Backend.assert_account` refuses a non-matching server/trade_mode ("account mismatch", mt5_backend.py); kill switches global/per-pair (scripts, the dashboard ON button, the monitor); unit-tested. A live-refusal rehearsal is on the go-live checklist (P12.5 A8). · Why this way: D-012. · Notes/open issues: H9.
+- The exact next step: —
 
 ### Phase P9.8: Virtual outcomes
 - Status: ✅ Completed
@@ -858,7 +859,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P9.9: Economic-calendar blackout (optional)
-- Status: ⏳ Not Started
+- Status: ⏳ Not Started — folded into P12.5 item 10 (§3.9.1 B8): a feed-based XAU news blackout (D-046 a: no MQL5)
 - Description: MQL5 service exports calendar; gate applies blackout for XAU.
 - Affected files: `mql5/CalendarExport.mq5`, `risk_gate.py`
 - What was done: — · Why this way: — · Notes/open issues: optional.
@@ -912,7 +913,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: —
 
 ### Phase P10.6: Execute Now
-- Status: 🔄 In Progress
+- Status: ✅ Completed — built and tested; the manual queue path never exercised in production (auto since D-036)
 - Description: confirm dialog, idempotency, gate result shown.
 - Affected files: `web/static/app.js`, `src/tradingsystem/api/app.py`
 - What was done: button per recommendation (enabled only for valid, unexpired, not-yet-executed trades) → confirm → `POST /api/decisions/{id}/execute` with `X-Dashboard-Token` header (CSRF-safe) and Origin check → `execution_state='queued'` → executor re-validates with live prices; repeated clicks are idempotent.
@@ -932,28 +933,28 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 ### M11 — Integration and go-live
 
 ### Phase P11.1: One-week paper run 👤
-- Status: ⏳ Not Started
+- Status: ⛔ Superseded by D-036 (demo/auto instead of a paper week; virtual outcomes are the paper-equivalent measure)
 - Description: full pipeline in paper mode; metrics report.
 - Affected files: `docs/runs/paper_week1.md`
 - What was done: — · Why this way: spec §9 safety mode. · Notes/open issues: —
 - The exact next step: after M10.
 
 ### Phase P11.2: Agent-mode shadow comparison
-- Status: ⏳ Not Started
+- Status: ⛔ Obsolete (D-030/D-043: `agent_per_pair` on Claude)
 - Description: run modes in shadow on the same triggers; pick default mode.
 - Affected files: `docs/runs/mode_comparison.md`
 - What was done: — · Why this way: spec §4.2. · Notes/open issues: —
 - The exact next step: after P11.1.
 
 ### Phase P11.3: Demo auto-trading 2–4 weeks 👤
-- Status: ⏳ Not Started
+- Status: 🔄 In Progress — demo/auto since 2026-09-26 22:17 UTC; the evaluation window (D-047) is 2026-09-27 21:50 UTC → 2026-10-02
 - Description: automatic mode on Windsor demo; performance report.
 - Affected files: `docs/runs/demo.md`
-- What was done: — · Why this way: spec §9 demo testing. · Notes/open issues: —
-- The exact next step: after P11.2.
+- What was done: (2026-09-28, P12.5 A1) At 2026-09-28 05:50 UTC: BTC 77 decisions (55 NO_TRADE, 3 BUY, 4 SELL; 6 error, 9 skipped), 3 executed (net +1.55 USD), 3 refused by the gate, 7 virtual outcomes (4 TP1 first, 3 SL first); ETH 72 decisions (65 NO_TRADE, 1 BUY, 1 SELL), 2 refused, 2 virtual TP1 first; XAU 5 NO_TRADE since the Sunday 22:00 UTC reopen; equity 101.33 USD, account drawdown 2.45 %. · Why this way: spec §9 demo testing. · Notes/open issues: —
+- The exact next step: The window closes 2026-10-02 → `tools/demo_report.py` → docs/runs/demo.md → docs/go_live_checklist.md (P12.5 A8) → the owner's H9.
 
 ### Phase P11.4: Go-live checklist 👤
-- Status: ⏳ Not Started
+- Status: ⏳ Not Started 👤 — the checklist and `tools/go_live_inputs.py` are written in P12.5 A8; the owner signs (H9)
 - Description: signed checklist; live at minimum risk — user's decision only.
 - Affected files: `docs/go_live_checklist.md`
 - What was done: — · Why this way: — · Notes/open issues: H9.
@@ -985,7 +986,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - Affected files: new `analysis/charts.py`, `execution/management.py`, `execution/action_gate.py`, `tools/replay_triggers.py`, prompts `escalation/*`, `docs/measurements/phase3_live.md`, fixture `tests/fixtures/real/claude_code_stream_json_result.jsonl`; changed `ai/providers/{base,claude_code,__init__}.py`, `ai/{repair,budget,triggers,orchestrator,contract,store}.py`, `ai/prompts/**`, `analysis/engine.py`, `core/settings.py`, `cli.py`, `execution/{executor,risk_gate,price_mapping,sizing}.py`, `execution/backends/{mt5_backend,paper}.py`, `api/app.py`, `web/static/{app.js,style.css}`, `config/config.yaml`, `pyproject.toml`, `requirements.lock`, `docs/ops_windows.md` §1b; tests `test_charts`, `test_claude_code_images`, `test_triggers_screen`, `test_management`, `test_position_actions`, `test_roles_escalation`, `test_phase3_core`, `test_replay_budget` (integration) and extensions.
 - What was done: D-043 + D-044. 606 unit tests pass (+ `test_replay_budget -m integration`). **The ONE live call** (`engine --once --pairs BTCUSDT`, scratch data root, Sonnet, 6 charts): valid first attempt, 24 864 input / 2 608 output tokens, 43.4 s, 1 turn, stream-json user-line shape `message` (probed once, recorded), charts +37 MB engine RSS, the model saw the live BUY and held it (`position_actions` []); the input target (≤ 23 k) was missed by 8 % — +2.3 k images, +2.2 k system prompt v6 (a cache read from the second call on), details and levers in `docs/measurements/phase3_live.md`. **Screening budget** (read-only replay of stored data, setup + idle calls): BTC 36 / ETH 35 / XAU 32 calls per day on a Friday, 30–32 on the weekend, XAU 21 on a Thursday — within the 40 cap with room for reviews and events; `snapshot_build_ms` median 0.2–0.5 s, p95 ≤ 2.3 s → the full payload is built at every 5m screen. **Review:** 6 lenses (money path, AI path, engine/triggers, charts/API/web, prompts vs code, config/ops/rollback) each checked by an independent skeptic: 41 findings, 39 confirmed and fixed (1 refuted, 1 left open — see notes); the fixes re-reviewed by 3 lenses + skeptics: 17 findings, 16 confirmed and fixed; a final independent check of those fixes confirmed them and found 2 more small defects in the resumed-plan logic (a venue-deferred leg of a two-leg stop move abandoned; a superseded stop sending a false 'refused' event) — fixed with tests. Main fixes: protective actions wait through a closed market / terminal refusal instead of being given up; a timeout is never re-sent blindly; a model action is planned once and resumed exactly; single-leg trades number their leg by its real target and turn `tp_hit` on a nearer target into `price_reached`; management waits for the bar just closed; checked live basis; escalation never falls back to Gemini; a withheld trade keeps its protective actions (as a NO_TRADE that says so); a failed call gives back its setup and events; the event cursor survives restarts; duplicate YAML keys refused; per-pair overrides validated by the all-pairs check. Also found on the way: `engine --once` never waited for the background sign-in check (fixed, `wait_for_provider`).
 - Why this way: D-038 (charts), D-043 (Claude leads, code protects; 40/day; per-role models), D-044 (implementation choices). Position management moved here from Phase 5 because the first live BTC position (2026-09-26) showed the gap.
-- Notes/open issues: (1) input tokens 24.9 k vs the 23 k target — accepted for now (D-044); levers without code: fewer/smaller charts (`ai.charts.timeframes`, `width/height`), `ai.charts.enabled: false`. (2) RAM: +37 MB per engine with charts (≈ +110 MB for three pairs on a laptop with ≈ 0.4 GB free) — per-pair switch `instances.<PAIR>.overrides: {ai: {charts: {enabled: false}}}`; watch `status_all.bat` after H16. (3) Left open from the review (uncertain, no deterministic harm): rule 9 calibrates confidence to TP1 while at the minimum lot the executed target is the largest-fraction TP. (4) BTC/ETH candle_close exits, structure trailing and Claude's priced actions (stop/target moves) wait while the live basis is unavailable (a quote > 60 s old or the basis off its 60-min median); close/cancel do not. A priced model action still waiting after `risk.max_recommendation_age_s` (5 min) is refused as expired (Claude is told). (5) All-pairs layout only: the executor event cursor is one for all pairs, so a restart can re-wake an already handled event of another pair (per-pair production unaffected). (6) The CLI capability file (`cli_capabilities.json`) lives in the CLI work folder `%TEMP%\tradingsystem-claude-code\` (one per machine) instead of `data/shared/`. (7) Seen once in production (2026-09-26 23:07 UTC): a BTC call skipped by the data gate because the Binance analysis price was 134 s old — rare, not Phase 3. (8) Code rollback to pre-Phase-3 commits needs the Phase 3 keys removed from `config.local.yaml` first (ops §1b). **Live after H16 (2026-09-27 09:18–09:25 UTC):** all services live, RAM 0.98 GB free with three systems; ETH first cycle 25 210 input / 3 766 output tokens, 60 s, valid NO_TRADE (6 images, +33 MB RSS); BTC first cycle 25 059 / 9 665, **144 s** (above the 120 s target: a long plan with 3 management rules), valid SELL conf 60 — rejected by the gate `rr_after_costs: 1.50 ≥ 1.5` (the RR after costs was 1.4996, printed with 2 decimals → follow-up (9)); `snapshot_build_ms` 15.3 s (BTC) / 6.8 s (ETH) on the first build after the restart (cold caches + backfill passes; the replay medians were 0.2–0.5 s — watch the steady state, the spec's 3 s rule applies if it stays high); two `data_not_ready` warnings for the 15m bars around the restart (the feeds reconnected within 20 s). Earlier that night, before Phase 3 (on Phase 2 code): the BTC BUY `00eded5a` closed +2.55 USD and a second BUY `d9633718` +1.52 USD — equity 99.11 → 103.85. XAU closed until Sunday 22:00 UTC (no Phase 3 cycle yet). (9) Follow-up for Phase 4: the gate's `rr_after_costs` detail prints 2 decimals while the comparison is exact (`1.50 ≥ 1.5` shown as a failure) — print 3 decimals and compare with a 1e-6 tolerance, so the model's `gate_reason` is not contradictory.
+- Notes/open issues: (1) input tokens 24.9 k vs the 23 k target — accepted for now (D-044); levers without code: fewer/smaller charts (`ai.charts.timeframes`, `width/height`), `ai.charts.enabled: false`. (2) RAM: +37 MB per engine with charts (≈ +110 MB for three pairs on a laptop with ≈ 0.4 GB free) — per-pair switch `instances.<PAIR>.overrides: {ai: {charts: {enabled: false}}}`; watch `status_all.bat` after H16. (3) Left open from the review (uncertain, no deterministic harm): rule 9 calibrates confidence to TP1 while at the minimum lot the executed target is the largest-fraction TP. (4) BTC/ETH candle_close exits, structure trailing and Claude's priced actions (stop/target moves) wait while the live basis is unavailable (a quote > 60 s old or the basis off its 60-min median); close/cancel do not. A priced model action still waiting after `risk.max_recommendation_age_s` (5 min) is refused as expired (Claude is told). (5) All-pairs layout only: the executor event cursor is one for all pairs, so a restart can re-wake an already handled event of another pair (per-pair production unaffected). (6) The CLI capability file (`cli_capabilities.json`) lives in the CLI work folder `%TEMP%\tradingsystem-claude-code\` (one per machine) instead of `data/shared/`. (7) Seen once in production (2026-09-26 23:07 UTC): a BTC call skipped by the data gate because the Binance analysis price was 134 s old — rare, not Phase 3. (8) Code rollback to pre-Phase-3 commits needs the Phase 3 keys removed from `config.local.yaml` first (ops §1b). **Live after H16 (2026-09-27 09:18–09:25 UTC):** all services live, RAM 0.98 GB free with three systems; ETH first cycle 25 210 input / 3 766 output tokens, 60 s, valid NO_TRADE (6 images, +33 MB RSS); BTC first cycle 25 059 / 9 665, **144 s** (above the 120 s target: a long plan with 3 management rules), valid SELL conf 60 — rejected by the gate `rr_after_costs: 1.50 ≥ 1.5` (the RR after costs was 1.4996, printed with 2 decimals → follow-up (9)); `snapshot_build_ms` 15.3 s (BTC) / 6.8 s (ETH) on the first build after the restart (cold caches + backfill passes; the replay medians were 0.2–0.5 s — watch the steady state, the spec's 3 s rule applies if it stays high); two `data_not_ready` warnings for the 15m bars around the restart (the feeds reconnected within 20 s). Earlier that night, before Phase 3 (on Phase 2 code): the BTC BUY `00eded5a` closed +2.55 USD and a second BUY `d9633718` +1.52 USD — equity 99.11 → 103.85. XAU closed until Sunday 22:00 UTC (no Phase 3 cycle yet). (9) Follow-up for Phase 4: the gate's `rr_after_costs` detail prints 2 decimals while the comparison is exact (`1.50 ≥ 1.5` shown as a failure) — print 3 decimals and compare with a 1e-6 tolerance, so the model's `gate_reason` is not contradictory. (2026-09-28, P12.5 A1) (9) fixed in P12.4 (7c872e8: 3 decimals + a 1e-6 tolerance). XAU's first cycle: 2026-09-27 22:22 UTC (NO_TRADE), right after the Sunday reopen.
 - The exact next step: the remaining §3.10 checks as trades happen (chart thumbnails in the dashboard — seen for BTC/ETH; management rows on the next open position; a kill switch that blocks new orders while a protective stop move still applies; XAU's first cycle after Sunday 22:00 UTC); watch `snapshot_build_ms` in the engine status over a day. Then P12.4 on worktree `C:\the_claude_new_wt\phase4`, branch `feat/phase4-watches-learns` (Opus 5.5) — include follow-up (9).
 
 ### Phase P12.4: "Watches and learns" — metrics, bounded tuning, operator sessions, monitor, notifier (v2 Phase 4)
@@ -998,7 +999,7 @@ Status legend: ✅ Completed · 🔄 In Progress · ⏳ Not Started · ⚠️ Bl
 - The exact next step: the user's H20 (`stop_all.bat` → merge → `start_all.bat`), then H19 (install the operator tasks from `C:\the_claude_new`), H18 optional. Then verify: `tradingsystem config` shows the "phase 4:" line; `scripts\check_ops.bat` lists the three `TradingSystemOps-*` tasks; the first monitor run's Last Result (0 or 1) and `logs\monitor.jsonl`; the dashboard tabs (Operator, Tuning, Proposals, Reviews); `decision_metrics` rows appearing (the backfill takes ≈ 3 passes of 60 s per pair); the first daily review at 04:30 UTC (`data\reviews\*_daily.session.json`, the summary toast/Telegram). H21 after a week. Then P12.5 on worktree `C:\the_claude_new_wt\phase5`, branch `feat/phase5-goes-deeper` (§3.9).
 
 ### Phase P12.5: "Goes deeper" — enrichments, persistent session (opt-in), MCP tools, news blackout, gold proxy (v2 Phase 5)
-- Status: ⏳ Not Started — plan approved 2026-09-28 (D-046, handoff §3.9.1); starts after the user's H20
+- Status: 🔄 In Progress — checkpoint A on worktree `C:	he_claude_new_wt\phase5`, branch `feat/phase5-goes-deeper` (from main `e3bcdaa`, started 2026-09-28 05:40 UTC)
 - Description: as approved in §3.9.1 — checkpoint A "ready and safe" (tracker reconciliation, `tools/backup_state.py` + restore runbook, recorder keep-alive task, monitor battery/commit/recorder/diagnosis-budget rules, `interrupted` cycles and transient OAuth retries, cancelled-call ledger rows, session-aware quota reserve, OI/positioning-ratio fix from `metrics`, kill-switch protective test, dead resource knobs, `tools/demo_report.py`, `docs/go_live_checklist.md`, `tools/go_live_inputs.py`); checkpoint B "goes deeper" (payload v4: depth bands, prev W/M levels, forming bar, daily profiles, session statistics, BTC–ETH correlation, legend v5 with the 1m view dropped; the ONE live call; feed-based XAU news blackout; the gold-proxy study P1.11 + the price-matching analysis P7.1 as idle-time jobs). Deferred: persistent session (#8), MCP tools (#9).
 - Affected files: handoff §3.9 + §3.9.1 — `tools/{backup_state,demo_report,go_live_inputs}.py`, `tools/monitor.py`, `tools/health_report.py`, `scripts/{install_operator_tasks,install_autostart}.ps1`, `analysis/{snapshot,context,model_view,charts,orderflow}.py`, new `analysis/{cross,news}.py`, `ai/{orchestrator,providers/claude_code,triggers}.py`, `analysis/engine.py`, `execution/{executor,risk_gate}.py`, `research/gold_flow/study.py`, `research/price_matching/analyze.py`, docs `go_live_checklist.md`, `runs/demo.md`, `exploration/gold_flow.md`, `price_matching.md`, `ops_windows.md` §9, `measurements/phase5_live.md`
 - What was done: —

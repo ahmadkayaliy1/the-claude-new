@@ -1,7 +1,7 @@
 # Actual Data Available per Pair (spec §1.3) — P1.13
 
 Every cell is backed by a measurement in `docs/exploration/*.md` (probe name in brackets).
-Status: **preliminary** — P1.6 (MT5 depth after `maxbars=Unlimited`) and P1.11 (gold flow-proxy value) pending.
+Status: P1.6 done (MT5 M1 history from 2019-02-24 XAUUSD@ / 2015-11-15 BTCUSD@ / 2019-06-27 ETHUSD@; XAUUSD@ ticks only from 2024-08-17); P1.11 (the gold flow-proxy value) is P12.5 B9 — its data window (≈ 290 days of XAUUSDT-perp × XAUUSD@ overlap) is ready. Reconciled 2026-09-28 (P12.5 A1).
 Last updated: 2026-09-25.
 
 ## Sources × data types
