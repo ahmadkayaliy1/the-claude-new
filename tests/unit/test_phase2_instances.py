@@ -123,6 +123,9 @@ class FakeProc:
     def cmdline(self):
         return self._cmd
 
+    def ppid(self):                     # read per supervisor match since Phase 5 (not prefetched for every process)
+        return self.info["ppid"]
+
     def create_time(self):
         return 0.0
 
