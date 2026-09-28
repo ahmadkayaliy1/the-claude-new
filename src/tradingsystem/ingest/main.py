@@ -35,10 +35,10 @@ def run_binance(data_dir: str | None = None, backfill: bool = True) -> None:
     appdb = AppDB(s.paths.state() / "app.db")
     svc = BinanceLiveService(s, InstrumentRegistry.from_settings(s), appdb)
     keeper = keeper_done = None
-    if backfill:                  # restarted with backoff if it ever dies (BF-03)
-        from .binance.backfill import COLLECTOR, start_worker
+    if backfill:                  # one worker process per pass (A7), restarted with backoff if it dies (BF-03)
+        from .binance.backfill import COLLECTOR, DAILY_RUN_UTC_HOUR, start_worker
         from .common.backfill_loop import WorkerKeeper
-        keeper = WorkerKeeper(lambda: start_worker(data_dir), appdb, COLLECTOR)
+        keeper = WorkerKeeper(lambda: start_worker(data_dir), appdb, COLLECTOR, daily_hour=DAILY_RUN_UTC_HOUR)
         keeper_done = keeper.monitor()
 
     async def main() -> None:

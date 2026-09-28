@@ -40,6 +40,7 @@ import pyarrow.csv as pacsv
 from ...core.instruments import Instrument
 from ...core.timeframes import Timeframe
 from ...core.timeutil import MS_PER_DAY, now_ms
+from ...storage.disk import DiskFullError     # shared with the MT5 backfill; the Binance backfill imports it from here
 from ...storage.parquet_store import DayWriter, ParquetColdStore
 from ...storage.sqlite_store import SQLiteHotStore
 from ...storage.tablespec import VISION_DONE, TableSpec
@@ -63,10 +64,6 @@ DOWNLOAD_CHUNK = 1 << 20
 BEAT_S = 30.0                     # collector heartbeat interval while one request/download is in progress
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 T = TypeVar("T")
-
-
-class DiskFullError(RuntimeError):
-    pass
 
 
 class VisionTransientError(RuntimeError):

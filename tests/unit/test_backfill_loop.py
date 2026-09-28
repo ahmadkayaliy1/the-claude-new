@@ -1,5 +1,7 @@
-"""Backfill worker bookkeeping (BF-01/BF-03/BF-14/F4/OPS-02): pass results, retry scheduling, a worker that never
-dies, status hygiene and the parent's restart keeper. Pure logic — no market data."""
+"""Backfill worker bookkeeping (BF-01/BF-03/BF-14/F4/OPS-02): pass results, retry scheduling, a pass that never
+kills the bookkeeping, status hygiene, and the parent's keeper — one worker process per pass (Phase 5 A7: the worker
+exits when its pass is done and is started again when the next pass is due). Pure logic — no market data, no
+network; one test spawns a real (tiny) worker process."""
 import datetime as dt
 import json
 
@@ -7,8 +9,10 @@ import pytest
 
 from tradingsystem.ingest.common import backfill_loop as bl
 from tradingsystem.ingest.common.appdb import AppDB
-from tradingsystem.ingest.common.backfill_loop import (PassResult, StepIncomplete, WorkerKeeper, finish_pass,
-                                                       next_daily_run, schedule, worker_loop)
+from tradingsystem.ingest.common.backfill_loop import (EXIT_PASS_DISK_FULL, EXIT_PASS_DONE, EXIT_PASS_TRANSIENT,
+                                                       PassResult, StepIncomplete, WorkerKeeper, finish_pass,
+                                                       next_daily_run, pass_exit_code, pass_result, run_worker_pass,
+                                                       schedule, spawn_pass)
 
 C = "binance_backfill"
 
@@ -84,9 +88,21 @@ def test_set_status_keeps_errors_unless_cleared(tmp_path):
     assert row(db, "mt5")["last_error"] is None
 
 
-def test_worker_survives_crashes_and_retries_soon(tmp_path):
-    """F4/BF-03: a crashed or failed pass is retried within minutes (not at the next daily slot), a clean pass
-    waits for the daily slot, and every idle minute refreshes the heartbeat."""
+class FakeProc:
+    def __init__(self) -> None:
+        self.alive, self.exitcode, self.terminated = True, None, False
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def terminate(self) -> None:
+        self.terminated, self.alive = True, False
+
+
+def test_passes_are_retried_soon_after_a_crash_or_transient_failure_and_daily_after_a_clean_one(tmp_path):
+    """F4/BF-03 with one worker process per pass (A7): the crashed pass and the transient one are retried within
+    minutes (5, then 10 min: the keeper counts consecutive transient passes across processes), a clean pass waits for
+    the daily slot. The keeper notices an exit at its next minute check."""
     db = AppDB(tmp_path / "app.db")
     start = dt.datetime(2026, 9, 26, 12, 10, tzinfo=dt.timezone.utc).timestamp()
     clock = Clock(start)
@@ -98,25 +114,130 @@ def test_worker_survives_crashes_and_retries_soon(tmp_path):
         out = next(outcomes)
         if isinstance(out, Exception):
             raise out
+        finish_pass(db, C, out)
         return out
 
-    worker_loop(run_pass, collector=C, appdb=db, daily_hour=3, once=False, logger=bl.log, sleep=clock.sleep,
-                clock=clock, max_passes=3)
-    assert [s - start for s in starts] == [0, 300, 900]
-    assert max(clock.sleeps) <= bl.IDLE_SLICE_S
-    assert events(db)[0] == "error" and row(db)["state"] == "reconnecting"
-    assert "next_run" in json.loads(row(db)["detail"])
+    class PassProc(FakeProc):
+        """A worker process that ran its pass and exited with the pass's code (as ``worker_main`` does)."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.alive, self.exitcode = False, pass_exit_code(run_worker_pass(run_pass, collector=C, appdb=db,
+                                                                              logger=bl.log))
+
+    k = WorkerKeeper(PassProc, db, C, daily_hour=3, clock=clock)
+    while len(starts) < 3 or k.proc is not None:
+        k.check()
+        clock.t += 60
+    assert [s - start for s in starts] == [0, 300, 960]
+    assert dt.datetime.fromtimestamp(k.next_pass, dt.timezone.utc) == dt.datetime(2026, 9, 27, 3, tzinfo=dt.timezone.utc)
+    assert k.fails == 0 and k.passes == 3 and k.restarts == 0
+    assert events(db)[0] == "error" and "worker_exit" not in events(db) and "backfill_restart" not in events(db)
+    assert row(db)["state"] == "stopped" and json.loads(row(db)["detail"])["next_run"] == "2026-09-27T03:00:00.000Z"
 
 
-class FakeProc:
-    def __init__(self) -> None:
-        self.alive, self.exitcode, self.terminated = True, None, False
+def test_a_finished_pass_leaves_no_process_and_keeps_the_heartbeat_fresh(tmp_path):
+    """Between two passes no worker process exists (A7: six idle workers held ≈ 1.2 GB); the keeper refreshes the
+    collector's heartbeat and keeps the state and detail the pass wrote."""
+    db = AppDB(tmp_path / "app.db")
+    clock = Clock(dt.datetime(2026, 9, 26, 12, 10, tzinfo=dt.timezone.utc).timestamp())
+    procs: list[FakeProc] = []
 
-    def is_alive(self) -> bool:
-        return self.alive
+    def start() -> FakeProc:
+        procs.append(FakeProc())
+        return procs[-1]
 
-    def terminate(self) -> None:
-        self.terminated, self.alive = True, False
+    k = WorkerKeeper(start, db, C, daily_hour=3, clock=clock)
+    finish_pass(db, C, PassResult(progress={"spot:BTCUSDT/btcusdt_candles_1m": "done"}))
+    procs[0].alive, procs[0].exitcode = False, EXIT_PASS_DONE
+    assert not k.check() and k.proc is None and k.backoff == k.min_backoff_s
+    with db._lock:
+        db._con.execute("UPDATE collector_status SET updated_ms=0 WHERE collector=?", (C,))
+    clock.t += 60
+    assert not k.check() and len(procs) == 1
+    r = row(db)
+    assert r["updated_ms"] > 0 and r["state"] == "stopped" and r["last_error"] is None        # beat, same state
+    assert json.loads(r["detail"])["spot:BTCUSDT/btcusdt_candles_1m"] == "done"
+    clock.t = k.next_pass
+    assert k.check() and len(procs) == 2 and k.passes == 2
+    assert "worker_exit" not in events(db) and "backfill_restart" not in events(db)
+
+
+def test_a_disk_full_pass_waits_the_longest_backoff(tmp_path):
+    db = AppDB(tmp_path / "app.db")
+    clock = Clock(1_000_000.0)
+    p = FakeProc()
+    k = WorkerKeeper(lambda: p, db, C, clock=clock)
+    p.alive, p.exitcode = False, EXIT_PASS_DISK_FULL
+    k.check()
+    assert k.next_pass == clock.t + bl.RETRY_BACKOFF_S[-1] and k.proc is None
+
+
+def test_pass_exit_codes_say_how_the_pass_went_and_anything_else_is_a_crash():
+    assert pass_exit_code(PassResult()) == EXIT_PASS_DONE
+    assert pass_exit_code(PassResult(permanent={"u": "bad row"})) == EXIT_PASS_DONE       # next daily slot
+    assert pass_exit_code(PassResult(transient={"u": "x"})) == EXIT_PASS_TRANSIENT
+    assert pass_exit_code(PassResult(transient={"u": "x"}, disk_full=True)) == EXIT_PASS_DISK_FULL
+    assert pass_result(EXIT_PASS_DONE).ok and pass_result(EXIT_PASS_TRANSIENT).transient
+    assert pass_result(EXIT_PASS_DISK_FULL).disk_full
+    assert all(pass_result(c) is None for c in (None, 1, -15, 65536))     # unhandled error, kills: restart backoff
+
+
+def test_a_crashed_pass_is_a_transient_result_with_an_error_event(tmp_path):
+    db = AppDB(tmp_path / "app.db")
+
+    def boom() -> PassResult:
+        raise OSError("getaddrinfo failed")
+
+    res = run_worker_pass(boom, collector=C, appdb=db, logger=bl.log)
+    assert res.transient and pass_exit_code(res) == EXIT_PASS_TRANSIENT
+    assert row(db)["state"] == "error" and "getaddrinfo" in row(db)["last_error"] and events(db) == ["error"]
+
+
+def _one_pass_worker(db_path: str, outcome: str) -> int:
+    """A worker process's body as ``worker_main`` has it, with a stand-in pass (no network, no terminal)."""
+    from pathlib import Path
+    db = AppDB(Path(db_path))
+    try:
+        def run_pass() -> PassResult:
+            res = PassResult(transient={"metrics usdm:ETHUSDT": "ConnectError()"}) if outcome == "transient" \
+                else PassResult()
+            finish_pass(db, C, res)
+            return res
+        res = run_worker_pass(run_pass, collector=C, appdb=db, logger=bl.log)
+    finally:
+        db.close()
+    return pass_exit_code(res)
+
+
+def test_a_real_worker_process_exits_after_its_pass_and_is_respawned_when_the_next_is_due(tmp_path):
+    """The lifecycle with real processes: the spawned worker ends with the pass's exit code (nothing stays resident),
+    the keeper starts a new process only when the retry is due."""
+    db_path = tmp_path / "app.db"
+    db = AppDB(db_path)
+    clock = Clock(dt.datetime(2026, 9, 26, 12, 10, tzinfo=dt.timezone.utc).timestamp())
+    spawned = []
+
+    def start():
+        spawned.append(spawn_pass(_one_pass_worker, (str(db_path), "transient"), "backfill-test"))
+        return spawned[-1]
+
+    k = WorkerKeeper(start, db, C, clock=clock)
+    try:
+        spawned[0].join(120)
+        assert spawned[0].exitcode == EXIT_PASS_TRANSIENT and not spawned[0].is_alive()
+        assert not k.check() and k.proc is None and k.next_pass == clock.t + 300
+        clock.t += 299
+        assert not k.check() and len(spawned) == 1                          # nothing runs before the retry is due
+        clock.t += 1
+        assert k.check() and len(spawned) == 2
+        spawned[1].join(120)
+        assert not k.check() and k.next_pass == clock.t + 600 and k.fails == 2
+        assert row(db)["state"] == "reconnecting" and "worker_exit" not in events(db)
+    finally:
+        k.stop()
+        for p in spawned:
+            p.join(10)
 
 
 def test_keeper_restarts_a_dead_worker_with_backoff_and_not_after_stop(tmp_path):

@@ -27,7 +27,7 @@ from ...core.settings import Settings, load_settings
 from ...core.timeframes import Timeframe
 from ...core.timeutil import MS_PER_DAY, iso, now_ms
 from ...storage.parquet_store import ParquetColdStore
-from ...storage.retention import rollover
+from ...storage.retention import ColdArchiveGuard, rollover
 from ...storage.sqlite_store import SQLiteHotStore
 from ...storage.tablespec import FORMING, TableSpec, spec_for, system_specs, table_specs
 from ...storage.validators import validate_rows
@@ -83,6 +83,8 @@ class MT5LiveService:
         self.model = ServerTimeModel()
         self.appdb = AppDB(s.paths.state() / "app.db")
         self.cold = ParquetColdStore(s.paths.data() / "cold")
+        self.archive_guard = ColdArchiveGuard(self.cold.root, s.storage.cold_archive_min_free_gb,
+                                              lambda msg: self.appdb.add_event(COLLECTOR, "rollover_skipped", msg))
         reg = InstrumentRegistry.from_settings(s)
         self.instruments = [i for i in reg.all() if i.venue == "mt5"]
         self.term = MT5Terminal(s.mt5_data_profile())
@@ -323,6 +325,8 @@ class MT5LiveService:
         self._clear_error = False
 
     def _rollover(self) -> None:
+        if not self.archive_guard.allowed():        # low disk: the ticks stay hot until a later rollover (A7)
+            return
         for sink in self.sinks.values():
             spec = spec_for(sink.inst, "ticks")
             try:
@@ -349,10 +353,11 @@ def main(data_dir: str | None = None, backfill: bool = True) -> None:
         except (ValueError, OSError):
             pass
     keeper = keeper_done = None
-    if backfill:                  # restarted with backoff if it ever dies (BF-03)
+    if backfill:                  # one worker process per pass (A7), restarted with backoff if it dies (BF-03)
         from ..common.backfill_loop import WorkerKeeper
-        from .backfill import COLLECTOR as BACKFILL_COLLECTOR, start_worker
-        keeper = WorkerKeeper(lambda: start_worker(data_dir), svc.appdb, BACKFILL_COLLECTOR)
+        from .backfill import COLLECTOR as BACKFILL_COLLECTOR, DAILY_RUN_UTC_HOUR, start_worker
+        keeper = WorkerKeeper(lambda: start_worker(data_dir), svc.appdb, BACKFILL_COLLECTOR,
+                              daily_hour=DAILY_RUN_UTC_HOUR)
         keeper_done = keeper.monitor()
     try:
         svc.run()

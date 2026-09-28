@@ -31,6 +31,9 @@ class TableSpec:
     columns: tuple[Column, ...]
     timeframe: Timeframe | None = None
     indexes: tuple[tuple[str, ...], ...] = field(default_factory=tuple)
+    # a later write of an existing key fills that row's NULL columns (never overwrites a value) — for sources whose
+    # columns arrive at different times (the 5-min metrics: the taker ratio is published one bucket later)
+    fill_nulls: bool = False
 
     @property
     def column_names(self) -> tuple[str, ...]:
@@ -110,10 +113,13 @@ def _specs_for(inst: Instrument, datatype: str) -> list[TableSpec]:
         return [TableSpec(t("open_interest"), datatype, ("ts",), "ts", (
             _c("ts", _I), _c("open_interest"), _c("open_interest_value", _R, True)))]
     if datatype == "metrics":
+        # 5-min Binance futures metrics from five REST endpoints (live) or the Vision day file: the live poll stores a
+        # row as soon as one endpoint has it; the taker ratio arrives a bucket later → fill_nulls completes the row
         return [TableSpec(t("metrics"), datatype, ("ts",), "ts", (
             _c("ts", _I), _c("sum_open_interest", _R, True), _c("sum_open_interest_value", _R, True),
             _c("count_toptrader_long_short_ratio", _R, True), _c("sum_toptrader_long_short_ratio", _R, True),
-            _c("count_long_short_ratio", _R, True), _c("sum_taker_long_short_vol_ratio", _R, True)))]
+            _c("count_long_short_ratio", _R, True), _c("sum_taker_long_short_vol_ratio", _R, True)),
+            fill_nulls=True)]
     if datatype == "mark_price":
         # sampled once per minute from markPrice@1s (last value of the minute)
         return [TableSpec(t("mark_price"), datatype, ("ts",), "ts", (

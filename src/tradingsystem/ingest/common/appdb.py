@@ -70,6 +70,11 @@ class AppDB:
             (collector, state, last_data_ms, error, now if error else None,
              json.dumps(detail, default=str) if detail is not None else None, now))
 
+    def touch(self, collector: str) -> None:
+        """Refresh a collector's heartbeat only (state, detail and errors stay) — e.g. the backfill keeper while no
+        worker runs between two passes."""
+        self._exec("UPDATE collector_status SET updated_ms=? WHERE collector=?", (now_ms(), collector))
+
     def upsert_quote(self, instrument: str, ts: int, bid: float | None, ask: float | None, last: float | None,
                      source: str) -> None:
         self._exec("INSERT OR REPLACE INTO latest_quote VALUES (?,?,?,?,?,?,?)",

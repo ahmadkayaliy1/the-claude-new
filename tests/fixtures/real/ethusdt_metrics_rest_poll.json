@@ -1,0 +1,207 @@
+{
+ "requested_utc": "2026-09-28T07:41:53+00:00",
+ "params": {
+  "symbol": "ETHUSDT",
+  "period": "5m",
+  "startTime": 1790578800000,
+  "endTime": 1790580299999,
+  "limit": 500
+ },
+ "responses": {
+  "oi": {
+   "path": "/futures/data/openInterestHist",
+   "body": [
+    {
+     "symbol": "ETHUSDT",
+     "sumOpenInterest": "2290451.34100000",
+     "sumOpenInterestValue": "6066174663.80360300",
+     "CMCCirculatingSupply": "122084677.73131435",
+     "timestamp": 1790578800000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "sumOpenInterest": "2290272.89400000",
+     "sumOpenInterestValue": "6077607556.35277200",
+     "CMCCirculatingSupply": "122084677.73131435",
+     "timestamp": 1790579100000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "sumOpenInterest": "2290311.88400000",
+     "sumOpenInterestValue": "6065270332.50351900",
+     "CMCCirculatingSupply": "122084677.73131435",
+     "timestamp": 1790579400000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "sumOpenInterest": "2290375.29300000",
+     "sumOpenInterestValue": "6061821769.21845000",
+     "CMCCirculatingSupply": "122084677.73131435",
+     "timestamp": 1790579700000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "sumOpenInterest": "2290280.59100000",
+     "sumOpenInterestValue": "6067411341.67720000",
+     "CMCCirculatingSupply": "122084677.73131435",
+     "timestamp": 1790580000000
+    }
+   ]
+  },
+  "top_acc": {
+   "path": "/futures/data/topLongShortAccountRatio",
+   "body": [
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.6220",
+     "longShortRatio": "1.6455",
+     "shortAccount": "0.3780",
+     "timestamp": 1790578800000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.6220",
+     "longShortRatio": "1.6455",
+     "shortAccount": "0.3780",
+     "timestamp": 1790579100000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.6221",
+     "longShortRatio": "1.6462",
+     "shortAccount": "0.3779",
+     "timestamp": 1790579400000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.6218",
+     "longShortRatio": "1.6441",
+     "shortAccount": "0.3782",
+     "timestamp": 1790579700000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.6220",
+     "longShortRatio": "1.6455",
+     "shortAccount": "0.3780",
+     "timestamp": 1790580000000
+    }
+   ]
+  },
+  "top_pos": {
+   "path": "/futures/data/topLongShortPositionRatio",
+   "body": [
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.6171",
+     "longShortRatio": "1.6116",
+     "shortAccount": "0.3829",
+     "timestamp": 1790578800000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.6174",
+     "longShortRatio": "1.6136",
+     "shortAccount": "0.3826",
+     "timestamp": 1790579100000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.6173",
+     "longShortRatio": "1.6128",
+     "shortAccount": "0.3827",
+     "timestamp": 1790579400000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.6172",
+     "longShortRatio": "1.6124",
+     "shortAccount": "0.3828",
+     "timestamp": 1790579700000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.6171",
+     "longShortRatio": "1.6113",
+     "shortAccount": "0.3829",
+     "timestamp": 1790580000000
+    }
+   ]
+  },
+  "glob": {
+   "path": "/futures/data/globalLongShortAccountRatio",
+   "body": [
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.7376",
+     "longShortRatio": "2.8110",
+     "shortAccount": "0.2624",
+     "timestamp": 1790578800000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.7377",
+     "longShortRatio": "2.8124",
+     "shortAccount": "0.2623",
+     "timestamp": 1790579100000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.7378",
+     "longShortRatio": "2.8139",
+     "shortAccount": "0.2622",
+     "timestamp": 1790579400000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.7375",
+     "longShortRatio": "2.8095",
+     "shortAccount": "0.2625",
+     "timestamp": 1790579700000
+    },
+    {
+     "symbol": "ETHUSDT",
+     "longAccount": "0.7375",
+     "longShortRatio": "2.8095",
+     "shortAccount": "0.2625",
+     "timestamp": 1790580000000
+    }
+   ]
+  },
+  "taker": {
+   "path": "/futures/data/takerlongshortRatio",
+   "body": [
+    {
+     "buySellRatio": "1.1162",
+     "sellVol": "1042.4730",
+     "buyVol": "1163.6320",
+     "timestamp": 1790578500000
+    },
+    {
+     "buySellRatio": "1.2883",
+     "sellVol": "4350.5940",
+     "buyVol": "5605.0190",
+     "timestamp": 1790578800000
+    },
+    {
+     "buySellRatio": "0.6288",
+     "sellVol": "3071.7080",
+     "buyVol": "1931.5250",
+     "timestamp": 1790579100000
+    },
+    {
+     "buySellRatio": "0.7205",
+     "sellVol": "2891.0480",
+     "buyVol": "2083.1000",
+     "timestamp": 1790579400000
+    },
+    {
+     "buySellRatio": "1.7293",
+     "sellVol": "1410.3760",
+     "buyVol": "2439.0200",
+     "timestamp": 1790579700000
+    }
+   ]
+  }
+ }
+}

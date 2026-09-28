@@ -98,6 +98,110 @@ def execution_costs(contract: dict, bid: float, ask: float, spreads_1h: np.ndarr
     return out
 
 
+# ---------------------------------------------------------------------------------------- derivatives (Phase 5 A6)
+OI_FRESH_MS = 10 * MS_PER_MINUTE        # newest OI row older than this → no change figures; also the 60-s 'last' window
+OI_REF_TOL_MS = 10 * MS_PER_MINUTE      # a change's reference row may lie this far from its target time
+OI_CHANGE_HOURS = (1, 4, 24)
+RANK_WINDOW_MS = 30 * 86_400_000
+OI_RANK_MIN_ROWS = 4_320                # half of 30 days of 5-min metrics rows
+FUNDING_RANK_MIN_ROWS = 45              # half of 30 days of 8-h fundings (a 4-h symbol has twice as many)
+POSITIONING_MAX_AGE_MS = 6 * MS_PER_HOUR    # an older ratio is left out rather than shown as the current one
+# A taker ratio's timestamp opens its 5-min bucket: Binance publishes it when the bucket closes (2026-09-28 07:24:41
+# UTC: takerlongshortRatio's newest row was 07:15 while openInterestHist and the long/short ratios had 07:20), so it
+# counts as known 5 min after its stamp — conservative if the stamp were the close
+TAKER_BUCKET_MS = 5 * MS_PER_MINUTE
+# payload key, metrics column, ms after its timestamp the value is known
+POSITIONING = (("top_trader_account_ls", "count_toptrader_long_short_ratio", 0),
+               ("top_trader_position_ls", "sum_toptrader_long_short_ratio", 0),
+               ("global_account_ls", "count_long_short_ratio", 0),
+               ("taker_buy_sell_vol_ratio", "sum_taker_long_short_vol_ratio", TAKER_BUCKET_MS))
+
+
+def _known(ts, vals, as_of: int, known_after_ms: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """The non-null values (and their stamps) already known before ``as_of`` — causal, never a later row."""
+    t = np.asarray(ts, dtype=np.int64)
+    v = np.asarray(vals, dtype=float)
+    ok = np.isfinite(v) & (t + known_after_ms < as_of)
+    return t[ok], v[ok]
+
+
+def pct_rank_30d(times, values, as_of: int, *, min_rows: int) -> int | None:
+    """Causal 30-day percentile rank (0–100) of the newest value: the share of the non-null values stamped in
+    [as_of − 30 d, as_of) that are ≤ it. None with fewer than ``min_rows`` values, or when the data starts in the second
+    half of the window (too little history to call a level high or low)."""
+    t, v = _known(times, values, as_of)
+    keep = t >= as_of - RANK_WINDOW_MS
+    t, v = t[keep], v[keep]
+    if len(v) < max(min_rows, 1) or int(t[0]) > as_of - RANK_WINDOW_MS // 2:
+        return None
+    return int(round(100.0 * np.count_nonzero(v <= v[-1]) / len(v)))
+
+
+def _oi_change(t: np.ndarray, v: np.ndarray, hours: int) -> float | None:
+    """% change of the newest OI against the row nearest to ``hours`` before it (±OI_REF_TOL_MS, else None)."""
+    target = int(t[-1]) - hours * MS_PER_HOUR
+    i = int(np.searchsorted(t, target))
+    near = [j for j in (i - 1, i) if 0 <= j < len(t) - 1]          # never the newest row itself
+    if not near:
+        return None
+    j = min(near, key=lambda k: abs(int(t[k]) - target))
+    if abs(int(t[j]) - target) > OI_REF_TOL_MS or not v[j]:
+        return None
+    return _r((v[-1] / v[j] - 1) * 100, 3)
+
+
+def open_interest_block(m_ts, m_oi, live_ts, live_oi, as_of: int) -> dict | None:
+    """``last`` + ``time``: the newest open interest — the 60-s table's when it has a reading in the last 10 minutes,
+    else the 5-min metrics row's. ``change_pct_1h/4h/24h`` come from the metrics' ``sum_open_interest`` only (one
+    source at both ends; the 60-s poll has gaps and reads ≈ 0.1 % off the metrics): the newest row (≤ 10 min old,
+    else every change is None) against the row nearest to 1/4/24 h before it (±10 min, else that change is None) —
+    an exact span on the 5-min grid. None when neither source has a row."""
+    t, v = _known(m_ts, m_oi, as_of)
+    lt, lv = _known(live_ts, live_oi, as_of)
+    fresh_live = lt >= as_of - OI_FRESH_MS
+    lt, lv = lt[fresh_live], lv[fresh_live]
+    if not len(t) and not len(lt):
+        return None
+    last_t, last = (lt[-1], lv[-1]) if len(lt) else (t[-1], v[-1])
+    out: dict = {"last": _r(last, 3), "time": iso(int(last_t))}
+    fresh = len(t) > 0 and as_of - int(t[-1]) <= OI_FRESH_MS
+    for h in OI_CHANGE_HOURS:
+        out[f"change_pct_{h}h"] = _oi_change(t, v, h) if fresh else None
+    return out
+
+
+def oi_rank_30d(m_ts, m_oi, as_of: int) -> int | None:
+    """30-day percentile rank of the newest metrics OI — None while that row is stale (> 10 min)."""
+    t, v = _known(m_ts, m_oi, as_of)
+    if not len(t) or as_of - int(t[-1]) > OI_FRESH_MS:
+        return None
+    return pct_rank_30d(t, v, as_of, min_rows=OI_RANK_MIN_ROWS)
+
+
+def positioning_block(mt: dict, as_of: int) -> dict | None:
+    """Long/short and taker ratios: per column the newest NON-null value that is known before ``as_of`` and at most
+    6 h old (a live metrics row often lacks the taker ratio — 19 % of ETH rows on 2026-09-28 — so the newest row's
+    null is never shown as the reading). ``time`` = the newest value's stamp; ``value_times`` names each column whose
+    value is older than that. None when no column has a value."""
+    vals: dict[str, float | None] = {}
+    times: dict[str, int] = {}
+    for key, col, lag in POSITIONING:
+        t, v = _known(mt["ts"], mt[col], as_of, lag)
+        keep = t >= as_of - POSITIONING_MAX_AGE_MS
+        t, v = t[keep], v[keep]
+        vals[key] = _r(v[-1], 3) if len(v) else None
+        if len(t):
+            times[key] = int(t[-1])
+    if not times:
+        return None
+    newest = max(times.values())
+    out: dict = {"time": iso(newest), **vals}
+    older = {k: iso(t) for k, t in times.items() if t != newest}
+    if older:
+        out["value_times"] = older
+    return out
+
+
 class SnapshotBuilder:
     def __init__(self, settings: Settings, registry: InstrumentRegistry) -> None:
         self.s = settings
@@ -370,6 +474,8 @@ class SnapshotBuilder:
         return out
 
     def _derivatives(self, pair: str, caps, as_of: int, d: int) -> dict:
+        """Funding, open interest, positioning, mark and liquidations of the pair's perpetual (``proxy`` for XAU's
+        XAUUSDT). Everything is causal: only rows stamped before ``as_of`` (Phase 5 A6 for OI, ranks, positioning)."""
         cap = caps["derivatives"]
         if cap.quality == "unavailable" or not cap.source:
             return {"data_quality": "unavailable", "reason": cap.reason}
@@ -377,30 +483,33 @@ class SnapshotBuilder:
         rd = self.reader(inst)
         out: dict = {"data_quality": cap.quality, "source": inst.key, "reason": cap.reason}
         if "funding" in inst.datatypes:
-            f = rd.read_range(spec_for(inst, "funding"), as_of - 3 * 86_400_000, as_of)
-            out["funding"] = [{"time": iso(int(t)), "rate": _r(r, 6)} for t, r in
-                              zip(f["funding_time"][-3:], f["funding_rate"][-3:])]
-        if "open_interest" in inst.datatypes:
-            oi = rd.read_range(spec_for(inst, "open_interest"), as_of - 26 * MS_PER_HOUR, as_of)
-            if len(oi["ts"]):
-                last = float(oi["open_interest"][-1])
-
-                def chg(hours: int):
-                    tgt = as_of - hours * MS_PER_HOUR
-                    i = int(np.searchsorted(oi["ts"], tgt))
-                    if i >= len(oi["ts"]) or abs(int(oi["ts"][i]) - tgt) > 10 * MS_PER_MINUTE:
-                        return None
-                    return _r((last / float(oi["open_interest"][i]) - 1) * 100, 3)
-                out["open_interest"] = {"last": _r(last, 3), "change_pct_1h": chg(1), "change_pct_4h": chg(4),
-                                        "change_pct_24h": chg(24)}
+            f = rd.read_range(spec_for(inst, "funding"), as_of - RANK_WINDOW_MS, as_of,
+                              ["funding_time", "funding_rate"])
+            ft, fr = np.asarray(f["funding_time"], dtype=np.int64), np.asarray(f["funding_rate"], dtype=float)
+            recent = ft >= as_of - 3 * 86_400_000
+            out["funding"] = [{"time": iso(int(t)), "rate": _r(r, 6)} for t, r in zip(ft[recent][-3:], fr[recent][-3:])]
+            # the rank of the newest funding shown above (none shown → no rank)
+            out["funding_pct_rank_30d"] = (pct_rank_30d(ft, fr, as_of, min_rows=FUNDING_RANK_MIN_ROWS)
+                                           if recent.any() else None)
+        if "metrics" in inst.datatypes or "open_interest" in inst.datatypes:
+            m_ts = m_oi = live_ts = live_oi = np.empty(0)
+            if "metrics" in inst.datatypes:
+                m = rd.read_range(spec_for(inst, "metrics"), as_of - RANK_WINDOW_MS, as_of, ["ts", "sum_open_interest"])
+                m_ts, m_oi = m["ts"], m["sum_open_interest"]
+            if "open_interest" in inst.datatypes:
+                o = rd.read_range(spec_for(inst, "open_interest"), as_of - OI_FRESH_MS, as_of, ["ts", "open_interest"])
+                live_ts, live_oi = o["ts"], o["open_interest"]
+            oi = open_interest_block(m_ts, m_oi, live_ts, live_oi, as_of)
+            if oi is not None:
+                out["open_interest"] = oi
+            if "metrics" in inst.datatypes:
+                out["oi_pct_rank_30d"] = oi_rank_30d(m_ts, m_oi, as_of)
         if "metrics" in inst.datatypes:
-            mt = rd.read_range(spec_for(inst, "metrics"), as_of - 2 * MS_PER_HOUR, as_of)
-            if len(mt["ts"]):
-                out["positioning"] = {"time": iso(int(mt["ts"][-1])),
-                                      "top_trader_account_ls": _r(mt["count_toptrader_long_short_ratio"][-1], 3),
-                                      "top_trader_position_ls": _r(mt["sum_toptrader_long_short_ratio"][-1], 3),
-                                      "global_account_ls": _r(mt["count_long_short_ratio"][-1], 3),
-                                      "taker_buy_sell_vol_ratio": _r(mt["sum_taker_long_short_vol_ratio"][-1], 3)}
+            mt = rd.read_range(spec_for(inst, "metrics"), as_of - POSITIONING_MAX_AGE_MS, as_of,
+                               ["ts", *(c for _, c, _ in POSITIONING)])
+            pos = positioning_block(mt, as_of)
+            if pos is not None:
+                out["positioning"] = pos
         if "mark_price" in inst.datatypes:
             mp = rd.read_range(spec_for(inst, "mark_price"), as_of - 10 * MS_PER_MINUTE, as_of)
             if len(mp["ts"]):

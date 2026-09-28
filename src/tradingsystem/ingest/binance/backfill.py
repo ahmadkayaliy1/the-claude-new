@@ -3,7 +3,8 @@ the live WebSocket loop. Safe to run alongside live capture (idempotent writes; 
 cold day files are locked).
 
 Order (most useful first): candles (all TFs) → funding → metrics → aggTrades newest→oldest.
-Gaps the source cannot fill are recorded in ``known_gaps`` (never synthesised).
+Gaps the source cannot fill are recorded in ``known_gaps`` (never synthesised). One pass per worker process: it exits
+when the pass is done and the ingester starts the next one (A7).
 
 Failure handling (BF-01..03, F4): every (step, instrument), timeframe and Vision file is isolated; a pass returns
 a :class:`PassResult` and the worker retries transient failures within minutes (5 → 60 min) instead of waiting
@@ -33,7 +34,8 @@ from ...storage.parquet_store import ParquetColdStore, day_start_ms
 from ...storage.sqlite_store import SQLiteHotStore
 from ...storage.tablespec import TableSpec, spec_for, system_specs, table_specs
 from ..common.appdb import AppDB
-from ..common.backfill_loop import PassResult, StepIncomplete, finish_pass, worker_loop
+from ..common.backfill_loop import (PassResult, StepIncomplete, finish_pass, pass_exit_code, run_worker_pass,
+                                    spawn_pass)
 from . import fetch
 from .markets import MARKETS
 from .rest import BinanceHTTPError, BinanceRest, RetriesExhausted
@@ -426,19 +428,22 @@ class BinanceBackfill:
             self.appdb.close()
 
 
-def worker_main(data_dir: str | None, once: bool = False) -> None:
-    """Run the backfill now, then again every day after Vision publishes (catch-up + hole bridging);
-    a pass with transient failures is retried within minutes."""
+def worker_main(data_dir: str | None) -> int:
+    """ONE backfill pass (catch-up + hole bridging); returns the process exit code (A7: the worker exits when the
+    pass is done; the ingester's ``WorkerKeeper`` starts the next one every day after Vision publishes, or within
+    minutes after transient failures)."""
     s = load_settings()
     if data_dir:
         s = s.model_copy(update={"paths": s.paths.model_copy(update={"data_dir": data_dir})})   # keeps the instance
     setup_from_settings("backfill-binance", s)
     appdb = AppDB(s.paths.state() / "app.db")
-    worker_loop(lambda: asyncio.run(BinanceBackfill(s).run()), collector=COLLECTOR, appdb=appdb,
-                daily_hour=DAILY_RUN_UTC_HOUR, once=once, logger=log)
+    try:
+        res = run_worker_pass(lambda: asyncio.run(BinanceBackfill(s).run()), collector=COLLECTOR, appdb=appdb,
+                              logger=log)
+    finally:
+        appdb.close()
+    return pass_exit_code(res)
 
 
 def start_worker(data_dir: str | None) -> mp.Process:
-    p = mp.get_context("spawn").Process(target=worker_main, args=(data_dir, False), name="backfill-binance", daemon=True)
-    p.start()
-    return p
+    return spawn_pass(worker_main, (data_dir,), "backfill-binance")

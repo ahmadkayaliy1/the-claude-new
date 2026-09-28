@@ -5,7 +5,9 @@ through the GIL, the calling process; the live poller must not share it).
   ``copy_rates_range`` (server-scale epoch seconds — never naive datetimes).
 * Ticks: complete UTC days (newest first) → cold Parquet day files; progress in ``vision_done`` (used as a
   generic "backfill done" registry with period = date).
-* Gaps the broker cannot fill (holidays) → ``known_gaps``. Re-runs daily.
+* Gaps the broker cannot fill (holidays) → ``known_gaps``. Re-runs daily — one pass per worker process (A7).
+* Stops before the next unit / tick day while the free disk is below ``storage.min_free_disk_gb`` (as the Vision
+  backfill does); the pass ends ``disk_full`` and is retried after the longest backoff (A7).
 
 Failure handling (BF-06/BF-07/OPS-02): connecting is retried with backoff (an IPC timeout right after a resume is
 normal) and repeated before a step whenever the link dropped; a ``None`` from a ``copy_*`` call is an error, never
@@ -33,13 +35,15 @@ from ...core.logsetup import setup_from_settings
 from ...core.sessions import calendar_for
 from ...core.settings import Settings, load_settings, system_state_dirs
 from ...core.timeutil import MS_PER_DAY, now_ms
+from ...storage.disk import DiskFullError, require_free
 from ...storage.gaps import KNOWN_GAPS
 from ...storage.parquet_store import ParquetColdStore, arrow_schema, day_start_ms
 from ...storage.sqlite_store import SQLiteHotStore
 from ...storage.tablespec import VISION_DONE, spec_for, system_specs, table_specs
 from ...storage.validators import validate_rows
 from ..common.appdb import AppDB
-from ..common.backfill_loop import PassResult, StepIncomplete, finish_pass, worker_loop
+from ..common.backfill_loop import (PassResult, StepIncomplete, finish_pass, pass_exit_code, run_worker_pass,
+                                    spawn_pass)
 from .convert import mt5_candle_gaps, rates_to_rows, ticks_to_rows
 from .servertime import MonotonicServerClock, ServerTimeModel
 from .terminal import AccountMismatch, MT5Terminal, MT5Unavailable
@@ -110,6 +114,11 @@ class MT5Backfill:
         """Heartbeat inside long steps (a multi-year 1m pass takes many minutes between units)."""
         if now_ms() - getattr(self, "_beat_at", 0) >= 30_000:
             self.status()
+
+    def _check_disk(self) -> None:
+        """``storage.min_free_disk_gb`` applies to the MT5 history as to the Vision downloads (A7): below it the pass
+        stops before the next unit / tick day (live capture goes on) and is retried after the longest backoff."""
+        require_free(self.data, self.s.storage.min_free_disk_gb, what="MT5 backfill")
 
     # ------------------------------------------------------------------ terminal etiquette
     def _live_healthy(self) -> bool:
@@ -374,6 +383,7 @@ class MT5Backfill:
             if period in done:
                 day -= dt.timedelta(days=1)
                 continue
+            self._check_disk()                  # a tick day is the big write (cold day file): stop before it
             open_any = any(cal.is_open(lo_utc + h * 3_600_000) for h in range(24))
             parts, unverified = [], False
             for h in range(24):
@@ -431,6 +441,14 @@ class MT5Backfill:
         hots: dict[str, SQLiteHotStore] = {}
         try:
             self.status("backfilling")
+            try:
+                self._check_disk()
+            except DiskFullError as exc:        # before attaching: nothing to write, the terminal stays untouched
+                log.error("%s", exc)
+                res.disk_full = True
+                res.add("disk", exc, transient=False)
+                finish_pass(self.appdb, COLLECTOR, res)
+                return res
             if not self._connect(res):
                 finish_pass(self.appdb, COLLECTOR, res)
                 return res
@@ -451,7 +469,13 @@ class MT5Backfill:
                     break
                 self.status()
                 try:
+                    self._check_disk()
                     step(inst, hots[inst.key])
+                except DiskFullError as exc:
+                    log.error("%s", exc)
+                    res.disk_full = True
+                    res.add(unit, exc, transient=False)
+                    break
                 except AccountMismatch as exc:
                     log.error("%s: %s", unit, exc)
                     res.add(unit, exc, transient=False)
@@ -485,17 +509,21 @@ def _read_live_row(db) -> dict | None:
     return {"state": r[0], "updated_ms": r[1]} if r else None
 
 
-def worker_main(data_dir: str | None, once: bool = False) -> None:
+def worker_main(data_dir: str | None) -> int:
+    """ONE MT5 history pass; returns the process exit code (A7: the worker exits when the pass is done — the MT5
+    module, its IPC link and the pass's arrays are not kept between passes; the ingester's ``WorkerKeeper`` starts
+    the next one at the daily slot, or within minutes after transient failures)."""
     s = load_settings()
     if data_dir:
         s = s.model_copy(update={"paths": s.paths.model_copy(update={"data_dir": data_dir})})   # keeps the instance
     setup_from_settings("backfill-mt5", s)
     appdb = AppDB(s.paths.state() / "app.db")
-    worker_loop(lambda: MT5Backfill(s).run(), collector=COLLECTOR, appdb=appdb, daily_hour=DAILY_RUN_UTC_HOUR,
-                once=once, logger=log)
+    try:
+        res = run_worker_pass(lambda: MT5Backfill(s).run(), collector=COLLECTOR, appdb=appdb, logger=log)
+    finally:
+        appdb.close()
+    return pass_exit_code(res)
 
 
 def start_worker(data_dir: str | None) -> mp.Process:
-    p = mp.get_context("spawn").Process(target=worker_main, args=(data_dir, False), name="backfill-mt5", daemon=True)
-    p.start()
-    return p
+    return spawn_pass(worker_main, (data_dir,), "backfill-mt5")

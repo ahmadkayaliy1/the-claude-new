@@ -16,11 +16,12 @@ from tradingsystem.core.sessions import CALENDARS
 from tradingsystem.core.settings import load_settings
 from tradingsystem.core.timeframes import Timeframe
 from tradingsystem.ingest.common.appdb import AppDB
-from tradingsystem.ingest.common.backfill_loop import PassResult
+from tradingsystem.ingest.common.backfill_loop import EXIT_PASS_DISK_FULL, PassResult, pass_exit_code
 from tradingsystem.ingest.mt5 import backfill as mt5bf
 from tradingsystem.ingest.mt5.backfill import MT5Backfill, MT5CallError, is_transient
 from tradingsystem.ingest.mt5.servertime import ServerTimeModel
 from tradingsystem.ingest.mt5.terminal import AccountMismatch, MT5Unavailable
+from tradingsystem.storage import disk
 from tradingsystem.storage.gaps import KNOWN_GAPS
 from tradingsystem.storage.parquet_store import ParquetColdStore
 from tradingsystem.storage.sqlite_store import SQLiteHotStore
@@ -92,10 +93,11 @@ def settings():
 
 @pytest.fixture()
 def bf(tmp_path, settings, monkeypatch):
-    clock = types.SimpleNamespace(t=1_000.0)
+    clock = types.SimpleNamespace(t=1_000.0, free_gb=100.0)           # free disk: never the machine's own (A7)
     fake_time = types.SimpleNamespace(time=lambda: clock.t, monotonic=lambda: clock.t,
                                       sleep=lambda s: setattr(clock, "t", clock.t + s))
     monkeypatch.setattr(mt5bf, "time", fake_time)
+    monkeypatch.setattr(disk, "free_gb", lambda path: clock.free_gb)
     b = object.__new__(MT5Backfill)
     b.s, b.data = settings, tmp_path
     b.appdb = AppDB(tmp_path / "app.db")
@@ -347,3 +349,39 @@ def test_higher_timeframes_of_every_instrument_come_first(bf):
     assert all(kind == "c" and low >= 3_600_000 for kind, _, low in order[:n])
     assert all(kind == "c" and low < 3_600_000 for kind, _, low in order[n:2 * n])
     assert [k for k, _, _ in order[2 * n:]] == ["t"] * n
+
+
+# ---------------------------------------------------------------------------------------------------- disk floor (A7)
+def test_mt5_backfill_does_not_start_below_the_min_free_disk(bf):
+    """storage.min_free_disk_gb applies to the MT5 history as it does to the Vision downloads (Phase 5 A7): below it
+    the pass ends ``disk_full`` before attaching to the terminal and the worker exits for the longest backoff."""
+    bf.clock.free_gb = bf.s.storage.min_free_disk_gb - 0.5
+    bf.candles = lambda *a, **k: pytest.fail("no history call below the disk floor")
+    res = bf.run()
+    assert res.disk_full and not res.ok and bf.term.connects == 0
+    assert pass_exit_code(res) == EXIT_PASS_DISK_FULL
+    row = next(r for r in AppDB(bf.data / "app.db").statuses() if r["collector"] == mt5bf.COLLECTOR)
+    assert row["state"] == "error" and "MT5 backfill paused" in row["detail"]
+
+
+def test_mt5_backfill_stops_before_the_next_unit_when_the_disk_fills_up(bf):
+    calls = []
+
+    def candles(inst, hot, tfs=None):
+        calls.append(inst.key)
+        bf.clock.free_gb = 1.0                                               # the disk filled up during this unit
+
+    bf.candles, bf.ticks = candles, lambda inst, hot: calls.append("ticks")
+    res = bf.run()
+    assert calls == [bf.instruments[0].key] and res.disk_full and not res.transient
+
+
+def test_tick_days_stop_before_the_next_day_below_the_disk_floor(bf, raw_ticks):
+    inst, hot, spec = tick_run(bf, raw_ticks)
+    bf.clock.free_gb = bf.s.storage.min_free_disk_gb - 0.1
+    with pytest.raises(disk.DiskFullError):
+        bf.ticks(inst, hot, today=dt.date(2026, 9, 22))
+    assert done_days(hot, spec) == set() and bf.term.mt5.calls == []
+    bf.clock.free_gb = 100.0
+    bf.ticks(inst, hot, today=dt.date(2026, 9, 22))
+    assert "2026-09-21" in done_days(hot, spec)

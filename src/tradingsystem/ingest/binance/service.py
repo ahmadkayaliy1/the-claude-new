@@ -21,7 +21,7 @@ from ...core.settings import Settings
 from ...core.timeframes import Timeframe
 from ...core.timeutil import MS_PER_DAY, MS_PER_MINUTE, iso, now_ms
 from ...storage.parquet_store import ParquetColdStore
-from ...storage.retention import rollover
+from ...storage.retention import ColdArchiveGuard, rollover
 from ...storage.sqlite_store import SQLiteHotStore
 from ...storage.tablespec import FORMING, TableSpec, system_specs, table_specs
 from ...storage.validators import validate_rows
@@ -399,23 +399,39 @@ class BinanceLiveService:
             except asyncio.TimeoutError:
                 pass
 
+    def _archive_guards(self) -> dict[str, ColdArchiveGuard]:
+        """One cold-archive guard per venue of this system (its warning is that venue's ``rollover_skipped`` event,
+        at most one per UTC day)."""
+        return {v: ColdArchiveGuard(self.cold.root, self.s.storage.cold_archive_min_free_gb,
+                                    lambda msg, v=v: self.appdb.add_event(v, "rollover_skipped", msg))
+                for v in sorted({s.inst.venue for s in self.sinks.values()})}
+
+    async def _rollover_pass(self, guards: dict[str, ColdArchiveGuard]) -> None:
+        # below storage.cold_archive_min_free_gb the day files wait (the hot store keeps the rows); the
+        # composite-key tables (depth) are only trimmed, which frees space, so that goes on
+        archive = {v: await asyncio.to_thread(g.allowed) for v, g in guards.items()}
+        for sink in self.sinks.values():
+            for dtype, days in self.s.storage.hot_days.items():
+                if not sink.wants(dtype):
+                    continue
+                spec = sink.spec(dtype)
+                try:
+                    if len(spec.key) == 1:
+                        if not archive.get(sink.inst.venue, True):
+                            continue
+                        await asyncio.to_thread(rollover, sink.hot, self.cold, sink.inst, spec, hot_days=days,
+                                                now_ms=now_ms(), grace_hours=self.s.storage.rollover_grace_hours)
+                    else:
+                        await asyncio.to_thread(sink.hot.delete_before, spec, now_ms() - (days + 1) * MS_PER_DAY)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("rollover failed for %s", spec.name)
+                    self.appdb.add_event(sink.inst.venue, "rollover_error", f"{spec.name}: {exc!r}"[:300])
+
     async def _rollover_loop(self) -> None:
         await asyncio.sleep(60)
+        guards = self._archive_guards()
         while not self.stop.is_set():
-            for sink in self.sinks.values():
-                for dtype, days in self.s.storage.hot_days.items():
-                    if not sink.wants(dtype):
-                        continue
-                    spec = sink.spec(dtype)
-                    try:
-                        if len(spec.key) == 1:
-                            await asyncio.to_thread(rollover, sink.hot, self.cold, sink.inst, spec, hot_days=days,
-                                                    now_ms=now_ms(), grace_hours=self.s.storage.rollover_grace_hours)
-                        else:
-                            await asyncio.to_thread(sink.hot.delete_before, spec, now_ms() - (days + 1) * MS_PER_DAY)
-                    except Exception as exc:  # noqa: BLE001
-                        log.exception("rollover failed for %s", spec.name)
-                        self.appdb.add_event(sink.inst.venue, "rollover_error", f"{spec.name}: {exc!r}"[:300])
+            await self._rollover_pass(guards)
             try:
                 await asyncio.wait_for(self.stop.wait(), timeout=1800)
             except asyncio.TimeoutError:

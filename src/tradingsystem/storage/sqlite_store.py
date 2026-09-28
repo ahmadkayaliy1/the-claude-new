@@ -1,6 +1,7 @@
 """SQLite (WAL) hot store — one file per instrument, one writer process per file, many readers (D-006).
 
-* Idempotent writes: ``INSERT … ON CONFLICT DO NOTHING`` on the table key (spec §2.2).
+* Idempotent writes: ``INSERT … ON CONFLICT DO NOTHING`` on the table key (spec §2.2); a ``fill_nulls`` table
+  (the 5-min metrics) lets a later write complete the NULL columns of an existing row, never overwrite a value.
 * Short transactions; readers use ``mode=ro`` connections and never block the writer (WAL).
 * Only stdlib ``sqlite3`` + numpy → safe for the lean ingester processes (no pandas/DuckDB).
 """
@@ -71,10 +72,10 @@ class SQLiteHotStore:
                 raise
 
     def upsert(self, spec: TableSpec, rows: Sequence[tuple]) -> int:
-        return self._write(spec, rows, "INSERT INTO {t} ({c}) VALUES ({p}) ON CONFLICT DO NOTHING")
+        return self._write(spec, rows, self._upsert_sql(spec))
 
     def replace(self, spec: TableSpec, rows: Sequence[tuple]) -> int:
-        return self._write(spec, rows, "INSERT OR REPLACE INTO {t} ({c}) VALUES ({p})")
+        return self._write(spec, rows, self._sql(spec, "INSERT OR REPLACE INTO {t} ({c}) VALUES ({p})"))
 
     def upsert_many(self, batches: Sequence[tuple[TableSpec, Sequence[tuple]]]) -> dict[str, int]:
         """Several tables in ONE transaction (e.g. all timeframes of a flush) → fewer fsyncs."""
@@ -87,7 +88,7 @@ class SQLiteHotStore:
                 for spec, rows in batches:
                     if rows:
                         start = self._con.total_changes
-                        self._con.executemany(self._sql(spec, "INSERT INTO {t} ({c}) VALUES ({p}) ON CONFLICT DO NOTHING"), rows)
+                        self._con.executemany(self._upsert_sql(spec), rows)
                         out[spec.name] = self._con.total_changes - start
                 self._con.execute("COMMIT")
             except BaseException:
@@ -96,11 +97,10 @@ class SQLiteHotStore:
             out["_total"] = self._con.total_changes - before
         return out
 
-    def _write(self, spec: TableSpec, rows: Sequence[tuple], template: str) -> int:
+    def _write(self, spec: TableSpec, rows: Sequence[tuple], sql: str) -> int:
         self._require_writer()
         if not rows:
             return 0
-        sql = self._sql(spec, template)
         with self._lock:
             before = self._con.total_changes
             self._con.execute("BEGIN")
@@ -116,6 +116,19 @@ class SQLiteHotStore:
     def _sql(spec: TableSpec, template: str) -> str:
         cols = spec.column_names
         return template.format(t=spec.name, c=", ".join(cols), p=", ".join("?" * len(cols)))
+
+    @classmethod
+    def _upsert_sql(cls, spec: TableSpec) -> str:
+        """Idempotent insert: an existing key is left alone — except that a ``fill_nulls`` spec completes the row's
+        NULL columns from the new row (a value is never overwritten; a write that fills nothing changes nothing)."""
+        sql = cls._sql(spec, "INSERT INTO {t} ({c}) VALUES ({p})")
+        fill = [c.name for c in spec.columns if c.nullable and c.name not in spec.key] if spec.fill_nulls else []
+        if not fill:
+            return sql + " ON CONFLICT DO NOTHING"
+        t = spec.name
+        return (sql + f" ON CONFLICT({', '.join(spec.key)}) DO UPDATE SET "
+                + ", ".join(f"{c}=coalesce({t}.{c}, excluded.{c})" for c in fill)
+                + " WHERE " + " OR ".join(f"({t}.{c} IS NULL AND excluded.{c} IS NOT NULL)" for c in fill))
 
     def delete_before(self, spec: TableSpec, cutoff_ms: int) -> int:
         """Retention: remove rows older than ``cutoff_ms`` (only after they were archived cold)."""
