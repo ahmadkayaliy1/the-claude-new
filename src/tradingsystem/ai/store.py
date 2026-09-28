@@ -262,23 +262,32 @@ class DecisionStore:
     # ------------------------------------------------------------------ Phase 4: decision metrics, prompt registry
     def pending_metrics(self, limit: int = 20, *, no_trade_before_ms: int,
                         pairs: list[str] | tuple[str, ...] | None = None,
-                        exclude: list[str] | tuple[str, ...] = ()) -> list[dict[str, Any]]:
+                        exclude: list[str] | tuple[str, ...] = (),
+                        unsettled_before_ms: int | None = None) -> list[dict[str, Any]]:
         """Valid decisions whose ``decision_metrics`` row is due, oldest first:
 
         * executed trades once the venue settled them (``outcome``) — again when a later settlement (``outcome_ts``)
-          is newer than the row (an idea first scored virtually, executed afterwards from the manual queue);
+          is newer than the row (an idea first scored virtually, executed afterwards from the manual queue; an
+          executed trade first recorded as unsettled);
+        * executed trades recorded before ``unsettled_before_ms`` that never settled (Phase 5 A7; None: not asked),
+          once — the settlement, if it ever comes, is newer than that row;
         * trade ideas not executed once their virtual outcome is known;
         * NO_TRADE answers recorded before ``no_trade_before_ms`` (their counterfactual needs the next bars).
 
         ``computed_ms`` is the existing row's time (None when there is none); ``exclude``: ids the caller will not
         score now (waiting for bars)."""
-        where = ["d.status='valid'", """(
+        unsettled = ("" if unsettled_before_ms is None else """
+            OR (d.decision IN ('BUY','SELL') AND d.execution_state='executed' AND d.outcome IS NULL AND d.ts<=?
+                AND m.decision_id IS NULL)""")
+        where = ["d.status='valid'", f"""(
             (d.decision IN ('BUY','SELL') AND d.execution_state='executed' AND d.outcome IS NOT NULL
              AND (m.decision_id IS NULL OR COALESCE(d.outcome_ts, 0) > m.computed_ms))
             OR (d.decision IN ('BUY','SELL') AND d.execution_state!='executed' AND d.virtual_outcome IS NOT NULL
                 AND m.decision_id IS NULL)
-            OR (d.decision='NO_TRADE' AND d.ts<=? AND m.decision_id IS NULL))"""]
+            OR (d.decision='NO_TRADE' AND d.ts<=? AND m.decision_id IS NULL){unsettled})"""]
         args: list[Any] = [int(no_trade_before_ms)]
+        if unsettled_before_ms is not None:
+            args.append(int(unsettled_before_ms))
         if pairs is not None:
             if not pairs:
                 return []

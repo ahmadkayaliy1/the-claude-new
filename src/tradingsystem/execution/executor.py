@@ -25,6 +25,7 @@ import logging
 import sqlite3
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -47,7 +48,7 @@ from .backends.paper import PaperBackend, Tick
 from .drawdown import AccountPeak
 from .exposure import live_sides
 from .management import ActionLog, MT5Legs, PaperLegs, PositionManager
-from .metrics import MetricsJob, mt5_outcome_detail, paper_outcome_detail
+from .metrics import VIRTUAL_HORIZON_MS, MetricsJob, mt5_outcome_detail, paper_outcome_detail, virtual_valid_until
 from ..core.tunables import Tunables
 from .price_mapping import check_basis, translate
 from .risk_gate import ExecContext, evaluate
@@ -69,6 +70,14 @@ BASIS_CACHE_S = 15.0                 # … checked against its 60-min history at
 ACTION_SETTLE_MS = 30_000            # a model action sent with an unknown outcome is re-read (not re-sent) this long
 ACTION_ERROR_REPEAT_MS = 10 * MS_PER_MINUTE   # a failing decision's action_error event at most this often
 PRICED = ("modify_sl", "modify_tp")  # actions with a price (translated by the live basis)
+# virtual outcomes (Phase 5 A7): bounded reads — a decision far in the past or a long data gap never loads everything
+# up to now (an unbounded read of 90 days of 1m bars took 0.8 s / 22 MB per idea and pass on the production stores)
+VIRTUAL_CHUNK_MS = 12 * MS_PER_HOUR          # one read: at most 720 1m bars, [start, end) through the time index
+VIRTUAL_GAP_MS = 4 * MS_PER_DAY              # read past the horizon only to find its first bar (weekend / holiday gap)
+VIRTUAL_BARS_PER_PASS = 10_000               # 1m bars one housekeeping pass reads (oldest idea first; the idea that
+                                             # crosses it finishes its own window, the rest wait for the next pass)
+VIRTUAL_RETRY_MS = 15 * MS_PER_MINUTE        # an idea still undecided after its horizon (a gap in the stored bars:
+                                             # only a later bar or a backfill decides it) is asked again this often
 # executor events the owner is notified of (Phase 4, D-043): kind → (level, title)
 NOTIFY_EVENTS = {"mgmt_filled": ("info", "filled"), "mgmt_position_closed": ("info", "position closed"),
                  "mgmt_applied": ("info", "management rule applied"), "action_applied": ("info", "Claude's action applied"),
@@ -161,6 +170,7 @@ class Executor:
         self._mkt: dict[tuple, object] = {}
         self._basis: dict[str, tuple[float, float | None]] = {}      # pair → (checked at, basis or None)
         self._action_errs: dict[str, tuple[str, int]] = {}           # decision → (error, last reported)
+        self._virtual_later: dict[str, int] = {}                     # idea → not asked again before (ms)
         self.peak: AccountPeak | None = None                # the account's high-water mark (shared by every system)
         self._peak_at = 0.0
 
@@ -604,22 +614,36 @@ class Executor:
                          key=f"outcome:{did}", pair=pair)
 
     def virtual_outcomes(self) -> None:
-        """P9.8: would the idea have reached TP1 before its SL? Evaluated on real 1m bars of the analysis instrument."""
+        """P9.8: would the idea have reached TP1 before its SL? Evaluated on real 1m bars of the analysis instrument
+        (:func:`virtual_walk`: bounded reads). Oldest idea first, at most ``VIRTUAL_BARS_PER_PASS`` bars per pass (the
+        rest wait for the next pass); an idea still undecided after its horizon, or failing, is asked again only every
+        ``VIRTUAL_RETRY_MS`` — it cannot hold up the newer ones."""
         con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True)
         try:
             rows = con.execute("SELECT id, pair, recommendation FROM ai_decisions WHERE status='valid' AND "
-                               "decision IN ('BUY','SELL') AND virtual_outcome IS NULL").fetchall()
+                               "decision IN ('BUY','SELL') AND virtual_outcome IS NULL ORDER BY ts, id").fetchall()
         finally:
             con.close()
+        now, enabled, budget = now_ms(), set(self.s.enabled_pairs()), VIRTUAL_BARS_PER_PASS
+        later = {k: v for k, v in (getattr(self, "_virtual_later", None) or {}).items() if v > now}
+        self._virtual_later = later
         for did, pair, rj in rows:
-            if pair not in self.s.enabled_pairs():
+            if pair not in enabled or later.get(did, 0) > now:
                 continue
+            if budget <= 0:
+                log.debug("virtual outcomes: bar budget of this pass spent - %s and newer wait", did[:8])
+                break
             try:
                 rec = json.loads(rj)
-                vo, vr = evaluate_virtual(rec, self.reader(self.reg.primary(pair).key), self.reg.primary(pair))
+                w = virtual_walk(rec, self.reader(self.reg.primary(pair).key), self.reg.primary(pair), now)
             except Exception:  # noqa: BLE001
                 log.exception("virtual outcome of %s failed", did[:8])
+                later[did] = now + VIRTUAL_RETRY_MS
                 continue
+            budget -= w.bars
+            vo, vr = w.outcome, w.r
+            if vo is None and now > w.horizon_ms:
+                later[did] = now + VIRTUAL_RETRY_MS
             if vo is not None:
                 c = sqlite3.connect(self.app_db, timeout=10)
                 c.execute("UPDATE ai_decisions SET virtual_outcome=?, virtual_r=? WHERE id=?", (vo, vr, did))
@@ -1123,36 +1147,67 @@ def single_leg_management(rules: list[dict], tps: list[dict], placed: int) -> tu
     return out, notes
 
 
-def evaluate_virtual(rec: dict, reader: InstrumentReader, inst) -> tuple[str | None, float | None]:
-    ts, vu = parse_date_spec(rec["timestamp"]), parse_date_spec(rec["valid_until"])
-    horizon = vu + 24 * 3_600_000
-    c = reader.read_range(spec_for(inst, "candles", inst.timeframes[0]), ts, None, ["open_time", "high", "low"])
-    if not len(c["open_time"]):
-        return None, None
+class VirtualWalk(NamedTuple):
+    outcome: str | None          # tp1_first | sl_first | not_triggered | unresolved_24h; None = undecided
+    r: float | None
+    bars: int                    # 1m bars read (the pass budget)
+    horizon_ms: int              # valid_until (capped) + 24 h: undecided after it = a gap in the stored bars
+
+
+def virtual_walk(rec: dict, reader: InstrumentReader, inst, now: int | None = None) -> VirtualWalk:
+    """P9.8 on bounded reads (Phase 5 A7): walk the analysis instrument's 1m bars from the cycle time in
+    ``VIRTUAL_CHUNK_MS`` windows [start, end) and stop at the bar that decides the idea. The window ends at the horizon
+    (``valid_until`` — at most ``metrics.VIRTUAL_MAX_VALID_MS`` after the cycle — + 24 h) plus ``VIRTUAL_GAP_MS`` (only
+    to find the first bar after the horizon across a weekend or holiday), and never after ``now``: a decision far in
+    the past or a long gap in the bars reads at most its own window, never everything up to now. The decision rules
+    are unchanged: fill, then stop before target on one bar, ``not_triggered`` at valid_until, ``unresolved_24h`` on
+    the first bar after the horizon."""
+    ts = parse_date_spec(rec["timestamp"])
+    vu = virtual_valid_until(parse_date_spec(rec["valid_until"]), ts)
+    horizon = vu + VIRTUAL_HORIZON_MS
+    now = now_ms() if now is None else int(now)
     buy = rec["decision"] == "BUY"
     e = rec["entry"]
     entry = e.get("price") or ((e["range_max"] if buy else e["range_min"]) if e.get("range_min") is not None else None)
     sl, tp1 = rec["stop_loss"], rec["take_profits"][0]["price"]
     filled = rec["order_type"] == "MARKET"
-    for t, h, l in zip(c["open_time"], c["high"], c["low"]):
-        if not filled:
-            if t >= vu:
-                return "not_triggered", 0.0
-            hit = {"BUY_LIMIT": l <= entry, "BUY_STOP": h >= entry,
-                   "SELL_LIMIT": h >= entry, "SELL_STOP": l <= entry}[rec["order_type"]]
-            if not hit:
-                continue
-            filled = True
-        sl_hit = (l <= sl) if buy else (h >= sl)
-        tp_hit = (h >= tp1) if buy else (l <= tp1)
-        if sl_hit:                         # same-bar ambiguity resolved conservatively (stop first)
-            return "sl_first", -1.0
-        if tp_hit:
-            r = abs(tp1 - entry) / abs(entry - sl) if entry and entry != sl else None
-            return "tp1_first", round(r, 2) if r is not None else None
-        if t > horizon:
-            return "unresolved_24h", 0.0
-    return None, None
+    spec = spec_for(inst, "candles", inst.timeframes[0])
+    end = min(horizon + VIRTUAL_GAP_MS, now + 1)          # a stored bar never opens after now
+    start, bars = ts, 0
+    while start < end:
+        hi = min(start + VIRTUAL_CHUNK_MS, end)
+        c = reader.read_range(spec, start, hi, ["open_time", "high", "low"])
+        t = np.asarray(c["open_time"])
+        keep = (t >= start) & (t < hi)                    # exactly this chunk, whatever the reader returned
+        bars += int(keep.sum())
+        for t_, h, l in zip(t[keep].tolist(), np.asarray(c["high"])[keep].tolist(),
+                            np.asarray(c["low"])[keep].tolist()):
+            if not filled:
+                if t_ >= vu:
+                    return VirtualWalk("not_triggered", 0.0, bars, horizon)
+                hit = {"BUY_LIMIT": l <= entry, "BUY_STOP": h >= entry,
+                       "SELL_LIMIT": h >= entry, "SELL_STOP": l <= entry}[rec["order_type"]]
+                if not hit:
+                    continue
+                filled = True
+            sl_hit = (l <= sl) if buy else (h >= sl)
+            tp_hit = (h >= tp1) if buy else (l <= tp1)
+            if sl_hit:                     # same-bar ambiguity resolved conservatively (stop first)
+                return VirtualWalk("sl_first", -1.0, bars, horizon)
+            if tp_hit:
+                r = abs(tp1 - entry) / abs(entry - sl) if entry and entry != sl else None
+                return VirtualWalk("tp1_first", round(r, 2) if r is not None else None, bars, horizon)
+            if t_ > horizon:
+                return VirtualWalk("unresolved_24h", 0.0, bars, horizon)
+        start = hi
+    return VirtualWalk(None, None, bars, horizon)
+
+
+def evaluate_virtual(rec: dict, reader: InstrumentReader, inst,
+                     now: int | None = None) -> tuple[str | None, float | None]:
+    """(virtual outcome, R) of a trade idea — :func:`virtual_walk` without its read statistics."""
+    w = virtual_walk(rec, reader, inst, now)
+    return w.outcome, w.r
 
 
 def _rec_as_of(rec: dict) -> int | None:
@@ -1181,4 +1236,4 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["Executor", "evaluate_virtual", "main", "iso", "Path"]
+__all__ = ["Executor", "VirtualWalk", "evaluate_virtual", "main", "iso", "Path", "virtual_walk"]

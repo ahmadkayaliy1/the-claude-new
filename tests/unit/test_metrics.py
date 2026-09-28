@@ -272,7 +272,8 @@ def test_executed_rows_wait_for_the_broker_and_are_recomputed_on_a_newer_settlem
     e = 104695.85
     rec = trade("BUY", "MARKET", {"price": e}, e - 150, [e + 150], ot(550))
     rid = save(env, rec, record_ts=ot(551), state="executed", detail={"mode": "demo"}, virtual=("tp1_first", 1.0))
-    assert env.job.run(FAR) == 0                                     # a virtual outcome alone is not the trade's end
+    # a virtual outcome alone is not the trade's end (before UNSETTLED_AFTER_MS: no row at all)
+    assert env.job.run(ot(551) + mx.UNSETTLED_AFTER_MS - MIN) == 0
     env.store.set_outcome(rid, "closed_profit", 1.5, 1.5, 150.0)     # pre-Phase-4 style: no venue split
     assert env.job.run(FAR) == 1
     m = env.store.metrics_of(rid)
@@ -292,6 +293,38 @@ def test_executed_rows_wait_for_the_broker_and_are_recomputed_on_a_newer_settlem
     assert env.job.run(FAR) == 1
     m2 = env.store.metrics_of(rid)
     assert m2["exit_reason"] == "tp" and m2["minutes_to_resolve"] == 10 and m2["commission"] == pytest.approx(-0.05)
+    assert env.job.run(FAR) == 0
+
+
+def test_an_executed_trade_never_settled_gets_an_open_row_replaced_by_its_settlement(env, monkeypatch):
+    """Phase 5 A7. SELL MARKET at bar 777's open 104690.38, SL +200, TP1 104540.38, executed at the broker (one leg,
+    slippage −1.5, spread 18.0) and never settled (its legs vanished from the history): nothing before
+    UNSETTLED_AFTER_MS; then ONE row — exit_reason 'open', detail.unsettled, the gate's spread and the placement
+    slippage, no excursions / targets / costs. The settlement arriving later (TP1 in bar 782, closed 5 s into it)
+    recomputes it as the trade (window 777…782: TP1 hit, MFE 0.768, MAE 0.028)."""
+    e = 104690.38
+    rid = save(env, trade("SELL", "MARKET", {"price": e}, e + 200, [e - 150], ot(777)), record_ts=ot(778),
+               state="executed", detail={"mode": "demo", "spread_at_gate": 18.0,
+                                         "backend": {"ok": True, "placed": [{"comment": "a", "slippage": -1.5}]}})
+    due = ot(778) + mx.UNSETTLED_AFTER_MS
+    assert env.job.run(due - MIN) == 0 and env.store.metrics_of(rid) is None
+    assert env.store.pending_metrics(10, no_trade_before_ms=0) == []                # not asked: the Phase 4 query
+    monkeypatch.setattr(mx, "_now", lambda: now_ms() - 5_000)                        # the row is older than any settlement
+    assert env.job.run(due) == 1
+    m = env.store.metrics_of(rid)
+    assert m["exit_reason"] == "open" and m["detail"]["unsettled"] is True and m["detail"]["basis"] == "broker"
+    assert m["detail"]["unsettled_days"] == 3.0 and m["detail"]["legs_placed"] == 1
+    assert (m["spread_at_gate"], m["slippage"], m["detail"]["slippage_adverse"]) == (18.0, -1.5, 1.5)
+    assert (m["mfe_r"], m["mae_r"], m["tp1_hit"], m["minutes_to_resolve"], m["commission"], m["swap"]) == \
+        (None, None, None, None, None, None)
+    assert m["rejected_but_virtual_win"] == 0
+    assert env.job.run(FAR) == 0                                                     # written once
+    monkeypatch.undo()
+    _settle_mt5(env, rid, ot(777) + 2_000, ot(782) + 5_000, "tp")                     # the settlement arrives late
+    assert env.job.run(FAR) == 1
+    m2 = env.store.metrics_of(rid)
+    assert (m2["exit_reason"], m2["tp1_hit"], m2["mfe_r"], m2["mae_r"]) == ("tp", 1, 0.768, 0.028)
+    assert "unsettled" not in m2["detail"] and m2["detail"]["basis"] == "broker"
     assert env.job.run(FAR) == 0
 
 

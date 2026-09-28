@@ -9,10 +9,15 @@ decision of this system's pairs:
   The window runs from the real fill (``outcome_detail.open_ms``; else the virtual fill) to the last leg's real close
   (``outcome_detail.close_ms``; else the settlement time, flagged in ``detail``). A close bar still missing
   ``MISSING_BARS_GRACE_MS`` after the close → scored on the bars stored, flagged ``detail.partial``.
+* **executed trade never settled** (Phase 5 A7) — no ``outcome`` ``UNSETTLED_AFTER_MS`` after the decision (still open,
+  or its legs are gone from the venue's history so it never settles): ``exit_reason`` ``open`` with ``detail.unsettled``
+  true, the gate's spread and the placement slippage, no excursions (the window has no end). A settlement arriving
+  later is newer than that row (``outcome_ts`` > ``computed_ms``) → recomputed as an executed trade.
 * **trade idea not executed** (gate-rejected, expired, not placed, manual mode) — once ``virtual_outcome`` is known, on
   the virtual trade :func:`.executor.evaluate_virtual` scores: the same fill rules and entry, the ORIGINAL stop and
   every target, from the cycle time until the stop is touched, the farthest target is touched or the horizon
-  (valid_until + 24 h) passes; the stop is checked before the targets on the same bar (as the virtual outcome).
+  (valid_until + 24 h) passes; the stop is checked before the targets on the same bar (as the virtual outcome). A
+  validity longer than ``VIRTUAL_MAX_VALID_MS`` is walked as that long (:func:`virtual_valid_until` — both walks).
 * **NO_TRADE** — once ``COUNTERFACTUAL_BARS`` decision-timeframe bars have closed after the cycle time and the
   window's last 1m bar is stored; a window whose stored bars end at most ``COVER_TOL_MS`` early (a quiet minute, a
   session break) counts as complete only ``COVER_TOL_MS`` after its end (before that the bars may still be coming).
@@ -36,9 +41,10 @@ Everything is measured on the ANALYSIS instrument's 1m bars in the recommendatio
   ``position_actions`` holds our applied close / cancel of it (:meth:`.management.ActionLog.closed_by`); a trade whose
   orders never filled is ``not_triggered`` (or ``rule_close`` / ``model_close`` when we cancelled them). Virtual:
   tp1_first → ``tp``, sl_first → ``sl``, not_triggered → ``not_triggered``, unresolved_24h → ``expired`` (the horizon
-  passed with the trade still open). ``open`` only for a leg a venue still reports live. NULL when the venue gives no
-  reason that maps (a manual close or a stop-out — ``other``, kept in ``detail.legs``) or an MT5 trade settled
-  before Phase 4 (no ``outcome_detail``).
+  passed with the trade still open). ``open`` for a leg a venue still reports live, and for an executed trade with no
+  settlement after ``UNSETTLED_AFTER_MS`` (``detail.unsettled``). NULL when the venue gives no reason that maps (a
+  manual close or a stop-out — ``other``, kept in ``detail.legs``) or an MT5 trade settled before Phase 4 (no
+  ``outcome_detail``).
 * ``slippage`` — mean of the MT5 ``backend.placed[].slippage`` (fill − requested; 0.0 for pending orders, absent on a
   leg "created despite timeout"); paper: STOP fills ``fill − order price``, MARKET and LIMIT fills 0.0. Execution-
   instrument price units, sign as MT5 records it (positive = worse for a BUY, better for a SELL);
@@ -71,7 +77,7 @@ from ..ai.store import DecisionStore, _rejection
 from ..core.instruments import InstrumentRegistry
 from ..core.settings import Settings
 from ..core.timeframes import Timeframe
-from ..core.timeutil import MS_PER_HOUR, MS_PER_MINUTE, now_ms, parse_date_spec
+from ..core.timeutil import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, now_ms, parse_date_spec
 from ..storage.reader import InstrumentReader
 from ..storage.tablespec import spec_for
 from .management import ActionLog
@@ -82,6 +88,10 @@ EXIT_REASONS = ("sl", "tp", "rule_close", "model_close", "expired", "not_trigger
 VIRTUAL_EXIT = {"tp1_first": "tp", "sl_first": "sl", "not_triggered": "not_triggered", "unresolved_24h": "expired"}
 COUNTERFACTUAL_BARS = 4                    # decision-TF bars after the cycle for a NO_TRADE's counterfactual
 VIRTUAL_HORIZON_MS = 24 * MS_PER_HOUR      # after valid_until, as executor.evaluate_virtual
+VIRTUAL_MAX_VALID_MS = 6 * MS_PER_DAY      # a longer validity is walked as this long (the contract sets no upper
+                                           # bound; both walks read a bounded window per idea — Phase 5 A7)
+UNSETTLED_AFTER_MS = 3 * MS_PER_DAY        # an executed trade without a settlement this long after the decision gets
+                                           # an 'open' row flagged unsettled (replaced when a settlement arrives)
 NOT_READY_RETRY_MS = 5 * MS_PER_MINUTE     # bars not stored yet / a virtual trade still running → asked again
 ERROR_RETRY_MS = 5 * MS_PER_MINUTE         # a failing decision: retried with backoff …
 ERROR_RETRY_MAX_MS = 6 * MS_PER_HOUR       # … up to this
@@ -195,6 +205,13 @@ def levels_of(rec: dict) -> Levels:
         raise MalformedDecision(f"recommendation not scorable: {exc!r}"[:200]) from exc
 
 
+def virtual_valid_until(valid_until: int, cycle_ms: int) -> int:
+    """The validity a virtual trade is walked with: the idea's ``valid_until``, at most ``VIRTUAL_MAX_VALID_MS`` after
+    the cycle time (a validity of weeks would otherwise make every pass read weeks of bars). Used by both walks —
+    :func:`virtual_trade` and :func:`.executor.evaluate_virtual` — so they keep deciding alike."""
+    return min(int(valid_until), int(cycle_ms) + VIRTUAL_MAX_VALID_MS)
+
+
 @dataclass
 class VirtualTrade:
     outcome: str | None                  # tp1_first | sl_first | not_triggered | unresolved_24h; None = undecided
@@ -211,14 +228,15 @@ def virtual_trade(lv: Levels, cycle_ms: int, t: np.ndarray, h: np.ndarray, l: np
     """Walk the bars from the cycle time with :func:`.executor.evaluate_virtual`'s rules (fill, stop before target on
     one bar, ``not_triggered`` at valid_until, ``unresolved_24h`` after the horizon) and keep the trade alive after
     TP1 — with the original stop and every target — to the stop, the farthest target or the horizon."""
-    horizon = lv.valid_until + VIRTUAL_HORIZON_MS
+    valid_until = virtual_valid_until(lv.valid_until, cycle_ms)
+    horizon = valid_until + VIRTUAL_HORIZON_MS
     vt = VirtualTrade(None, tp_hits=[False] * len(lv.targets))
     filled = lv.order_type == "MARKET"
     for bt, bh, bl in zip(t.tolist(), h.tolist(), l.tolist()):
         if bt < cycle_ms:
             continue
         if not filled:
-            if bt >= lv.valid_until:
+            if bt >= valid_until:
                 vt.outcome, vt.resolved_ms, vt.end_ms = "not_triggered", bt, bt
                 return vt
             hit = {"BUY_LIMIT": bl <= lv.trigger, "BUY_STOP": bh >= lv.trigger,
@@ -318,7 +336,8 @@ class MetricsJob:
             self._later = {k: v for k, v in self._later.items() if v > now}
             waiting = sorted(self._later)[:MAX_EXCLUDE]           # beyond that: skipped here, after the read
             rows = self.store.pending_metrics(self.max_per_pass + len(self._later) - len(waiting), pairs=pairs,
-                                              no_trade_before_ms=now - COUNTERFACTUAL_BARS * tf_max, exclude=waiting)
+                                              no_trade_before_ms=now - COUNTERFACTUAL_BARS * tf_max, exclude=waiting,
+                                              unsettled_before_ms=now - UNSETTLED_AFTER_MS)
         except Exception:  # noqa: BLE001 — the executor loop must go on
             log.exception("decision metrics: the pending decisions could not be read")
             return 0
@@ -370,7 +389,9 @@ class MetricsJob:
         except MalformedDecision as exc:
             detail["error"] = str(exc)
             lv = None
-        if row.get("execution_state") == "executed" and row.get("outcome") is not None:
+        if row.get("execution_state") == "executed":
+            if row.get("outcome") is None:       # pending_metrics hands these over only UNSETTLED_AFTER_MS on
+                return self._unsettled(row, lv, now, base, detail)
             return self._executed(row, lv, cycle, now, base, detail)
         if lv is None:                           # nothing to walk: the row records why
             return {**base, "exit_reason": VIRTUAL_EXIT.get(row.get("virtual_outcome") or ""),
@@ -381,7 +402,7 @@ class MetricsJob:
     def _virtual(self, row: dict, lv: Levels, cycle: int, now: int, base: dict, detail: dict) -> dict | None:
         inst = self.reg.primary(row["pair"])
         bar = inst.timeframes[0].ms
-        horizon = lv.valid_until + VIRTUAL_HORIZON_MS
+        horizon = virtual_valid_until(lv.valid_until, cycle) + VIRTUAL_HORIZON_MS
         b = self._bars(inst, cycle, horizon + 2 * bar, now)
         vt = virtual_trade(lv, cycle, b.t, b.h, b.l)
         partial = vt.end_ms is None
@@ -426,13 +447,7 @@ class MetricsJob:
             c, f = od.get("commission"), od.get("fee")
             out["commission"] = None if c is None and f is None else round((c or 0.0) + (f or 0.0), 4)
             out["swap"] = od.get("swap")
-        slip = _slippage(ex, legs)
-        if slip is not None:
-            out["slippage"] = slip
-            if lv is not None:
-                detail["slippage_adverse"] = slip if lv.buy else -slip
-            detail["slippage_units"] = ("fill - requested, execution-instrument price "
-                                        "(+ = worse for BUY, better for SELL)")
+        self._slippage_columns(out, detail, ex, legs, lv)
         if not filled or lv is None:
             out["detail"] = detail
             return out
@@ -464,6 +479,26 @@ class MetricsJob:
         hits = [bool((h >= p).any()) if lv.buy else bool((l <= p).any()) for p in lv.targets]
         self._tp_columns(out, detail, hits)
         detail.update(entry=lv.entry, risk=round(lv.risk, 10), bars=int(sel.sum()))
+        out["detail"] = detail
+        return out
+
+    def _unsettled(self, row: dict, lv: Levels | None, now: int, base: dict, detail: dict) -> dict:
+        """An executed trade without a settlement ``UNSETTLED_AFTER_MS`` after the decision: still open, or its legs
+        vanished from the venue's history (then it never settles and the executor stops polling it after
+        ``SETTLE_LOOKBACK_DAYS``). Counted as ``open`` — never as a result: no excursions, targets or costs (the
+        window has no end and the venue gave no split). A later settlement recomputes the row (pending_metrics)."""
+        ex = _dict(row.get("execution_detail"))
+        backend = _dict(ex.get("backend"))
+        placed = backend.get("placed") if isinstance(backend.get("placed"), list) else backend.get("legs")
+        detail.update(basis="broker", unsettled=True, outcome=None, mode=ex.get("mode"),
+                      unsettled_days=round(max(0, now - int(row["ts"])) / MS_PER_DAY, 1),
+                      legs_placed=len(placed) if isinstance(placed, list) else None,
+                      note=f"executed, no settlement {UNSETTLED_AFTER_MS // MS_PER_DAY} days after the decision "
+                           "(still open, or its legs are gone from the venue's history) - recomputed when one arrives")
+        if ex.get("single_leg"):
+            detail["single_leg"] = ex["single_leg"]
+        out = {**base, "exit_reason": "open"}
+        self._slippage_columns(out, detail, ex, [], lv)
         out["detail"] = detail
         return out
 
@@ -546,6 +581,16 @@ class MetricsJob:
         return paper_outcome_detail(legs) if legs else None
 
     @staticmethod
+    def _slippage_columns(out: dict, detail: dict, ex: dict, legs: list[dict], lv: Levels | None) -> None:
+        slip = _slippage(ex, legs)
+        if slip is None:
+            return
+        out["slippage"] = slip
+        if lv is not None:
+            detail["slippage_adverse"] = slip if lv.buy else -slip
+        detail["slippage_units"] = "fill - requested, execution-instrument price (+ = worse for BUY, better for SELL)"
+
+    @staticmethod
     def _tp_columns(out: dict, detail: dict, hits: list[bool] | None) -> None:
         if hits is None:
             return
@@ -596,6 +641,6 @@ def _slippage(ex: dict, legs: list[dict]) -> float | None:
     return round(sum(vals) / len(vals), 10) if vals else None
 
 
-__all__ = ["EXIT_REASONS", "Levels", "MalformedDecision", "MetricsJob", "VirtualTrade", "decision_exit",
-           "excursions_r", "leg_exit", "levels_of", "mt5_outcome_detail", "paper_outcome_detail", "spread_at_gate",
-           "virtual_trade"]
+__all__ = ["EXIT_REASONS", "Levels", "MalformedDecision", "MetricsJob", "UNSETTLED_AFTER_MS", "VIRTUAL_MAX_VALID_MS",
+           "VirtualTrade", "decision_exit", "excursions_r", "leg_exit", "levels_of", "mt5_outcome_detail",
+           "paper_outcome_detail", "spread_at_gate", "virtual_trade", "virtual_valid_until"]
