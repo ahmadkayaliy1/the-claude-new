@@ -1,10 +1,16 @@
 """Validated generation with a bounded repair loop (P8.3).
 
 call → parse JSON → validate against the pydantic contract (bounds + semantic risk rules) → on failure send
-the exact validation errors back and ask for a corrected object (≤ ``max_repairs``). Transient provider errors
-back off briefly and retry; rate limits, refusals, budget refusals, non-retryable provider errors and any
-unexpected exception end the attempt (the next trigger tries again — no 20–60 s sleeps inside a cycle). Every
-call is recorded in ``ai_usage`` (with its role and the images it carried).
+the exact validation errors back and ask for a corrected object (≤ ``max_repairs``). Retryable provider errors
+(overloaded, 5xx) back off briefly and retry; rate limits, refusals, budget refusals, non-retryable provider errors
+and any unexpected exception end the attempt (the next trigger tries again). Every call is recorded in ``ai_usage``
+(with its role and the images it carried).
+
+Phase 5 A5: a ``transient`` provider error (the Claude Code OAuth refresh race, a 403 "Request not allowed") gets ONE
+retry after ``transient_retry_s`` (``ai.transient_retry_s``; 0 = the quick retries above) when the cycle deadline
+still leaves room for a whole call after the pause — the only deliberate pause inside a cycle. A call cancelled
+after its request went out (cycle deadline, escalation timeout, shutdown) is recorded as well, ``error`` =
+``cancelled: …`` with unknown (0) tokens, so the pair's daily count holds every attempt (D-043).
 
 Chart images (Phase 3) go with the first attempt and its retries only: a repair re-asks about the model's own
 answer, the charts add nothing to that and would cost ≈ 2.3 k input tokens each time. When the provider cannot
@@ -17,13 +23,15 @@ import asyncio
 import functools
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from .budget import BudgetExceeded, CostGovernor, RateLimiter, UsageStore
-from .providers.base import CHARTS_DISABLED, ImageInput, LLMProvider, LLMResult, ProviderError, Refusal
+from .budget import CANCELLED_PREFIX, BudgetExceeded, CostGovernor, RateLimiter, UsageStore
+from .providers.base import (CHARTS_DISABLED, REQUEST_STARTED, ImageInput, LLMProvider, LLMResult, ProviderError,
+                             Refusal)
 
 log = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
@@ -56,6 +64,24 @@ class Generation(Generic[T]):
         return self.attempts[-1].text if self.attempts else ""
 
 
+def _retry_fits(until: float | None, pause_s: float, provider: LLMProvider) -> bool:
+    """The transient retry is made only when, after the pause, a whole call (the provider's ``timeout_s``) still ends
+    before the cycle deadline ``until`` (``time.monotonic()``); no deadline = always."""
+    if until is None:
+        return True
+    return time.monotonic() + pause_s + float(getattr(provider.cfg, "timeout_s", 0.0) or 0.0) <= until
+
+
+def _record_cancelled(record, provider: LLMProvider, exc: BaseException, img: dict) -> None:
+    """The ledger row of a call cancelled after its request went out (D-043: every attempt counts): tokens unknown
+    (0 placeholders), ``error`` = ``cancelled: <why>``. Never raises — the cancellation must go on."""
+    why = str(exc) or "the call was stopped (cycle deadline, escalation timeout or shutdown)"
+    try:
+        record(None, model=provider.model, ok=False, error=f"{CANCELLED_PREFIX}{why} — tokens unknown"[:300], **img)
+    except Exception:  # noqa: BLE001
+        log.exception("%s: could not record the cancelled call", provider.name)
+
+
 def _format_errors(exc: ValidationError) -> str:
     lines = []
     for e in exc.errors()[:15]:
@@ -68,9 +94,13 @@ async def generate_validated(provider: LLMProvider, model_cls: type[T], *, syste
                              limiter: RateLimiter, governor: CostGovernor, usage: UsageStore, purpose: str,
                              pair: str | None = None, max_repairs: int = 2, max_retries: int = 3,
                              est_input_tokens: int = 8000, images: list[ImageInput] | None = None,
-                             role: str | None = None) -> Generation[T]:
+                             role: str | None = None, transient_retry_s: float = 0.0,
+                             retry_until: float | None = None) -> Generation[T]:
     """``images`` go with the first attempt (and its retries on transient provider errors) only; ``role`` (decision,
-    escalation, …) is written on every ledger row, with the images that row's attempt carried."""
+    escalation, …) is written on every ledger row, with the images that row's attempt carried.
+    ``transient_retry_s``: the pause before the one retry of a ``transient`` provider error (0 = retried like any
+    retryable error); ``retry_until``: the ``time.monotonic()`` by which the unit must be done (the cycle deadline) —
+    the retry is made only when the pause plus the provider's ``timeout_s`` still fit before it."""
     gen: Generation[T] = Generation(False, None)
     schema = model_cls.model_json_schema()
     prompt = user
@@ -83,6 +113,7 @@ async def generate_validated(provider: LLMProvider, model_cls: type[T], *, syste
         first_text = prompt = first_text + NO_CHARTS_NOTE
     record = functools.partial(usage.record, provider=provider.name, purpose=purpose, pair=pair, role=role)
     repairs = retries = 0
+    transient_retried = False
     while True:
         # what this attempt really sends: a provider without image support drops them (base.usable_images)
         sent = pending if pending and getattr(provider, "supports_images", False) else []
@@ -96,9 +127,15 @@ async def generate_validated(provider: LLMProvider, model_cls: type[T], *, syste
             gen.errors.append(str(exc))
             return gen
         kw = {"images": pending} if pending else {}
+        started = [False]                          # set by the provider when its request is on its way
+        token = REQUEST_STARTED.set(started)
         try:
             res = await provider.generate(system=system, user=prompt, schema=schema, schema_name=model_cls.__name__,
                                           **kw)
+        except asyncio.CancelledError as exc:
+            if started[0] or not getattr(provider, "marks_request_start", False):
+                _record_cancelled(record, provider, exc, img)
+            raise
         except Refusal as exc:
             record(None, model=provider.model, ok=False, error=f"refusal: {exc}", **img)
             gen.refused = True
@@ -116,6 +153,13 @@ async def generate_validated(provider: LLMProvider, model_cls: type[T], *, syste
             record(None, model=provider.model, ok=False, error=str(exc)[:300], **img)
             gen.errors.append(str(exc))
             gen.provider_error = str(exc)[:300]
+            if getattr(exc, "transient", False) and transient_retry_s > 0:
+                if transient_retried or not _retry_fits(retry_until, transient_retry_s, provider):
+                    return gen
+                transient_retried = True
+                log.warning("%s %s: %s — one retry in %.0fs", pair or "*", purpose, str(exc)[:200], transient_retry_s)
+                await asyncio.sleep(transient_retry_s)
+                continue
             if not exc.retryable or exc.rate_limited or retries >= max_retries:
                 return gen
             retries += 1
@@ -128,6 +172,8 @@ async def generate_validated(provider: LLMProvider, model_cls: type[T], *, syste
             gen.errors.append(msg)
             gen.provider_error = msg
             return gen
+        finally:
+            REQUEST_STARTED.reset(token)
         gen.attempts.append(res)
         gen.provider_error = None
         if pending:

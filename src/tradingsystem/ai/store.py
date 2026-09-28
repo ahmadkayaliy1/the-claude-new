@@ -70,7 +70,9 @@ METRIC_COLUMNS = ("decision_id", "computed_ms", "mfe_r", "mae_r", "tp1_hit", "tp
                   "no_trade_counterfactual_atr", "detail")
 
 EXECUTION_STATES = ("not_executed", "queued", "executing", "executed", "rejected", "expired", "cancelled")
-STATUSES = ("valid", "invalid", "refused", "budget_blocked", "error", "skipped")
+# 'interrupted' (Phase 5 A5): no answer because the machine slept during the cycle — like 'error' it consumes nothing
+# (setup, events, review stay unseen), unlike it the engine does not back off for it
+STATUSES = ("valid", "invalid", "refused", "budget_blocked", "error", "skipped", "interrupted")
 
 
 def git_sha() -> str | None:

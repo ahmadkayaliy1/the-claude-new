@@ -57,6 +57,10 @@ EXTRA_COLUMNS = (("api_equivalent_usd", "REAL"), ("num_turns", "INTEGER"), ("cac
 # limit, crash): its tokens are unknown, not zero (tools/operator/run_session.py writes it; the usage gauge, the health
 # report and the review pack count such rows)
 USAGE_UNKNOWN_PREFIX = "usage_unknown: "
+# Phase 5 A5: the ``error`` prefix of a decision-path call cancelled after its request went out (cycle deadline,
+# shutdown — ``ai/repair.py``): it counts towards the pair's daily cap like every attempt (D-043) and its tokens are
+# unknown as well (0 placeholders)
+CANCELLED_PREFIX = "cancelled: "
 
 
 class UsageStore:
@@ -134,11 +138,13 @@ class UsageStore:
         return {"input": int(inp), "cached": int(cached), "output": int(out), "calls": int(calls)}
 
     def unknown_since(self, since_ms: int, providers: list[str] | tuple[str, ...] | None = None) -> int:
-        """Ledger rows since ``since_ms`` whose ``error`` starts with ``USAGE_UNKNOWN_PREFIX``: operator sessions
-        that ended without a result document, so their 0 tokens are not the real spend (the usage gauge reports the
-        count next to its sums). ``providers`` as in :meth:`tokens_since`."""
-        sql = "SELECT count(*) FROM ai_usage WHERE ts>=? AND substr(error, 1, ?)=?"
-        args: list = [since_ms, len(USAGE_UNKNOWN_PREFIX), USAGE_UNKNOWN_PREFIX]
+        """Ledger rows since ``since_ms`` whose ``error`` starts with ``USAGE_UNKNOWN_PREFIX`` (operator sessions
+        that ended without a result document) or ``CANCELLED_PREFIX`` (decision calls cancelled after the CLI
+        started): their 0 tokens are not the real spend (the usage gauge reports the count next to its sums).
+        ``providers`` as in :meth:`tokens_since`."""
+        sql = "SELECT count(*) FROM ai_usage WHERE ts>=? AND (substr(error, 1, ?)=? OR substr(error, 1, ?)=?)"
+        args: list = [since_ms, len(USAGE_UNKNOWN_PREFIX), USAGE_UNKNOWN_PREFIX, len(CANCELLED_PREFIX),
+                      CANCELLED_PREFIX]
         if providers is not None:
             if not providers:
                 return 0
@@ -187,6 +193,14 @@ class RateLimiter:
         if self.instance and self.daily_cap:
             lefts.append(max(self.daily_cap - self.usage.count_since(self.name, day0, pair=self.instance), 0))
         return min(lefts) if lefts else None
+
+    def used_today(self) -> tuple[int, int] | None:
+        """(calls this pair made in the current quota day, its ``daily_cap``) — the session-aware quota reserve
+        (Phase 5 A5); None for the all-pairs system (no per-pair cap)."""
+        if not (self.instance and self.daily_cap):
+            return None
+        day0 = quota_day_start(now_ms(), self.cfg.quota_reset_tz)
+        return self.usage.count_since(self.name, day0, pair=self.instance), int(self.daily_cap)
 
     async def acquire(self) -> None:
         left = self.remaining_today()
@@ -275,4 +289,4 @@ def is_budget_error(exc: BaseException) -> bool:
 
 
 __all__ = ["BudgetExceeded", "UsageStore", "RateLimiter", "CostGovernor", "GovernorState", "LEVELS",
-           "USAGE_UNKNOWN_PREFIX", "is_budget_error", "sqlite3"]
+           "USAGE_UNKNOWN_PREFIX", "CANCELLED_PREFIX", "is_budget_error", "sqlite3"]

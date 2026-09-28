@@ -2,7 +2,11 @@
 
 Loop (every 2 s): for each pair, once the decision-timeframe candle that just closed is stored, build the
 snapshot, evaluate the trigger policy (setup events / next_review / idle), and dispatch an AI cycle for the
-triggered pairs. Market-closed pairs are skipped.
+triggered pairs. Market-closed pairs are skipped (the execution instrument's session calendar — the one the MT5
+collector's ``market_closed`` state comes from); with ``ai.skip_closed_market`` (Phase 5 A5) a pair that holds a
+position or a pending order is still screened (management calls), and for the others the setup signature and the
+price of the last call follow the closed market at every screen close, so the reopen fires only on what is new
+then; one INFO line per hour per closed pair.
 
 * A decision bar that is not stored is never analysed: the pair waits (reported once) until it arrives or the
   next bar closes; a payload that fails the data gate (``snapshot.data_problems``) is stored as 'skipped'
@@ -10,9 +14,11 @@ triggered pairs. Market-closed pairs are skipped.
 * AI cycles run as background tasks bounded by ``ai.cycle_deadline_s``; a pair is never dispatched twice at
   once. The heartbeat in ``collector_status`` ("engine") has its own task (every 10 s), so a long Claude Code
   call can never make the supervisor kill the engine (F2).
-* Calls are rationed: per-pair spacing that doubles after each failed cycle, ``next_review`` at most once per
-  decision and never sooner than ``ai.review_floor_minutes`` (F1), and quota pressure — below 50 % of the
-  provider's daily cap only strong setups and reviews, below 20 % only reviews, none when it is used up (F8).
+* Calls are rationed: per-pair spacing that doubles after each failed cycle (not after one a suspend interrupted),
+  ``next_review`` at most once per decision and never sooner than ``ai.review_floor_minutes`` (F1), and quota
+  pressure — below 50 % of the provider's daily cap only strong setups and reviews, below 20 % only reviews, none
+  when it is used up (F8); outside ``ai.quota_reserve_hours_utc`` a pair keeps ``ai.quota_reserve_share`` of its
+  daily calls for those hours (event calls are exempt: they manage money already at risk).
 
 CLI:
   engine                         run the service
@@ -27,20 +33,21 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import statistics
 import time
 from collections import deque
 
 from ..ai.budget import CostGovernor, UsageStore, usage_db
-from ..ai.orchestrator import CycleRequest, Orchestrator
+from ..ai.orchestrator import SUSPEND_GAP_S, CycleRequest, Orchestrator, asleep_since, clock_sample
 from ..ai.store import DecisionRecord, DecisionStore
-from ..ai.triggers import decide, review_due_split
+from ..ai.triggers import decide, review_due_split, scan_setups, setup_signature
 from ..core.instruments import InstrumentRegistry
 from ..core.logsetup import setup_from_settings
-from ..core.sessions import calendar_for
+from ..core.sessions import SessionCalendar, calendar_for
 from ..core.settings import PROJECT_ROOT, Settings, load_settings
 from ..core.timeframes import Timeframe
-from ..core.timeutil import MS_PER_DAY, iso, now_ms
+from ..core.timeutil import MS_PER_DAY, MS_PER_HOUR, iso, now_ms
 from ..core.tunables import Tunables, tunables_of
 from ..ingest.common.appdb import AppDB
 from ..storage.tablespec import spec_for
@@ -94,6 +101,9 @@ class Engine:
         self.inflight: dict[str, asyncio.Task] = {}  # pair → its running cycle
         self.inflight_since: dict[str, int] = {}
         self._waiting: dict[str, int] = {}           # pair → decision bar reported as not stored
+        self._closed_note_at: dict[str, tuple[str, int]] = {}   # pair → (text, time) of its last market-closed line
+        self._closed_seen: dict[str, int | None] = {}  # pair → last screen bar stored when its closed-market
+        #                                                signature was last taken (rebuilt only when data moved)
         self._quiet: dict[str, tuple[str, int]] = {}
         self._tick_error: str | None = None
         self.stop = False
@@ -302,7 +312,11 @@ class Engine:
             execu = self.reg.with_role(pair, "execution")[0]
             cal = calendar_for(execu.venue, execu.symbol, pcfg.asset_class)
             if not cal.is_open(now):
-                continue
+                if not self._closed_market(pair, now, cal):
+                    continue
+            else:
+                self._closed_note_at.pop(pair, None)
+                self._closed_seen.pop(pair, None)
             tf = pcfg.decision_timeframe
             bar = tf.floor(now) - tf.ms
             stf = self.screen_tf(pair)
@@ -344,6 +358,74 @@ class Engine:
                 fired.append((pair, reasons, strength, payload))
         if fired:
             self._dispatch(fired, now)
+
+    # ------------------------------------------------------------------ closed execution market (Phase 5 A5)
+    def _closed_market(self, pair: str, now: int, cal: SessionCalendar) -> bool:
+        """The pair's execution market is closed now (weekend, daily break, Windsor's crypto maintenance). True =
+        screen the pair as usual: ``ai.skip_closed_market`` and it holds a position or a pending order (the model
+        still manages what is open). Otherwise no trader call; the setup signature and the price of the last call
+        follow the closed market (:meth:`_follow_closed_market`). ``ai.skip_closed_market: false`` = the Phase 4
+        behaviour (nothing at all while closed). One INFO line per hour per pair (or when its situation changes)."""
+        if not self.s.ai.skip_closed_market:
+            self._closed_note(pair, now, cal, "not screened (ai.skip_closed_market off)")
+            return False
+        held = self._holds(pair)
+        if held:
+            self._closed_note(pair, now, cal, "it holds a position or pending order: screened, management calls "
+                                              "stay allowed")
+            return True
+        self._closed_note(pair, now, cal, "no trader call; the setup signature follows the closed market"
+                          + (" (positions unknown: the executor is not reporting)" if held is None else ""))
+        try:
+            self._follow_closed_market(pair, now)
+        except Exception:  # noqa: BLE001 — bookkeeping for the reopen, never a reason to fail the tick
+            log.exception("%s: could not follow the closed market's setup signature", pair)
+        return False
+
+    def _holds(self, pair: str) -> bool | None:
+        """Whether the pair has an open position or a pending order at the broker, as its executor last reported
+        (the ``account`` block of the payload); None when the executor is not reporting (positions unknown)."""
+        acct = self.live_account(pair)
+        if "open_positions" not in acct:
+            return None
+        return bool(acct.get("open_positions") or acct.get("pending_orders"))
+
+    def _follow_closed_market(self, pair: str, now: int) -> None:
+        """At each screen close while the execution market is closed: the screen / decision bars count as processed
+        and, when a new screen bar was stored since the last look (Binance keeps trading through Windsor's
+        maintenance; gold has no bars at the weekend), the setup signature and the last-call price take the
+        closed market's values — what the model is asked about at the reopen is what changed after it."""
+        stf = self.screen_tf(pair)
+        sbar = stf.floor(now) - stf.ms
+        if sbar <= self.processed_screen.get(pair, 0) or now < sbar + stf.ms + SETTLE_MS:
+            return
+        self.processed_screen[pair] = sbar
+        tf = self.s.pairs[pair].decision_timeframe
+        bar = tf.floor(now) - tf.ms
+        if bar > self.processed.get(pair, 0) and now >= bar + tf.ms + SETTLE_MS:
+            self.processed[pair] = bar
+        inst = self.reg.primary(pair)
+        last = self.builder.reader(inst).last_time(spec_for(inst, "candles", stf))
+        if pair in self._closed_seen and self._closed_seen[pair] == last:
+            return                                   # nothing new stored: the signature taken last time stands
+        self._closed_seen[pair] = last               # first: a build that fails is tried again on new data only
+        t0 = time.perf_counter()
+        payload = self.orch.payload(pair, now, self.live_account(pair))
+        self._build_ms.append(int((time.perf_counter() - t0) * 1000))
+        tn = tunables_of(self, pair, now)
+        sig = setup_signature(scan_setups(payload, liquidity_atr=tn.liquidity_atr, screen_tf=stf.value))
+        self.store.kv_set(f"{pair}:signature", sorted(sig))
+        mid = _payload_mid(payload)
+        if mid:
+            self.store.kv_set(f"{pair}:last_call_price", mid)
+
+    def _closed_note(self, pair: str, now: int, cal: SessionCalendar, what: str) -> None:
+        """The INFO line of a closed pair: once an hour, or at once when its text changes."""
+        prev = self._closed_note_at.get(pair)
+        if prev and prev[0] == what and now - prev[1] < MS_PER_HOUR:
+            return
+        self._closed_note_at[pair] = (what, now)
+        log.info("%s: execution market closed (%s calendar) — %s", pair, cal.name, what)
 
     def _dispatch(self, fired: list[tuple[str, list[str], str, dict | None]], now: int) -> None:
         pairs = ", ".join(f[0] for f in fired)
@@ -468,32 +550,67 @@ class Engine:
                               f"usage gauge level {gs.level} ({gs.reason}) — not analysed: {dropped}")
             fired = keep
         left, cap = self.orch.quota()
-        if left is None or not cap:
+        if left is not None and cap:
+            frac = left / cap
+            ok = (set() if left <= 0 else {"review", "event"} if frac < 0.2 else {"review", "event", "strong"}
+                  if frac < 0.5 else None)
+            keep = fired if ok is None else [f for f in fired if f[2] in ok]
+            if len(keep) < len(fired):
+                dropped = ", ".join(f[0] for f in fired if f not in keep)
+                self._quietly("quota", dropped, now, "ai_quota",
+                              f"{self.orch.route[0]}: {left}/{cap} requests left today — not analysed: {dropped}")
+            fired = keep
+        return self._reserve(fired, now)
+
+    def _reserve(self, fired: list, now: int) -> list:
+        """The session-aware quota reserve (Phase 5 A5): outside ``ai.quota_reserve_hours_utc`` [start, end) a pair
+        uses at most floor((1 − ``ai.quota_reserve_share``) × its daily cap) calls of the quota day, so the London
+        afternoon and New York keep calls (the cap used to bind by early afternoon). Event calls are exempt — they
+        manage money already at risk. 0 = off; the all-pairs system (no per-pair cap) has no reserve."""
+        share = self.s.ai.quota_reserve_share
+        if share <= 0 or not fired:
             return fired
-        frac = left / cap
-        ok = (set() if left <= 0 else {"review", "event"} if frac < 0.2 else {"review", "event", "strong"}
-              if frac < 0.5 else None)
-        keep = fired if ok is None else [f for f in fired if f[2] in ok]
+        start, end = self.s.ai.quota_reserve_hours_utc
+        if start <= now % MS_PER_DAY // MS_PER_HOUR < end:
+            return fired
+        got = self.orch.quota_used()
+        if not got:
+            return fired
+        used, cap = got
+        allowed = math.floor(round((1 - share) * cap, 6))
+        if used < allowed:
+            return fired
+        keep = [f for f in fired if f[2] == "event"]
         if len(keep) < len(fired):
             dropped = ", ".join(f[0] for f in fired if f not in keep)
-            self._quietly("quota", dropped, now, "ai_quota",
-                          f"{self.orch.route[0]}: {left}/{cap} requests left today — not analysed: {dropped}")
+            self._quietly("quota_reserve", dropped, now, "ai_quota",
+                          f"{self.orch.route[0]}: {used}/{cap} calls used today — the other {cap - allowed} are kept "
+                          f"for {start:02d}:00–{end:02d}:00 UTC (ai.quota_reserve_share {share:g}) — not analysed: "
+                          f"{dropped}")
         return keep
 
     async def _cycle(self, queue: list[CycleRequest], payloads: dict[str, dict], as_of: int) -> None:
         pairs = [q.pair for q in queue]
         answered: set[str] = set()
+        clock0 = clock_sample()
         try:
             recs = await self.orch.run_cycle(queue, as_of=as_of, payloads=payloads, account=self.live_account(None))
             for r in recs:
+                if r.status == "interrupted":
+                    continue                     # a suspend cut it off, not the provider: no back-off (Phase 5 A5)
                 self.fails[r.pair] = 0 if r.status in ("valid", "skipped") else self.fails.get(r.pair, 0) + 1
                 if r.status in ANSWERED:
                     answered.add(r.pair)
         except Exception as exc:  # noqa: BLE001
             log.exception("AI cycle failed")
             self.appdb.add_event("engine", "cycle_error", repr(exc)[:300])
-            for p in pairs:
-                self.fails[p] = self.fails.get(p, 0) + 1
+            slept = asleep_since(clock0)
+            if slept > SUSPEND_GAP_S:
+                log.warning("the failed AI cycle of %s was interrupted by a suspend (~%.0fs asleep) — no back-off",
+                            ", ".join(pairs), slept)
+            else:
+                for p in pairs:
+                    self.fails[p] = self.fails.get(p, 0) + 1
         finally:
             for p in pairs:
                 # answered = the stored record says so (a pair answered before a later pair's failure or a

@@ -14,10 +14,17 @@ A cycle runs each pair (or the whole batch in the batch modes) as its own unit: 
 status 'error' for that unit only, every record is stored as soon as its unit finishes, and units still running
 at ``ai.cycle_deadline_s`` are cancelled (F2, F4). System-owned fields of a recommendation (pair, timestamp,
 validity horizon, price reference, review timing) are set here, never taken from the model (F6).
+
+Phase 5 A5: a unit that got no answer while the machine slept more than ``SUSPEND_GAP_S`` during the cycle (the
+awake clock of ``supervisor/winops.py`` fell behind the tick clock — the CLI or the network died with the suspend,
+or the deadline passed while asleep: 2026-09-27 19:24 UTC) is stored as 'interrupted', not 'error' — the engine does
+not back off for it. A transient provider error gets one retry after ``ai.transient_retry_s`` when the deadline
+leaves room for it (``ai/repair.py``).
 """
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import datetime as dt
 import json
 import logging
@@ -33,6 +40,7 @@ from ..core.settings import Settings
 from ..core.timeutil import MS_PER_DAY, iso, now_ms, parse_date_spec
 from ..core.timeframes import Timeframe
 from ..core.tunables import tunables_of
+from ..supervisor.winops import ClockSample, sample_clock
 from .budget import CostGovernor, RateLimiter, UsageStore
 from .contract import (AssessmentSet, Decision, EscalationReview, Recommendation, RecommendationSet, RiskReview,
                        TimeframeAssessment)
@@ -52,6 +60,25 @@ NO_TP_HINT = "(none)"
 # position_actions always stand: the escalation judges the new trade, not the protective actions on live ones)
 ESCALATION_FIXED = ("decision", "order_type", "entry", "stop_loss", "take_profits", "management")
 ESCALATION_SIGN_IN_WAIT_S = 60.0         # a new escalation provider instance waits this long for its sign-in check
+SUSPEND_GAP_S = 60.0                     # time asleep inside a cycle beyond which its unanswered units are 'interrupted'
+# the running cycle's deadline (time.monotonic()), seen by every unit task it starts (the transient retry's room)
+_CYCLE_END: contextvars.ContextVar[float | None] = contextvars.ContextVar("ai_cycle_end", default=None)
+
+
+def clock_sample() -> ClockSample | None:
+    """The machine's clocks now (wall / tick incl. sleep / awake excl. sleep); None when they cannot be read."""
+    try:
+        return sample_clock()
+    except Exception:  # noqa: BLE001 — suspend detection is a label, never a reason to fail a cycle
+        return None
+
+
+def asleep_since(since: ClockSample | None) -> float:
+    """Seconds the machine slept since ``since`` (the tick clock ran on, the awake clock did not); 0 when unknown."""
+    now = clock_sample()
+    if since is None or now is None:
+        return 0.0
+    return max(0.0, (now.tick - since.tick) - (now.awake - since.awake))
 
 
 @dataclass
@@ -124,6 +151,8 @@ class Orchestrator:
                 for (n, *_), other in self._providers.items():   # the sign-in is the machine's: reuse a verified one
                     if n == name:
                         adopt(other)
+            if hasattr(prov, "caps_dir"):              # Phase 5 A7: the CLI capability file lives in data/shared
+                prov.caps_dir = self.s.paths.shared()
             self._providers[key] = prov
             if prov.name not in self._limiters:        # one limiter per provider: every role shares the daily cap
                 self._limiters[prov.name] = RateLimiter(prov.name, prov.cfg, self.usage,
@@ -152,6 +181,12 @@ class Orchestrator:
         """(requests left in the provider's quota day, its daily cap) for ``name`` or the provider in use."""
         lim = self._limiters.get(name or self.route[0])
         return (lim.remaining_today(), lim.cap()) if lim else (None, None)
+
+    def quota_used(self, name: str | None = None) -> tuple[int, int] | None:
+        """(calls this pair made in the quota day, ``ai.daily_calls_per_pair``) for ``name`` or the provider in use —
+        None for the all-pairs system or before the provider's first use (the session-aware quota reserve)."""
+        lim = self._limiters.get(name or self.route[0])
+        return lim.used_today() if lim else None
 
     def default_account(self) -> dict:
         return {"equity": self.s.execution.paper_equity, "currency": "USD", "mode": self.s.execution.mode,
@@ -215,7 +250,9 @@ class Orchestrator:
 
     async def _gen(self, provider: LLMProvider, model_cls, system: str, user: str, purpose: str,
                    pair: str | None, *, images: list[ImageInput] | None = None,
-                   role: str | None = "decision") -> Generation:
+                   role: str | None = "decision", until: float | None = None) -> Generation:
+        """``until``: the ``time.monotonic()`` this call must be done by (default: the running cycle's deadline) —
+        a transient provider error is retried only when the retry still fits before it."""
         try:
             async with self._sem:
                 kw = {"images": images, "role": role} if (images or role) else {}
@@ -224,7 +261,9 @@ class Orchestrator:
                                                 usage=self.usage, purpose=purpose,
                                                 # one system per pair: every call counts towards its share (D-042)
                                                 pair=pair or self.s.paths.instance,
-                                                est_input_tokens=max(2000, len(user) // 3), **kw)
+                                                est_input_tokens=max(2000, len(user) // 3),
+                                                transient_retry_s=self.s.ai.transient_retry_s,
+                                                retry_until=until if until is not None else _CYCLE_END.get(), **kw)
         except Exception as exc:  # noqa: BLE001 — one failed sub-call must not take its siblings down (F4)
             log.exception("%s %s: generation failed", pair or "*", purpose)
             msg = f"{type(exc).__name__}: {exc}"[:300]
@@ -304,15 +343,22 @@ class Orchestrator:
         if mode == "paused":
             return out + [self._finish(self._failed(p, mode, reasons[p], built[p], why, "budget_blocked"), label,
                                        as_of, built[p], trig) for p in built]
-        units = self._units(mode, built, reasons, as_of, account, trig)
-        tasks = {asyncio.ensure_future(coro): pairs for pairs, coro in units}
+        clock0 = clock_sample()                  # a suspend inside the cycle turns its failed units 'interrupted'
         end = time.monotonic() + deadline_s if deadline_s else None
+        units = self._units(mode, built, reasons, as_of, account, trig)
+        cycle_end = _CYCLE_END.set(end)          # copied into every unit task created below (transient retry room)
+        try:
+            tasks = {asyncio.ensure_future(coro): pairs for pairs, coro in units}
+        finally:
+            _CYCLE_END.reset(cycle_end)
         pending = set(tasks)
+        cut = False
         try:
             while pending:
                 timeout = None if end is None else max(0.0, end - time.monotonic())
                 done, pending = await asyncio.wait(pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
                 if not done:
+                    cut = True
                     break
                 for t in done:
                     try:
@@ -321,18 +367,37 @@ class Orchestrator:
                         log.error("AI unit %s failed: %r", tasks[t], exc, exc_info=exc)
                         recs = [self._failed(p, mode, reasons[p], built[p], f"{type(exc).__name__}: {exc}")
                                 for p in tasks[t]]
-                    out += [self._finish(rec, label, as_of, built.get(rec.pair), trig) for rec in recs]
+                    out += [self._finish(self._interrupted(rec, clock0), label, as_of, built.get(rec.pair), trig)
+                            for rec in recs]
         finally:
-            for t in pending:                    # deadline or shutdown: cancelling kills any running CLI call
-                t.cancel()
+            # deadline or shutdown: cancelling kills any running CLI call (and writes its ledger row, D-043)
+            why = f"cycle deadline of {deadline_s:.0f}s reached" if cut else "the AI cycle was stopped"
+            for t in pending:
+                t.cancel(why)
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
         for t in pending:
             log.warning("AI cycle deadline (%.0fs) reached — cancelled %s", deadline_s, tasks[t])
-            out += [self._finish(self._failed(p, mode, reasons[p], built[p],
-                                              f"cycle deadline of {deadline_s:.0f}s reached — cancelled"),
+            out += [self._finish(self._interrupted(self._failed(p, mode, reasons[p], built[p],
+                                                                f"cycle deadline of {deadline_s:.0f}s reached — "
+                                                                "cancelled"), clock0),
                                  label, as_of, built[p], trig) for p in tasks[t]]
         return out
+
+    @staticmethod
+    def _interrupted(rec: DecisionRecord, since: ClockSample | None) -> DecisionRecord:
+        """An unanswered unit ('error') of a cycle during which the machine slept more than ``SUSPEND_GAP_S`` is
+        'interrupted': the suspend, not the provider, cut it off — the engine does not back off for it and its setup
+        and events stay unseen (the next screens call again)."""
+        if rec.status != "error":
+            return rec
+        slept = asleep_since(since)
+        if slept > SUSPEND_GAP_S:
+            rec.status = "interrupted"
+            rec.errors.append(f"interrupted: the PC was asleep ~{slept:.0f}s during the cycle")
+            log.warning("%s: AI call interrupted by a suspend (~%.0fs asleep) — stored as 'interrupted'", rec.pair,
+                        slept)
+        return rec
 
     def _units(self, mode: str, payloads: dict, reasons: dict, as_of: int,
                account: dict, trig: dict | None = None) -> list[tuple[list[str], object]]:
@@ -643,8 +708,12 @@ class Orchestrator:
             if not getattr(prov, "supports_images", False):
                 images, uv = [], {**uv, "charts_note": NO_CHARTS}
             pr = self._render("escalation", self._system_vars(pair, account, tn), {**uv, "proposal": json.dumps(first)})
+            until = time.monotonic() + esc.timeout_s        # its own time limit (a retry must fit it too)
+            cycle_end = _CYCLE_END.get()
             g = await asyncio.wait_for(self._gen(prov, EscalationReview, pr.system, pr.user, "escalation", pair,
-                                                 images=images, role="escalation"), esc.timeout_s)
+                                                 images=images, role="escalation",
+                                                 until=min(until, cycle_end) if cycle_end is not None else until),
+                                       esc.timeout_s)
         except Exception as exc:  # noqa: BLE001 — timeout, provider or prompt error: the failure policy decides
             g, prov = None, None
             err = f"escalation failed: {type(exc).__name__}: {exc}"[:300]

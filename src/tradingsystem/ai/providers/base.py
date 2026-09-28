@@ -8,6 +8,7 @@ until it passes that validation.
 from __future__ import annotations
 
 import base64
+import contextvars
 import copy
 import datetime as dt
 import json
@@ -73,10 +74,31 @@ def image_content_blocks(user: str, images: list[ImageInput]) -> list[dict[str, 
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool, rate_limited: bool = False) -> None:
+    """``transient`` (Phase 5 A5): a sign-in hiccup that heals by itself within a minute (the Claude Code OAuth
+    refresh race, a 403 right after it) — ``ai/repair.py`` gives it ONE retry after ``ai.transient_retry_s`` instead
+    of the quick retries of an overloaded API (with the key at 0 it is retried like any retryable error)."""
+
+    def __init__(self, message: str, *, retryable: bool, rate_limited: bool = False, transient: bool = False) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.rate_limited = rate_limited
+        self.transient = transient
+
+
+# Phase 5 A5: the ledger counts a call that was cancelled (cycle deadline, shutdown) once its request could no longer
+# be taken back. ``ai/repair.py`` puts a one-element list here around each attempt; a provider that waits before its
+# request goes out (the Claude Code CLI: a free process slot, the machine-wide start stagger) declares
+# ``marks_request_start`` and calls :func:`request_started` at that moment — for the others the attempt counts from
+# the call.
+REQUEST_STARTED: contextvars.ContextVar[list[bool] | None] = contextvars.ContextVar("llm_request_started",
+                                                                                   default=None)
+
+
+def request_started() -> None:
+    """Called by a provider the moment its request is on its way (the CLI process runs). Never raises."""
+    box = REQUEST_STARTED.get()
+    if box is not None:
+        box[0] = True
 
 
 class Refusal(ProviderError):
@@ -167,6 +189,8 @@ def extract_json(text: str) -> Any:
 class LLMProvider(ABC):
     # True when ``_call`` accepts ``images=`` (chart images, Phase 3); other providers get text only (one warning)
     supports_images: bool = False
+    # True when the provider calls :func:`request_started` itself (a cancellation before it made no request)
+    marks_request_start: bool = False
 
     def __init__(self, name: str, cfg: AIProviderCfg, model: str, api_key: str | None) -> None:
         self.name, self.cfg, self.model, self.api_key = name, cfg, model, api_key

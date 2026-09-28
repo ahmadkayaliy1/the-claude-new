@@ -17,13 +17,16 @@ Each call spawns ``claude -p`` (print mode):
 * chart images (Phase 3): print mode takes images only as stream-json input — ONE ``{"type": "user", …}`` line with
   text + base64 image blocks on stdin, ``--output-format stream-json --verbose``, the schema always in the system
   prompt (``--json-schema`` would add a tool round-trip). The user-line shape the installed CLI accepts is probed once
-  per machine and kept in ``cli_capabilities.json`` in the CLI work folder; a parser rejection makes no API request.
+  per machine and kept in ``data/shared/cli_capabilities.json`` (Phase 5 A7: backed up with the system state; before,
+  the CLI work folder in %TEMP% — read there once as a fallback); a parser rejection makes no API request.
   If the CLI takes neither shape the call fails with ``charts_disabled_cli_shape`` and ``ai/repair.py`` re-sends it
   as text. Without images nothing changes.
 
 Usage counts against the plan's shared 5-hour / weekly limits (the same pool as interactive Claude use). When
 the CLI reports a usage limit the provider cools down until the reset (or ``DEFAULT_COOLDOWN_MS``) and
-``unavailable_reason()`` lets the orchestrator route to ``ai.fallback_provider``. At most ``max_concurrency`` CLI
+``unavailable_reason()`` lets the orchestrator route to ``ai.fallback_provider``. The OAuth refresh race and a 403
+"Request not allowed" are ``transient`` errors (one retry after ``ai.transient_retry_s``, never a sign-out). At most
+``max_concurrency`` CLI
 processes run at once (≈170 MB each — keep 1 on 4 GB machines) and a call that times out or is cancelled (cycle deadline, shutdown)
 kills its CLI process, so no orphan keeps spending the plan's limits.
 """
@@ -45,8 +48,8 @@ from typing import Any
 from ...core.filelock import FileLock
 from ...core.settings import AIProviderCfg
 from ...core.timeutil import now_ms
-from .base import (CHARTS_DISABLED, ImageInput, LLMProvider, LLMResult, ProviderError, image_content_blocks, secret,
-                   transport_schema)
+from .base import (CHARTS_DISABLED, ImageInput, LLMProvider, LLMResult, ProviderError, image_content_blocks,
+                   request_started, secret, transport_schema)
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +76,8 @@ _REFRESH_RACE_RE = re.compile(r"another claude code process is refreshing", re.I
 _AUTH_TRANSIENT_RE = re.compile(r"403 request not allowed|failed to refresh oauth token", re.I)
 START_STAGGER_S = 15.0           # minimum gap between two CLI starts on this machine (token refresh happens at start)
 START_STAMP = "last_start.txt"   # in the CLI work folder, shared by every system of this Windows user (D-042)
-CAPS_FILE = "cli_capabilities.json"   # in the CLI work folder: the stream-json user-line shape this CLI accepts
+CAPS_FILE = "cli_capabilities.json"   # in data/shared (before Phase 5 A7: the CLI work folder): the stream-json
+#                                       user-line shape this CLI accepts
 SHAPES = ("message", "content")       # documented SDK shape first; the alternate is tried once if a CLI refuses it
 SHAPE_REJECT_WINDOW_S = 5.0      # a parser rejection exits within ~2 s of the start (console.error + exit(1))
 SHAPE_RETRY_UNEXPLAINED_S = 600.0   # images off after two fast failures the CLI did not explain
@@ -268,10 +272,13 @@ def _main_model(model_usage: dict[str, Any], default: str) -> str:
 
 class ClaudeCodeProvider(LLMProvider):
     supports_images = True
+    marks_request_start = True        # a call waits for a process slot and the start stagger before the CLI runs
 
     def __init__(self, name: str, cfg: AIProviderCfg, model: str, api_key: str | None, *,
-                 effort: str | None = None) -> None:
-        """``effort``: this role's depth (``ai.models.<role>.effort``) instead of the provider's configured one."""
+                 effort: str | None = None, caps_dir: Path | None = None) -> None:
+        """``effort``: this role's depth (``ai.models.<role>.effort``) instead of the provider's configured one.
+        ``caps_dir``: where the CLI capability file lives (``data/shared``; the orchestrator sets it) — None = the CLI
+        work folder, as before Phase 5 A7."""
         super().__init__(name, cfg, model, api_key)
         self.effort = effort or cfg.effort
         self._shapes_failed_until = float("-inf")
@@ -280,6 +287,8 @@ class ClaudeCodeProvider(LLMProvider):
             raise ProviderError(f"{self.name}: Claude Code CLI not found (install it or set cli_path)", retryable=False)
         self.workdir = Path(tempfile.gettempdir()) / "tradingsystem-claude-code"
         self.workdir.mkdir(parents=True, exist_ok=True)
+        self.caps_dir = caps_dir
+        self._old_caps_read = False
         self._auth_checked = float("-inf")
         self._auth_pending_msg = f"{self.name}: checking the Claude Code sign-in"
         self._auth_problem: str | None = self._auth_pending_msg
@@ -429,7 +438,7 @@ class ClaudeCodeProvider(LLMProvider):
         """The stream-json call. The shape learned on this machine goes first; a parser rejection (no API request)
         is retried once with the other shape and the winner is kept for every later call and every system."""
         args = self.build_args(system_file, None, images=True)
-        known = read_capabilities(self.workdir).get("stream_json_user_shape")
+        known = self.known_capabilities().get("stream_json_user_shape")
         first = known if known in SHAPES else SHAPES[0]
         refused: list[str] = []
         for shape in (first, *(x for x in SHAPES if x != first)):
@@ -451,12 +460,32 @@ class ClaudeCodeProvider(LLMProvider):
                   self.name, CHARTS_DISABLED, "" if explicit else " (fast failures without a reason)")
         raise ProviderError(f"{self.name}: {CHARTS_DISABLED} ({'; '.join(refused)})"[:400], retryable=False)
 
+    def known_capabilities(self) -> dict[str, Any]:
+        """What an earlier probe learned about the installed CLI: ``caps_dir`` (``data/shared``), else — ONE read per
+        provider instance — the CLI work folder where a machine that probed before Phase 5 A7 keeps it; a document
+        found there is copied to ``caps_dir`` (best effort: without it the next image call simply probes again)."""
+        doc = read_capabilities(self.caps_dir or self.workdir)
+        if doc or self.caps_dir is None or self._old_caps_read:
+            return doc
+        self._old_caps_read = True
+        old = read_capabilities(self.workdir)
+        if old:
+            try:
+                self.caps_dir.mkdir(parents=True, exist_ok=True)
+                write_capabilities(self.caps_dir, old)
+                log.info("%s: CLI capabilities moved from %s to %s", self.name, self.workdir, self.caps_dir)
+            except OSError as exc:
+                log.warning("%s: cannot copy the CLI capabilities to %s (%s)", self.name, self.caps_dir, exc)
+        return old
+
     def _remember_shape(self, shape: str, stdout: str) -> None:
         version = next((d.get("claude_code_version") for d in json_lines(stdout)
                         if d.get("type") == "system" and d.get("claude_code_version")), None)
         try:
-            write_capabilities(self.workdir, {"stream_json_user_shape": shape, "cli_version": version,
-                                              "updated_ms": now_ms()})
+            if self.caps_dir is not None:
+                self.caps_dir.mkdir(parents=True, exist_ok=True)
+            write_capabilities(self.caps_dir or self.workdir, {"stream_json_user_shape": shape, "cli_version": version,
+                                                               "updated_ms": now_ms()})
         except OSError as exc:                         # another system holds the file: it learns the same shape
             log.warning("%s: cannot record the CLI capabilities (%s)", self.name, exc)
             return
@@ -473,6 +502,7 @@ class ClaudeCodeProvider(LLMProvider):
                 *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE, cwd=self.workdir, env=child_env(self.api_key),
                 creationflags=_NO_WINDOW)
+            request_started()                      # a cancellation from here on is a ledger row (D-043, Phase 5 A5)
             try:
                 out, err = await asyncio.wait_for(proc.communicate(stdin), self.cfg.timeout_s)
             except asyncio.TimeoutError:
@@ -523,10 +553,11 @@ class ClaudeCodeProvider(LLMProvider):
     def _error(self, message: str, status: Any) -> ProviderError:
         now = now_ms()
         if _REFRESH_RACE_RE.search(message):
-            return ProviderError(f"{self.name}: sign-in token refresh race ({message[:120]})", retryable=True)
+            return ProviderError(f"{self.name}: sign-in token refresh race ({message[:120]})", retryable=True,
+                                 transient=True)
         if _AUTH_TRANSIENT_RE.search(message):
             self._auth_checked = 0.0                      # a real sign-out shows up in the background re-check
-            return ProviderError(f"{self.name}: sign-in refused ({message[:120]})", retryable=True)
+            return ProviderError(f"{self.name}: sign-in refused ({message[:120]})", retryable=True, transient=True)
         if _LOGIN_RE.search(message):
             self.cool_down(now + LOGIN_COOLDOWN_MS, f"{self.name}: not signed in ({message[:120]})")
             self._auth_checked = 0.0                      # re-check (in the background) after the cooldown
