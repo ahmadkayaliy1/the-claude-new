@@ -20,11 +20,18 @@ the scheduled daily review). ``--out`` must be ``data/reviews`` or a directory u
 refused before it is touched): the operator session's allow-list matches this tool's prefix, and a free directory
 would be a file write the session's diff guard never sees — the session runner imports :func:`build_pack` instead.
 Exit 0 written/printed, 1 unexpected error, 3 invalid arguments.
+
+Phase 5 (A7/A8): the per-pair data functions take an optional upper bound ``until`` (``tools/demo_report.py`` builds
+its ``demo`` report over a closed window on top of them — the pack itself always ends now); a build scans the running
+supervisors once (:func:`one_supervisor_scan`: the health report asked twice, and each scan rebuilt psutil's ppid map
+once per process on the machine); a weekly pack carries the go-live evidence so far (``tools/go_live_inputs.py`` over
+the demo window, docs/go_live_checklist.md) for the weekly review's paragraph.
 """
 from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -35,8 +42,9 @@ import subprocess
 import sys
 import time
 import types
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, NamedTuple
+from typing import Any, Iterable, Iterator, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -67,6 +75,7 @@ PLAYBOOK_NOT_IN_FORCE = "on disk, NOT in force (expired / unreferenced / hash mi
 PLAYBOOK_MAX_BYTES = 256 * 1024  # tune.py writes ≤ 1500 characters; a larger playbook.md is reported, not read
 ENTRY_STATES = {"expired": "EXPIRED", "disabled": "NOT APPLIED: adaptive.enabled is false",
                 "not_applied": "NOT APPLIED: the file is invalid"}
+NO_UNTIL = 2 ** 62               # "no upper bound" for the ts < until filters (a pack ends now)
 
 
 class Invalid(Exception):
@@ -179,6 +188,40 @@ def _counts(c: collections.Counter, n: int = 12) -> str:
     return ", ".join(f"{k} {v}" for k, v in c.most_common(n)) or "none"
 
 
+def _upto(until: int | None) -> int:
+    """The exclusive upper bound of a window: ``until`` or :data:`NO_UNTIL` (the pack's windows end now)."""
+    return NO_UNTIL if until is None else int(until)
+
+
+@contextlib.contextmanager
+def one_supervisor_scan() -> Iterator[None]:
+    """For one build, ``procs.running_supervisors()`` scans the machine once and answers every later ask from that
+    scan (A7: the health report asks twice — ``systems`` and ``machine_report`` — and on Windows each scan rebuilt
+    psutil's ppid map once per process on the machine, ≈ 10.8 s of a pack build on production with 330 processes).
+    Only the plain ask is cached (``older_s`` is a start-race question and always scans); the original function is
+    restored however the build ends, and a nested use keeps the outer cache."""
+    from tradingsystem.supervisor import procs
+    orig = procs.running_supervisors
+    if getattr(orig, "_one_scan", False):
+        yield
+        return
+    memo: dict[str, dict[int, str | None]] = {}
+
+    def cached(older_s: float | None = None) -> dict[int, str | None]:
+        if older_s is not None:
+            return orig(older_s)
+        if "scan" not in memo:
+            memo["scan"] = orig()
+        return dict(memo["scan"])
+
+    cached._one_scan = True                   # type: ignore[attr-defined]
+    procs.running_supervisors = cached
+    try:
+        yield
+    finally:
+        procs.running_supervisors = orig
+
+
 def health_module() -> types.ModuleType:
     """``tools/health_report.py`` loaded by path (``tools/`` is not a package) — imported, never duplicated."""
     mod = sys.modules.get("ts_tools_health_report")
@@ -250,14 +293,16 @@ def library_hash() -> str | None:
 
 
 # --------------------------------------------------------------------------- usage ledger + gauge
-def usage_section(ledger: Path, since: int) -> dict[str, Any]:
+def usage_section(ledger: Path, since: int, until: int | None = None) -> dict[str, Any]:
     """Calls and tokens of the window by role (and by pair), with the cache-read share. ``input_tokens`` of a row
     already includes the cache reads and writes (the claude_code convention), ``cached_tokens`` = the reads.
     ``usage_unknown_sessions``: operator sessions of the window without a result document (their row holds 0 tokens
-    and says ``usage_unknown:`` — the real spend is missing from the totals, not zero)."""
+    and says ``usage_unknown:`` — the real spend is missing from the totals, not zero). ``until``: exclusive end of
+    the window (None: now)."""
     con = ro(ledger)
     if con is None:
         return {"ledger": str(ledger), "error": "no ledger yet"}
+    hi = _upto(until)
     try:
         have = _cols(con, "ai_usage")
         role = "COALESCE(role, purpose, '-')" if "role" in have else "COALESCE(purpose, '-')"
@@ -267,9 +312,9 @@ def usage_section(ledger: Path, since: int) -> dict[str, Any]:
             f"SELECT {role} AS r, COALESCE(pair,'-') AS p, count(*), COALESCE(sum(ok),0), "
             f"COALESCE(sum(input_tokens),0), COALESCE(sum(cached_tokens),0), COALESCE(sum(output_tokens),0), "
             f"{turns}, {api} FROM ai_usage "
-            "WHERE ts>=? GROUP BY r, p ORDER BY r, p", (since,)).fetchall()
-        unknown = con.execute("SELECT count(*) FROM ai_usage WHERE ts>=? AND substr(error, 1, ?)=?",
-                              (since, len(USAGE_UNKNOWN_PREFIX), USAGE_UNKNOWN_PREFIX)).fetchone()[0] \
+            "WHERE ts>=? AND ts<? GROUP BY r, p ORDER BY r, p", (since, hi)).fetchall()
+        unknown = con.execute("SELECT count(*) FROM ai_usage WHERE ts>=? AND ts<? AND substr(error, 1, ?)=?",
+                              (since, hi, len(USAGE_UNKNOWN_PREFIX), USAGE_UNKNOWN_PREFIX)).fetchone()[0] \
             if "error" in have else 0
     except sqlite3.Error as exc:
         return {"ledger": str(ledger), "error": f"unreadable: {exc}"[:200]}
@@ -332,12 +377,28 @@ def _log_files(logs: Path, stem: str) -> list[Path]:
     return [f for f in out if f.exists()]
 
 
-def screens(logs: Path, pair: str, since: int) -> dict[str, Any]:
+def _log_ms(ts: str) -> int | None:
+    """A log line's ISO timestamp (``2026-09-27T11:05:02.123+00:00``) → UTC ms; None when it is not one."""
+    try:
+        d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return int(d.timestamp() * 1000) if d.tzinfo is not None else None
+
+
+def screens(logs: Path, pair: str, since: int, until: int | None = None,
+            slot_ms: int | None = None) -> dict[str, Any]:
     """Screen closes and triggers of the window from the engine's own log lines (the engine stores no row for a
-    screen that did not call): per timeframe, and the fired ones by strength."""
+    screen that did not call): per timeframe, and the fired ones by strength. ``until``: exclusive end (None: now).
+    ``slot_ms`` (the demo report's availability): also ``slots`` — the starts of the ``slot_ms`` slots in which the
+    engine logged a screen of the pair — and ``oldest_read``, the oldest screen line read (the log reaches back to
+    there; a slot before it is unknown, not empty)."""
     since_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(since / 1000))
+    until_iso = None if until is None else time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(until / 1000))
     by_tf: collections.Counter = collections.Counter()
     fired: collections.Counter = collections.Counter()
+    slots: set[int] = set()
+    oldest_all: str | None = None
     read = 0
     needle = f'"{pair} '.encode()
     files = _log_files(logs, "engine")
@@ -359,7 +420,7 @@ def screens(logs: Path, pair: str, since: int) -> dict[str, Any]:
                         continue
                     ts = str(j.get("ts", ""))
                     oldest = ts if oldest is None or ts < oldest else oldest
-                    if ts < since_iso:
+                    if ts < since_iso or (until_iso is not None and ts[:19] >= until_iso):
                         continue
                     m = _SCREEN_RE.match(str(j.get("msg", "")))
                     if not m or m.group("pair") != pair:
@@ -367,12 +428,19 @@ def screens(logs: Path, pair: str, since: int) -> dict[str, Any]:
                     by_tf[m.group("tf")] += 1
                     if m.group("fire") == "True":
                         fired[m.group("strength") or "-"] += 1
+                    if slot_ms and (t := _log_ms(ts)) is not None:
+                        slots.add(t // slot_ms * slot_ms)
         except OSError:
             continue
+        if oldest is not None and (oldest_all is None or oldest < oldest_all):
+            oldest_all = oldest
         if (oldest is not None and oldest < since_iso) or read >= SCREEN_LOG_MAX_BYTES:
             break                                  # this file already reaches back before the window
-    return {"closes_by_tf": dict(by_tf), "screens": sum(by_tf.values()), "triggers_by_strength": dict(fired),
-            "log": str(files[0]) if files else None}
+    out = {"closes_by_tf": dict(by_tf), "screens": sum(by_tf.values()), "triggers_by_strength": dict(fired),
+           "log": str(files[0]) if files else None}
+    if slot_ms:
+        out.update(slots=sorted(slots), oldest_read=oldest_all)
+    return out
 
 
 def log_errors(dirs: Iterable[Path], since: int) -> dict[str, int]:
@@ -597,11 +665,15 @@ def _round(x: float | None, nd: int = 2) -> float | None:
     return None if x is None else round(x, nd)
 
 
-def pair_report(s: Settings, pair: str, since: int, now: int, usage_rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """The funnel and the rest of the per-pair evidence from the pair's system database (read-only)."""
+def pair_report(s: Settings, pair: str, since: int, now: int, usage_rows: dict[str, dict[str, Any]],
+                until: int | None = None, screen_slot_ms: int | None = None) -> dict[str, Any]:
+    """The funnel and the rest of the per-pair evidence from the pair's system database (read-only). ``until``:
+    exclusive end of the window (None: now — the pack); the adaptive values and the kill switch are always today's.
+    ``screen_slot_ms``: :func:`screens` also returns the slots with a screen line (the demo report's availability)."""
     db = s.paths.state() / "app.db"
+    hi = _upto(until)
     rep: dict[str, Any] = {"pair": pair, "db": str(db), "system": s.paths.instance or "all-pairs"}
-    rep["screens"] = screens(s.paths.logs(), pair, since)
+    rep["screens"] = screens(s.paths.logs(), pair, since, until, slot_ms=screen_slot_ms)
     rep["calls_by_role"] = usage_rows
     rep["adaptive"] = adaptive_info(s, pair, now)
     rep["kill_switch"] = _kill_switch(s, pair)
@@ -614,8 +686,8 @@ def pair_report(s: Settings, pair: str, since: int, now: int, usage_rows: dict[s
         if not have:
             rep["error"] = "no ai_decisions table"
             return rep
-        decs = _rows(con, f"SELECT {_select(have, _DEC_COLS)} FROM ai_decisions WHERE pair=? AND ts>=? ORDER BY ts",
-                     (pair, since))
+        decs = _rows(con, f"SELECT {_select(have, _DEC_COLS)} FROM ai_decisions WHERE pair=? AND ts>=? AND ts<? "
+                          "ORDER BY ts", (pair, since, hi))
         for d in decs:
             d["execution_detail"] = _json(d.get("execution_detail"), {})
             d["setup_kinds"] = _json(d.get("setup_kinds"), d.get("setup_kinds"))
@@ -633,18 +705,18 @@ def pair_report(s: Settings, pair: str, since: int, now: int, usage_rows: dict[s
         rep["funnel"] = _funnel(decs, metrics)
         ideas = [d for d in decs if d.get("decision") in ("BUY", "SELL")]
         rep["attribution"] = {k: _breakdown(ideas, k) for k in ("session", "regime", "setup_kinds", "trigger_strength")}
-        rep["position_actions"] = _position_actions(con, pair, since)
-        rep["rule_executions"] = _rule_executions(con, pair, since)
-        rep["escalations"] = {**_escalations(con, pair, since), "enabled": s.ai.escalation.enabled}
-        rep["tuning_changes"] = _tuning_changes(con, pair, since)
-        rep["prompt_versions"] = _prompt_versions(con, since)
+        rep["position_actions"] = _position_actions(con, pair, since, until)
+        rep["rule_executions"] = _rule_executions(con, pair, since, until)
+        rep["escalations"] = {**_escalations(con, pair, since, until), "enabled": s.ai.escalation.enabled}
+        rep["tuning_changes"] = _tuning_changes(con, pair, since, until)
+        rep["prompt_versions"] = _prompt_versions(con, since, until)
         # the hashes in force = the latest decision that recorded them; the memory = the latest valid answer
         hcols = ("ts", "prompt_hash", "library_hash", "playbook_hash", "adaptive_hash")
-        last = _rows(con, f"SELECT {_select(have, hcols)} FROM ai_decisions WHERE pair=? "
+        last = _rows(con, f"SELECT {_select(have, hcols)} FROM ai_decisions WHERE pair=? AND ts<? "
                           f"{'AND prompt_hash IS NOT NULL ' if 'prompt_hash' in have else ''}ORDER BY ts DESC LIMIT 1",
-                     (pair,))
-        memo = _rows(con, "SELECT ts, recommendation FROM ai_decisions WHERE pair=? AND status='valid' "
-                          "ORDER BY ts DESC LIMIT 1", (pair,))
+                     (pair, hi))
+        memo = _rows(con, "SELECT ts, recommendation FROM ai_decisions WHERE pair=? AND status='valid' AND ts<? "
+                          "ORDER BY ts DESC LIMIT 1", (pair, hi))
         rep["last_valid"] = {**(last[0] if last else {}), "ts": iso(last[0]["ts"]) if last else None}
         if memo:
             rec = _json(memo[0]["recommendation"], {}) or {}
@@ -741,12 +813,13 @@ def _idea(d: dict[str, Any], m: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _position_actions(con: sqlite3.Connection, pair: str, since: int) -> dict[str, Any]:
+def _position_actions(con: sqlite3.Connection, pair: str, since: int, until: int | None = None) -> dict[str, Any]:
     have = _cols(con, "position_actions")
     if not have:
         return {"n": 0, "note": "no position_actions table"}
     rows = _rows(con, "SELECT ts, source, action, status, target_decision, leg, requested, detail "
-                      "FROM position_actions WHERE pair=? AND ts>=? ORDER BY ts DESC", (pair, since))
+                      "FROM position_actions WHERE pair=? AND ts>=? AND ts<? ORDER BY ts DESC",
+                 (pair, since, _upto(until)))
     by = collections.Counter(f"{r['source']}/{r['action']}/{r['status']}" for r in rows)
     last = []
     for r in rows[:8]:
@@ -759,23 +832,24 @@ def _position_actions(con: sqlite3.Connection, pair: str, since: int) -> dict[st
     return {"n": len(rows), "by_source_action_status": dict(by), "last": last}
 
 
-def _rule_executions(con: sqlite3.Connection, pair: str, since: int) -> dict[str, Any]:
+def _rule_executions(con: sqlite3.Connection, pair: str, since: int, until: int | None = None) -> dict[str, Any]:
     if not _cols(con, "management_state"):
         return {"n": 0, "note": "no management_state table"}
     rows = _rows(con, "SELECT m.status AS status, m.rule_idx AS rule_idx, m.applied_ms AS applied_ms "
                       "FROM management_state m JOIN ai_decisions d ON d.id = m.decision_id "
-                      "WHERE d.pair=? AND COALESCE(m.applied_ms, m.last_bar_ms, 0)>=?", (pair, since))
+                      "WHERE d.pair=? AND COALESCE(m.applied_ms, m.last_bar_ms, 0)>=? "
+                      "AND COALESCE(m.applied_ms, m.last_bar_ms, 0)<?", (pair, since, _upto(until)))
     return {"n": len(rows), "by_status": dict(collections.Counter(r["status"] for r in rows)),
             "applied": sum(1 for r in rows if r.get("applied_ms"))}
 
 
-def _escalations(con: sqlite3.Connection, pair: str, since: int) -> dict[str, Any]:
+def _escalations(con: sqlite3.Connection, pair: str, since: int, until: int | None = None) -> dict[str, Any]:
     if not _cols(con, "ai_sub_outputs"):
         return {"n": 0}
     rows = _rows(con, "SELECT s.ok AS ok, s.output AS output, s.errors AS errors, s.label AS label, s.model AS model, "
                       "d.ts AS ts, d.decision AS decision, d.id AS id FROM ai_sub_outputs s JOIN ai_decisions d "
-                      "ON d.id = s.decision_id WHERE s.role='escalation' AND d.pair=? AND d.ts>=? ORDER BY d.ts DESC",
-                 (pair, since))
+                      "ON d.id = s.decision_id WHERE s.role='escalation' AND d.pair=? AND d.ts>=? AND d.ts<? "
+                      "ORDER BY d.ts DESC", (pair, since, _upto(until)))
     verdicts: collections.Counter = collections.Counter()
     last = []
     for r in rows:
@@ -789,22 +863,27 @@ def _escalations(con: sqlite3.Connection, pair: str, since: int) -> dict[str, An
     return {"n": len(rows), "verdicts": dict(verdicts), "last": last}
 
 
-def _tuning_changes(con: sqlite3.Connection, pair: str, since: int) -> list[dict[str, Any]]:
-    """The window's tuning changes plus the most recent ones before it (cooldown and one-per-day context)."""
+def _tuning_changes(con: sqlite3.Connection, pair: str, since: int, until: int | None = None) -> list[dict[str, Any]]:
+    """The window's tuning changes plus the most recent ones before it (cooldown and one-per-day context); none made
+    after ``until``. ``reverted`` is shown only when the revert happened before ``until``."""
     if not _cols(con, "tuning_changes"):
         return []
+    hi = _upto(until)
     rows = _rows(con, "SELECT ts, key, old_value, new_value, reason, window_hours, expires_ms, review_id, actor, "
-                      "reverted_ms FROM tuning_changes WHERE pair=? ORDER BY ts DESC LIMIT 12", (pair,))
+                      "reverted_ms FROM tuning_changes WHERE pair=? AND ts<? ORDER BY ts DESC LIMIT 12", (pair, hi))
     return [{"time": iso(r["ts"]), "in_window": r["ts"] >= since, "key": r["key"], "old": r["old_value"],
              "new": _short(r["new_value"], 80), "reason": _short(r["reason"], 140), "expires": iso(r["expires_ms"]),
-             "review_id": r["review_id"], "actor": r["actor"], "reverted": iso(r["reverted_ms"])} for r in rows]
+             "review_id": r["review_id"], "actor": r["actor"],
+             "reverted": iso(r["reverted_ms"]) if r["reverted_ms"] and r["reverted_ms"] < hi else None}
+            for r in rows]
 
 
-def _prompt_versions(con: sqlite3.Connection, since: int) -> list[dict[str, Any]]:
+def _prompt_versions(con: sqlite3.Connection, since: int, until: int | None = None) -> list[dict[str, Any]]:
     if not _cols(con, "prompt_versions"):
         return []
     rows = _rows(con, "SELECT prompt_hash, role, library_hash, versions, git_sha, first_seen_ms FROM prompt_versions "
-                      "WHERE first_seen_ms>=? ORDER BY first_seen_ms DESC LIMIT 8", (since,))
+                      "WHERE first_seen_ms>=? AND first_seen_ms<? ORDER BY first_seen_ms DESC LIMIT 8",
+                 (since, _upto(until)))
     return [{"prompt_hash": r["prompt_hash"], "role": r["role"], "library_hash": r["library_hash"],
              "versions": _json(r["versions"], r["versions"]), "git_sha": r["git_sha"],
              "first_seen": iso(r["first_seen_ms"])} for r in rows]
@@ -863,6 +942,22 @@ def operator_context(s: Settings, out_dir: Path | None) -> dict[str, Any]:
     return {"proposals": props, "previous_sessions": sessions, "monitor_state": mon}
 
 
+def go_live_evidence(s: Settings, now: int) -> dict[str, Any]:
+    """The weekly pack's go-live evidence so far (A8): ``tools/go_live_inputs.py`` over the demo window
+    (``evaluation``), cut at ``now`` — the numbers behind the weekly review's "go-live evidence so far" paragraph. A
+    failure is one line in the pack, never a failed pack."""
+    try:
+        mod = sys.modules.get("ts_tools_go_live_inputs")
+        if mod is None:
+            spec = importlib.util.spec_from_file_location("ts_tools_go_live_inputs", TOOLS / "go_live_inputs.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            sys.modules["ts_tools_go_live_inputs"] = mod
+        return mod.evidence(s, now=now)
+    except Exception as exc:  # noqa: BLE001 — the pack reports what it can
+        return {"error": f"{type(exc).__name__}: {exc}"[:300]}
+
+
 # --------------------------------------------------------------------------- health (tools/health_report.py)
 def health(systems: list[Settings], notes: list[str], hours: float, now: int) -> dict[str, Any]:
     """The health report's own lines: machine (MT5, supervisors, recorder, ledger) and per system. A failing system
@@ -888,11 +983,20 @@ def build_pack(s: Settings, *, hours: float, kind: str = "adhoc", out_dir: Path 
                now: int | None = None, write: bool = True, git_root: Path | None = None,
                max_chars: int = MAX_MD_CHARS) -> Pack:
     """Collect, render (≤ ``max_chars``) and — with ``write`` — store ``<ts>_<kind>.md|.json`` in ``out_dir``
-    (default ``data/reviews``). ``systems``/``notes`` default to the health report's choice."""
+    (default ``data/reviews``). ``systems``/``notes`` default to the health report's choice. The machine's
+    supervisors are scanned once for the whole build (:func:`one_supervisor_scan`)."""
     if kind not in KINDS:
         raise Invalid(f"kind {kind!r}: one of {', '.join(KINDS)}")
     if not 0 < hours <= 24 * 60:
         raise Invalid("--hours must be in (0, 1440]")
+    with one_supervisor_scan():
+        return _build_pack(s, hours=hours, kind=kind, out_dir=out_dir, pair=pair, systems=systems, notes=notes,
+                           now=now, write=write, git_root=git_root, max_chars=max_chars)
+
+
+def _build_pack(s: Settings, *, hours: float, kind: str, out_dir: Path | None, pair: str | None,
+                systems: list[Settings] | None, notes: list[str] | None, now: int | None, write: bool,
+                git_root: Path | None, max_chars: int) -> Pack:
     now = _now_ms() if now is None else int(now)
     since = now - int(hours * MS_PER_HOUR)
     pair = pair.upper() if pair else None
@@ -952,6 +1056,8 @@ def build_pack(s: Settings, *, hours: float, kind: str = "adhoc", out_dir: Path 
         "per_pair": per_pair, "ideas": ideas[:IDEAS], "ideas_in_window": len(ideas),
         "operator": operator_context(s, out_dir),
     }
+    if kind == "weekly":
+        data["go_live"] = go_live_evidence(s, now)
     md = render(data, max_chars)
     problems = [ln for sec in (data["health"]["machine"], data["health"]["notes"],
                                *data["health"]["systems"].values()) for ln in sec if str(ln).startswith("!!")]
@@ -1160,6 +1266,22 @@ def _render(d: dict[str, Any], n_ideas: int, n_health: int, n_rows: int) -> str:
         lv = r.get("last_valid") or {}
         if lv.get("operator_notes"):
             p(f"last operator_notes ({lv.get('notes_ts')}): {lv['operator_notes']}")
+        p("")
+    # ---- go-live evidence (weekly packs)
+    gl = d.get("go_live")
+    if gl:
+        p("## Go-live evidence so far (tools/go_live_inputs.py; thresholds: docs/go_live_checklist.md)")
+        if gl.get("error"):
+            p(f"go-live evidence unavailable: {gl['error']}")
+        else:
+            w, sm = gl["window"], gl["summary"]
+            p(f"demo window {w['since']} → {w['planned_until']} ("
+              + ("complete" if w["complete"] else f"so far {w['days_covered']:g} of {w['days']:g} days")
+              + f") · pass {sm.get('pass', 0)} · FAIL {sm.get('FAIL', 0)} · n.a. {sm.get('n.a.', 0)}")
+            for i in gl["items"]:
+                p(f"- [{i['status']}] {i['item']} ({i['threshold']}): "
+                  f"{_short(i['measured'], 320 if n_rows >= 5 else 160)}"
+                  + ("" if i.get("n") is None else f" (n {i['n']})"))
         p("")
     # ---- operator context
     op = d.get("operator") or {}

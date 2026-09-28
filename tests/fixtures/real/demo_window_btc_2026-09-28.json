@@ -1,0 +1,1027 @@
+{
+"ingestion_events": [
+{
+"ts": 1790500368217,
+"collector": "supervisor:ingest-binance",
+"event": "started",
+"detail": "pid 6860",
+"duration_ms": null
+},
+{
+"ts": 1790500368275,
+"collector": "supervisor:ingest-mt5",
+"event": "started",
+"detail": "pid 17692",
+"duration_ms": null
+},
+{
+"ts": 1790500368310,
+"collector": "supervisor:engine",
+"event": "started",
+"detail": "pid 6068",
+"duration_ms": null
+},
+{
+"ts": 1790500368354,
+"collector": "supervisor:executor",
+"event": "started",
+"detail": "pid 11044",
+"duration_ms": null
+},
+{
+"ts": 1790500368380,
+"collector": "supervisor:api",
+"event": "started",
+"detail": "pid 16940",
+"duration_ms": null
+},
+{
+"ts": 1790500373568,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-27T08:45:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790500451193,
+"collector": "supervisor:all",
+"event": "stopped",
+"detail": "supervisor shutdown",
+"duration_ms": null
+},
+{
+"ts": 1790500710598,
+"collector": "supervisor:ingest-binance",
+"event": "started",
+"detail": "pid 9020",
+"duration_ms": null
+},
+{
+"ts": 1790500710646,
+"collector": "supervisor:ingest-mt5",
+"event": "started",
+"detail": "pid 7440",
+"duration_ms": null
+},
+{
+"ts": 1790500710679,
+"collector": "supervisor:engine",
+"event": "started",
+"detail": "pid 12476",
+"duration_ms": null
+},
+{
+"ts": 1790500710714,
+"collector": "supervisor:executor",
+"event": "started",
+"detail": "pid 4404",
+"duration_ms": null
+},
+{
+"ts": 1790500710739,
+"collector": "supervisor:api",
+"event": "started",
+"detail": "pid 21116",
+"duration_ms": null
+},
+{
+"ts": 1790500713235,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-27T09:00:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790519406076,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 13/40 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790527507003,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 6/40 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790529308843,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 5/40 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790529910649,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 5/40 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790537092100,
+"collector": "supervisor:all",
+"event": "system_suspend",
+"detail": "PC was asleep for ~3122s",
+"duration_ms": 3122207
+},
+{
+"ts": 1790537096684,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-27T19:00:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790540106770,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 2/40 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790541616495,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 1/40 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790541990268,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-27T20:30:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790543407569,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 0/40 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790544385285,
+"collector": "supervisor:all",
+"event": "stopped",
+"detail": "supervisor shutdown",
+"duration_ms": null
+},
+{
+"ts": 1790547393605,
+"collector": "supervisor:ingest-binance",
+"event": "started",
+"detail": "pid 12828",
+"duration_ms": null
+},
+{
+"ts": 1790547393639,
+"collector": "supervisor:ingest-mt5",
+"event": "started",
+"detail": "pid 9316",
+"duration_ms": null
+},
+{
+"ts": 1790547393668,
+"collector": "supervisor:engine",
+"event": "started",
+"detail": "pid 21568",
+"duration_ms": null
+},
+{
+"ts": 1790547393711,
+"collector": "supervisor:executor",
+"event": "started",
+"detail": "pid 17984",
+"duration_ms": null
+},
+{
+"ts": 1790547393737,
+"collector": "supervisor:api",
+"event": "started",
+"detail": "pid 8248",
+"duration_ms": null
+},
+{
+"ts": 1790547395887,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-27T22:00:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790547610216,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 0/30 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790548505680,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 0/30 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790549107123,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 0/30 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790549708253,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 0/30 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790550309183,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 0/30 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790550909694,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 0/30 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790551511107,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 0/30 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790552405703,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 0/30 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790553006568,
+"collector": "engine",
+"event": "ai_quota",
+"detail": "claude_code: 0/30 requests left today — not analysed: BTCUSDT",
+"duration_ms": null
+},
+{
+"ts": 1790555490932,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T00:15:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790556391543,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T00:30:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790557291967,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T00:45:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790558190364,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T01:00:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790559090690,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T01:15:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790559990996,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T01:30:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790560891420,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T01:45:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790561791700,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T02:00:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790562690244,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T02:15:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790563590903,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T02:30:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790564491446,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T02:45:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790565391869,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T03:00:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790566290346,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T03:15:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790567190908,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T03:30:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790568091590,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T03:45:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790568990070,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T04:00:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790569890535,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T04:15:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790570790993,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T04:30:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790571691380,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T04:45:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790572591770,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T05:00:00.000Z still not stored 90s after its close",
+"duration_ms": null
+},
+{
+"ts": 1790573517543,
+"collector": "engine",
+"event": "data_not_ready",
+"detail": "BTCUSDT 15m bar 2026-09-28T05:15:00.000Z still not stored 90s after its close",
+"duration_ms": null
+}
+],
+"ai_decisions": [
+{
+"id": "1efbe5c40eee4129b8d84993078098bb",
+"ts": 1790500993653,
+"status": "valid",
+"errors": null
+},
+{
+"id": "7154ceea183f42f0bdc344a3e6c2123b",
+"ts": 1790502976037,
+"status": "valid",
+"errors": null
+},
+{
+"id": "cba9f107e83546f2bf40b44dfa096eaa",
+"ts": 1790503861568,
+"status": "valid",
+"errors": null
+},
+{
+"id": "1f76bed1a6424c31988a52a38e8f2978",
+"ts": 1790505947100,
+"status": "valid",
+"errors": null
+},
+{
+"id": "40778c9be8454bf6bf2ca5fc402efcf8",
+"ts": 1790506241287,
+"status": "valid",
+"errors": null
+},
+{
+"id": "45e6624f2bec482ebfa0c53221ef3abe",
+"ts": 1790509388372,
+"status": "error",
+"errors": "[\"claude_code: no answer within 180s\"]"
+},
+{
+"id": "2c9ce48b58c14b6bad054f1914997564",
+"ts": 1790511348145,
+"status": "valid",
+"errors": null
+},
+{
+"id": "01e5e562b5e444ae9058178ac1b1f42b",
+"ts": 1790513733963,
+"status": "valid",
+"errors": null
+},
+{
+"id": "dbad48cadac240f7835b521f98627273",
+"ts": 1790514058298,
+"status": "valid",
+"errors": null
+},
+{
+"id": "cb410620c5274c36b1631727cfa15abd",
+"ts": 1790515239176,
+"status": "valid",
+"errors": null
+},
+{
+"id": "b73bef27e3bb422a8c1a468728e15a77",
+"ts": 1790515881813,
+"status": "valid",
+"errors": null
+},
+{
+"id": "20aa59454b424baf957571f269e32ca4",
+"ts": 1790516676615,
+"status": "valid",
+"errors": null
+},
+{
+"id": "0a3e020034614d968b39031bc82cb278",
+"ts": 1790518546818,
+"status": "valid",
+"errors": null
+},
+{
+"id": "0a2fbf3178404c0db46691c5db168fe1",
+"ts": 1790519902159,
+"status": "valid",
+"errors": null
+},
+{
+"id": "104a19fde7d14bcab9d4ee99f994d5c2",
+"ts": 1790520529249,
+"status": "valid",
+"errors": null
+},
+{
+"id": "9ff6248148c04ce4be72f3dcd7b07aeb",
+"ts": 1790521385025,
+"status": "valid",
+"errors": "[\"- (root): Value error, take-profits must be ordered from nearest to farthest\"]"
+},
+{
+"id": "5fe74a5e42414644b323740846b99867",
+"ts": 1790524003244,
+"status": "valid",
+"errors": null
+},
+{
+"id": "fad17072abaa44f6a0a7f3df678accde",
+"ts": 1790524249109,
+"status": "valid",
+"errors": null
+},
+{
+"id": "60f8377f8d9343328cddc1bab3695e54",
+"ts": 1790526179628,
+"status": "valid",
+"errors": null
+},
+{
+"id": "9078f726c72047598ac20f3fc23f33c4",
+"ts": 1790528143673,
+"status": "valid",
+"errors": null
+},
+{
+"id": "bcc0ef7cc4d4460782e7c3fc2e743c72",
+"ts": 1790530260181,
+"status": "valid",
+"errors": null
+},
+{
+"id": "b17ee6bcff4b457cb5c027b059e567e9",
+"ts": 1790532370752,
+"status": "valid",
+"errors": null
+},
+{
+"id": "7bf76ce2d33441e38df4b06ea288dbca",
+"ts": 1790537094603,
+"status": "error",
+"errors": "[\"cycle deadline of 600s reached \\u2014 cancelled\"]"
+},
+{
+"id": "6322058dabd04668920efa90c6158d52",
+"ts": 1790537308387,
+"status": "skipped",
+"errors": "[\"data gate: analysis price is 266s old (> 120s)\"]"
+},
+{
+"id": "86410800538741a4adb67bd5af0966a4",
+"ts": 1790539153588,
+"status": "valid",
+"errors": null
+},
+{
+"id": "354d4d0f9db44194b61d0ea1f770cae5",
+"ts": 1790540634631,
+"status": "valid",
+"errors": null
+},
+{
+"id": "7124fde6476246b7825f70c8fd756ec5",
+"ts": 1790542541125,
+"status": "valid",
+"errors": null
+},
+{
+"id": "48d5ff1d6c914abb88e01457e2cb0097",
+"ts": 1790553666274,
+"status": "valid",
+"errors": null
+},
+{
+"id": "65d12ad85f3844afbf31d71a495e183d",
+"ts": 1790573516094,
+"status": "error",
+"errors": "[\"claude_code: no answer within 180s\"]"
+},
+{
+"id": "009f5e37b39045a499fdc84d63ed128a",
+"ts": 1790576996875,
+"status": "valid",
+"errors": null
+},
+{
+"id": "14d50a156e984b52b40da18c13598c58",
+"ts": 1790579139620,
+"status": "valid",
+"errors": null
+},
+{
+"id": "e2b88e10f42545f6b4314d8d73d4d1cc",
+"ts": 1790581253646,
+"status": "valid",
+"errors": "[\"normalised: next_review.in_minutes raised to 30; review condition minutes_elapsed raised to 30\"]"
+},
+{
+"id": "1f18fbe02f7644f69e73156c858e5986",
+"ts": 1790583336577,
+"status": "valid",
+"errors": "[\"normalised: next_review.in_minutes raised to 30; review condition minutes_elapsed raised to 30\"]"
+}
+],
+"engine_log": [
+"{\"ts\": \"2026-09-27T09:20:22.171+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T09:15:00.000Z: trigger=True (review) next_review time reached (45 min after 2026-09-27T05:46:34.312Z); bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T09:25:08.477+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T09:20:00.000Z: trigger=False (none) bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T09:30:09.442+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T09:15:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T09:36:38.900+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T09:30:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T09:40:08.193+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T09:35:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T09:45:13.093+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T09:30:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T09:50:07.510+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T09:45:00.000Z: trigger=False (none) 5m CHoCH bullish through 84827.78\"}",
+"{\"ts\": \"2026-09-27T09:55:07.859+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T09:50:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T09:23:13.653Z); price moved 2.10 ATR since the last call\"}",
+"{\"ts\": \"2026-09-27T10:00:14.526+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T09:45:00.000Z: trigger=False (none) spacing: last AI call 5 min ago (next after 15 min); waiting: strong; 15m BOS bullish through 84883.98\"}",
+"{\"ts\": \"2026-09-27T10:05:06.540+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T10:00:00.000Z: trigger=False (none) spacing: last AI call 9 min ago (next after 15 min); waiting: strong; 15m BOS bullish through 84883.98\"}",
+"{\"ts\": \"2026-09-27T10:10:12.730+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T10:05:00.000Z: trigger=True (strong) 15m BOS bullish through 84883.98\"}",
+"{\"ts\": \"2026-09-27T10:15:10.478+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T10:00:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T10:20:07.193+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T10:15:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T10:25:09.628+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T10:20:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T10:30:06.021+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T10:15:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T10:35:08.450+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T10:30:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T10:40:06.650+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T10:35:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T10:45:06.032+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T10:30:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T10:11:01.568Z); price moved 1.04 ATR since the last call; price inside 15m bullish fvg 84804.24-84900.0\"}",
+"{\"ts\": \"2026-09-27T10:50:08.484+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T10:45:00.000Z: trigger=True (review) review condition: 5m close above 84900.0\"}",
+"{\"ts\": \"2026-09-27T10:55:06.821+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T10:50:00.000Z: trigger=False (none) price inside 15m bullish fvg 84804.24-84900.0; 5m reversal candle (bearish_engulfing, bearish_marubozu) at the location\"}",
+"{\"ts\": \"2026-09-27T11:00:06.309+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T10:45:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T11:05:12.221+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T11:00:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T11:10:06.906+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T11:05:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T11:15:06.236+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T11:00:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T11:20:08.436+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T11:15:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T11:25:06.587+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T11:20:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T11:30:05.820+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T11:15:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T11:35:08.500+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T11:30:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T11:40:06.711+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T11:35:00.000Z: trigger=True (review) next_review time reached (20 min after 2026-09-27T10:50:41.287Z); 5m liquidity sweep (bullish) at 84841.93\"}",
+"{\"ts\": \"2026-09-27T11:45:06.105+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T11:30:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T11:50:11.166+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T11:45:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T11:55:07.896+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T11:50:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T12:00:06.927+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T11:45:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T12:05:09.183+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T12:00:00.000Z: trigger=False (none) spacing: last AI call 24 min ago (next after 30 min); waiting: time; next_review time reached (20 min after 2026-09-27T10:50:41.287Z); 5m BOS bullish through 84946.01\"}",
+"{\"ts\": \"2026-09-27T12:10:05.417+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T12:05:00.000Z: trigger=False (none) spacing: last AI call 29 min ago (next after 30 min); waiting: time; next_review time reached (20 min after 2026-09-27T10:50:41.287Z); price moved 0.70 ATR since the last call\"}",
+"{\"ts\": \"2026-09-27T12:15:09.005+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T12:00:00.000Z: trigger=True (review) next_review time reached (20 min after 2026-09-27T10:50:41.287Z); price moved 0.97 ATR since the last call\"}",
+"{\"ts\": \"2026-09-27T12:20:07.305+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T12:15:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T12:25:06.648+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T12:20:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T12:30:08.150+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T12:15:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T12:35:06.578+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T12:30:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T12:40:05.813+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T12:35:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T12:45:08.043+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T12:30:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T12:50:06.297+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T12:45:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T12:55:05.549+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T12:50:00.000Z: trigger=True (review) next_review time reached (25 min after 2026-09-27T12:15:48.145Z); price moved 0.52 ATR since the last call; 5m CHoCH bearish through 84957.78\"}",
+"{\"ts\": \"2026-09-27T13:00:08.093+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T12:45:00.000Z: trigger=True (review) review condition: price below 84800.0; price inside 15m bullish fvg 84700.59-84804.23; price within 0.3 ATR of 15m sell-side liquidity 84800.0; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside a zone; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T13:05:06.277+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T13:00:00.000Z: trigger=False (none) price inside 15m bullish fvg 84700.59-84804.23; price within 0.3 ATR of 15m sell-side liquidity 84800.0; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside a zone; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T13:10:22.317+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T13:05:00.000Z: trigger=False (none) price inside 15m bullish fvg 84700.59-84804.23; price within 0.3 ATR of 15m sell-side liquidity 84800.0; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside a zone; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T13:15:06.961+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T13:00:00.000Z: trigger=False (none) spacing: last AI call 14 min ago (next after 15 min); waiting: strong; 15m CHoCH bearish through 84800.0; price inside 15m bullish order_block 84590.0-84800.01; 5m reversal candle (bearish_engulfing, bearish_marubozu) at the location\"}",
+"{\"ts\": \"2026-09-27T13:20:05.753+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T13:15:00.000Z: trigger=True (review) next_review time reached (15 min after 2026-09-27T13:00:58.298Z); price inside 15m bullish order_block 84590.0-84800.01; 15m CHoCH bearish through 84800.0\"}",
+"{\"ts\": \"2026-09-27T13:25:08.963+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T13:20:00.000Z: trigger=False (none) 15m CHoCH bearish through 84800.0; price inside 15m bullish order_block 84590.0-84800.01\"}",
+"{\"ts\": \"2026-09-27T13:30:07.437+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T13:15:00.000Z: trigger=True (review) review condition: 15m close above 84800.0\"}",
+"{\"ts\": \"2026-09-27T13:35:06.796+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T13:30:00.000Z: trigger=False (none) 5m liquidity sweep (bearish) at 85027.48; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T13:40:07.983+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T13:35:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T13:45:07.792+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T13:30:00.000Z: trigger=False (none) spacing: last AI call 1 min ago (next after 15 min); waiting: strong; 15m liquidity sweep (bearish) at 85044.51; price inside 15m bullish order_block 84590.0-84800.01; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T13:50:08.759+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T13:45:00.000Z: trigger=False (none) spacing: last AI call 6 min ago (next after 15 min); waiting: strong; 15m liquidity sweep (bearish) at 85044.51; price inside 15m bullish order_block 84590.0-84800.01; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T13:55:06.929+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T13:50:00.000Z: trigger=False (none) spacing: last AI call 11 min ago (next after 15 min); waiting: strong; 15m liquidity sweep (bearish) at 85044.51; price inside 15m bullish order_block 84590.0-84800.01; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T14:00:06.527+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T13:45:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T14:05:07.681+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T14:00:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T14:10:06.083+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T14:05:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T14:15:05.816+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T14:00:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T13:44:36.615Z); review condition: 30.0 minutes elapsed; price moved 1.04 ATR since the last call; bullish price/CVD divergence; 15m liquidity sweep (bearish) at 85044.51\"}",
+"{\"ts\": \"2026-09-27T14:20:10.257+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T14:15:00.000Z: trigger=False (none) 15m liquidity sweep (bearish) at 85044.51; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T14:25:06.389+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T14:20:00.000Z: trigger=False (none) 15m liquidity sweep (bearish) at 85044.51; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T14:30:06.075+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T14:15:00.000Z: trigger=True (weak) price inside 15m bullish order_block 84590.0-84800.01; 5m BOS bearish through 84743.8; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T14:35:08.773+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T14:30:00.000Z: trigger=True (weak) price inside 15m bullish order_block 84590.0-84800.01; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T14:40:07.091+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T14:35:00.000Z: trigger=False (none) price inside 15m bullish order_block 84590.0-84800.01; 5m reversal candle (bullish_pin_bar) at the location; stacked footprint imbalances on the last decision bar; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T14:45:06.382+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T14:30:00.000Z: trigger=False (none) price inside 15m bullish order_block 84590.0-84800.01; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T14:50:43.804+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T14:45:00.000Z: trigger=False (none) price inside 15m bullish order_block 84590.0-84800.01; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T14:55:07.379+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T14:50:00.000Z: trigger=False (none) price inside 15m bullish order_block 84590.0-84800.01; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T15:00:07.729+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T14:45:00.000Z: trigger=True (review) review condition: 15m close below 84590.0; 15m BOS bearish through 84637.73; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T15:05:32.501+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T15:00:00.000Z: trigger=False (none) 15m BOS bearish through 84637.73; stacked footprint imbalances on the last decision bar; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T15:10:09.039+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T15:05:00.000Z: trigger=False (none) 15m BOS bearish through 84637.73; stacked footprint imbalances on the last decision bar; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T15:15:07.514+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T15:00:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T15:20:07.161+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T15:15:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T15:25:07.761+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T15:20:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T15:30:06.011+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T15:15:00.000Z: trigger=False (none) bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T15:35:08.429+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T15:30:00.000Z: trigger=False (none) bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T15:40:06.905+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T15:35:00.000Z: trigger=False (none) bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T15:45:06.488+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T15:30:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T15:03:05.025Z); price moved 0.57 ATR since the last call; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T15:50:08.616+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T15:45:00.000Z: trigger=False (none) spacing: last AI call 4 min ago (next after 5 min); waiting: event; event: order demo BTCUSDT 5fe74a5e: [{'comment': 'ts:5fe74a5e42414644b323:2', 'order': 110481468, 'deal': 104589896, 'price': 84444.64, 'requested': 84444.64, 'slippag\"}",
+"{\"ts\": \"2026-09-27T15:55:07.183+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T15:50:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar; bullish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T16:00:07.781+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T15:45:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T16:05:06.275+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T16:00:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T16:10:53.344+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T16:05:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T16:15:07.486+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T16:00:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T16:20:06.876+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T16:15:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T16:25:06.043+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T16:20:00.000Z: trigger=False (none) 5m liquidity sweep (bearish) at 84644.01; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T16:30:07.949+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T16:15:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T16:35:10.444+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T16:30:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T16:40:07.276+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T16:35:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T16:45:07.000+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T16:30:00.000Z: trigger=True (weak) price inside 15m bullish order_block 84314.18-84426.01; price inside 15m bullish order_block 84314.18-84426.01; price within 0.3 ATR of 15m sell-side liquidity 84364.0; 5m BOS bearish through 84430.0; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T16:50:08.659+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T16:45:00.000Z: trigger=True (weak) price inside 15m bullish order_block 84314.18-84426.01; price inside 15m bullish order_block 84314.18-84426.01; price within 0.3 ATR of 15m sell-side liquidity 84364.0; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T16:55:08.013+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T16:50:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T16:22:59.628Z); price moved 1.45 ATR since the last call; price inside 15m bullish order_block 84314.18-84426.01; price inside 15m bullish order_block 84314.18-84426.01; price within 0.3 ATR of 15m sell-side liquidity 84364.0; stacked footprint imbal\"}",
+"{\"ts\": \"2026-09-27T17:00:10.318+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T16:45:00.000Z: trigger=False (none) spacing: last AI call 4 min ago (next after 15 min); waiting: weak; price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone\"}",
+"{\"ts\": \"2026-09-27T17:05:07.306+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T17:00:00.000Z: trigger=False (none) spacing: last AI call 9 min ago (next after 15 min); waiting: weak; price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone\"}",
+"{\"ts\": \"2026-09-27T17:10:06.779+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T17:05:00.000Z: trigger=False (none) spacing: last AI call 14 min ago (next after 15 min); waiting: weak; price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone; 5m liquidity sweep (bullish) at 84380.0\"}",
+"{\"ts\": \"2026-09-27T17:15:08.841+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T17:00:00.000Z: trigger=True (strong) 15m liquidity sweep (bullish) at 84364.0; 15m reversal candle (bearish_engulfing, outside_bar) inside a zone; price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone; 5m liquidity sweep (bullish) at 84380.0\"}",
+"{\"ts\": \"2026-09-27T17:20:07.673+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T17:15:00.000Z: trigger=True (strong) 15m liquidity sweep (bullish) at 84364.0; 15m reversal candle (bearish_engulfing, outside_bar) inside a zone; price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone; 5m reversal candle (bullish_engulfing) at the location\"}",
+"{\"ts\": \"2026-09-27T17:25:10.646+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T17:20:00.000Z: trigger=True (strong) 15m liquidity sweep (bullish) at 84364.0; 15m reversal candle (bearish_engulfing, outside_bar) inside a zone; price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone\"}",
+"{\"ts\": \"2026-09-27T17:30:07.761+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T17:15:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T16:55:43.673Z); price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone\"}",
+"{\"ts\": \"2026-09-27T17:35:06.981+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T17:30:00.000Z: trigger=False (none) spacing: last AI call 4 min ago (next after 15 min); waiting: weak; 5m CHoCH bullish through 84473.58; 5m reversal candle (bullish_engulfing, bullish_marubozu) at the location\"}",
+"{\"ts\": \"2026-09-27T17:40:11.219+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T17:35:00.000Z: trigger=False (none) price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone; 5m reversal candle (doji, bearish_pin_bar) at the location\"}",
+"{\"ts\": \"2026-09-27T17:45:06.113+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T17:30:00.000Z: trigger=False (none) price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone\"}",
+"{\"ts\": \"2026-09-27T17:50:10.933+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T17:45:00.000Z: trigger=False (none) price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone; 5m reversal candle (bullish_engulfing, bullish_marubozu) at the location\"}",
+"{\"ts\": \"2026-09-27T17:55:05.879+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T17:50:00.000Z: trigger=False (none) price inside 1h bullish order_block 84257.07-84443.26; 1h reversal candle (bearish_pin_bar) inside a zone\"}",
+"{\"ts\": \"2026-09-27T18:00:07.359+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T17:45:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T18:05:10.866+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T18:00:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T17:31:00.181Z); review condition: 30.0 minutes elapsed; price moved 0.84 ATR since the last call; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T18:10:08.257+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T18:05:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T18:15:11.434+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T18:00:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T18:20:06.586+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T18:15:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T18:25:06.458+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T18:20:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-27T18:30:13.905+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T18:15:00.000Z: trigger=True (review) review condition: 15m close above 84687.32; 15m CHoCH bullish through 84687.32; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T19:28:28.386+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T19:00:00.000Z: trigger=True (review) review condition: 15m close above 84687.32; next_review time reached (30 min after 2026-09-27T18:06:10.752Z); review condition: 30.0 minutes elapsed; price moved 1.49 ATR since the last call\"}",
+"{\"ts\": \"2026-09-27T19:28:37.733+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T19:20:00.000Z: trigger=False (none) spacing: last AI call 0 min ago (next after 30 min); waiting: condition; review condition: 15m close above 84687.32\"}",
+"{\"ts\": \"2026-09-27T19:30:33.719+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T19:15:00.000Z: trigger=False (none) spacing: last AI call 2 min ago (next after 30 min); waiting: condition; review condition: 15m close above 84687.32; next_review time reached (30 min after 2026-09-27T18:06:10.752Z); review condition: 30.0 minutes elapsed; price moved 0.95 ATR since the last call; 5m CHoCH bearish through 84706.0; s\"}",
+"{\"ts\": \"2026-09-27T19:35:08.615+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T19:30:00.000Z: trigger=False (none) spacing: last AI call 6 min ago (next after 30 min); waiting: condition; review condition: 15m close above 84687.32; next_review time reached (30 min after 2026-09-27T18:06:10.752Z); review condition: 30.0 minutes elapsed; price moved 0.97 ATR since the last call; stacked footprint imbalances on the\"}",
+"{\"ts\": \"2026-09-27T19:40:12.882+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T19:35:00.000Z: trigger=False (none) spacing: last AI call 11 min ago (next after 30 min); waiting: condition; review condition: 15m close above 84687.32; next_review time reached (30 min after 2026-09-27T18:06:10.752Z); review condition: 30.0 minutes elapsed; price moved 1.48 ATR since the last call; stacked footprint imbalances on th\"}",
+"{\"ts\": \"2026-09-27T19:45:07.221+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T19:30:00.000Z: trigger=False (none) spacing: last AI call 16 min ago (next after 30 min); waiting: condition; review condition: 15m close above 84687.32; next_review time reached (30 min after 2026-09-27T18:06:10.752Z); review condition: 30.0 minutes elapsed; price moved 1.57 ATR since the last call; stacked footprint imbalances on th\"}",
+"{\"ts\": \"2026-09-27T19:50:06.427+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T19:45:00.000Z: trigger=False (none) spacing: last AI call 21 min ago (next after 30 min); waiting: condition; review condition: 15m close above 84687.32; next_review time reached (30 min after 2026-09-27T18:06:10.752Z); review condition: 30.0 minutes elapsed; price moved 1.72 ATR since the last call; stacked footprint imbalances on th\"}",
+"{\"ts\": \"2026-09-27T19:55:07.809+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T19:50:00.000Z: trigger=False (none) spacing: last AI call 26 min ago (next after 30 min); waiting: condition; review condition: 15m close above 84687.32; next_review time reached (30 min after 2026-09-27T18:06:10.752Z); review condition: 30.0 minutes elapsed; price moved 1.32 ATR since the last call; stacked footprint imbalances on th\"}",
+"{\"ts\": \"2026-09-27T20:00:06.076+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T19:45:00.000Z: trigger=False (none) bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T20:05:05.643+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T20:00:00.000Z: trigger=False (none) bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T20:10:22.572+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T20:05:00.000Z: trigger=False (none) bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T20:15:06.770+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T20:00:00.000Z: trigger=True (weak) price within 0.3 ATR of 15m buy-side liquidity 84843.0; bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T20:20:06.146+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T20:15:00.000Z: trigger=True (weak) price within 0.3 ATR of 15m buy-side liquidity 84843.0; bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T20:25:05.822+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T20:20:00.000Z: trigger=False (none) price within 0.3 ATR of 15m buy-side liquidity 84843.0; 5m BOS bearish through 84736.01; bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T20:30:07.347+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T20:15:00.000Z: trigger=False (none) spacing: last AI call 7 min ago (next after 15 min); waiting: weak; price inside 15m bullish fvg 84604.45-84672.0; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside a zone; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T20:35:08.204+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T20:30:00.000Z: trigger=False (none) spacing: last AI call 11 min ago (next after 15 min); waiting: weak; price inside 15m bullish fvg 84604.45-84672.0; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside a zone; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T20:40:16.493+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T20:35:00.000Z: trigger=True (weak) price inside 15m bullish fvg 84604.45-84672.0; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside a zone; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T20:48:47.777+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T20:30:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar; bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T20:50:07.491+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T20:45:00.000Z: trigger=False (none) bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T20:55:06.361+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T20:50:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:23:54.631Z); price moved 0.92 ATR since the last call\"}",
+"{\"ts\": \"2026-09-27T21:00:11.457+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T20:45:00.000Z: trigger=False (none) spacing: last AI call 5 min ago (next after 15 min); waiting: weak; price inside 15m bullish fvg 84520.01-84565.9; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside a zone; 5m reversal candle (doji, bearish_pin_bar, inside_bar) at the location; stacked footprint imbalances on the last\"}",
+"{\"ts\": \"2026-09-27T21:05:06.385+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T21:00:00.000Z: trigger=False (none) spacing: last AI call 9 min ago (next after 15 min); waiting: weak; price inside 15m bullish fvg 84520.01-84565.9; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside a zone; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T21:10:07.566+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T21:05:00.000Z: trigger=True (weak) price inside 15m bullish fvg 84520.01-84565.9; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside a zone; 5m reversal candle (doji, bullish_pin_bar, inside_bar) at the location; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-27T21:15:36.388+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T21:00:00.000Z: trigger=False (none) bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T21:21:21.697+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T21:15:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar; bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T21:25:06.410+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T21:20:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar; bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T22:20:10.214+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T22:15:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 0.63 ATR since the last call; stacked footprint imbalances on the last decision bar; 15m CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T22:25:07.383+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T22:20:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:55:41.125Z); stacked footprint imbalances on the last decision bar; 15m CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T22:30:09.153+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T22:15:00.000Z: trigger=False (none) bearish price/CVD divergence\"}",
+"{\"ts\": \"2026-09-27T22:35:05.678+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T22:30:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 1.68 ATR since the last call\"}",
+"{\"ts\": \"2026-09-27T22:40:08.840+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T22:35:00.000Z: trigger=True (review) review condition: price below 84257.0; next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 2.02 ATR since the last call; 5m BOS bearish through 84272.79\"}",
+"{\"ts\": \"2026-09-27T22:45:07.122+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T22:30:00.000Z: trigger=True (review) review condition: 15m close below 84257.0; review condition: price below 84257.0; next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 2.19 ATR since the last call; price inside 15m bullish fvg 84164.0-84256.0; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside\"}",
+"{\"ts\": \"2026-09-27T22:50:06.547+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T22:45:00.000Z: trigger=True (review) review condition: 15m close below 84257.0; review condition: price below 84257.0; next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 2.10 ATR since the last call; price inside 15m bullish fvg 84164.0-84256.0; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside\"}",
+"{\"ts\": \"2026-09-27T22:55:07.739+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T22:50:00.000Z: trigger=True (review) review condition: 15m close below 84257.0; review condition: price below 84257.0; next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 1.83 ATR since the last call; price inside 15m bullish fvg 84164.0-84256.0; 15m reversal candle (bearish_engulfing, bearish_marubozu) inside\"}",
+"{\"ts\": \"2026-09-27T23:00:06.182+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T22:45:00.000Z: trigger=True (review) review condition: 15m close below 84257.0; review condition: price below 84257.0; next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 2.11 ATR since the last call; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:05:08.666+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T23:00:00.000Z: trigger=True (review) review condition: 15m close below 84257.0; next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 1.58 ATR since the last call; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:10:07.966+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T23:05:00.000Z: trigger=True (review) review condition: 15m close below 84257.0; review condition: price below 84257.0; next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 2.33 ATR since the last call; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:15:06.986+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T23:00:00.000Z: trigger=True (review) review condition: 15m close below 84257.0; review condition: price below 84257.0; next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 1.94 ATR since the last call; 5m liquidity sweep (bullish) at 84135.78; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:20:09.193+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T23:15:00.000Z: trigger=True (review) review condition: 15m close below 84257.0; next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 1.39 ATR since the last call; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:25:05.396+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T23:20:00.000Z: trigger=True (review) review condition: 15m close below 84257.0; next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 1.18 ATR since the last call; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:30:06.855+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T23:15:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 0.80 ATR since the last call; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:35:07.152+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T23:30:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 0.64 ATR since the last call; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:40:05.702+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T23:35:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 0.75 ATR since the last call; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:45:09.933+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T23:30:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 1.11 ATR since the last call; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:50:06.567+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T23:45:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:55:41.125Z); price moved 0.55 ATR since the last call; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-27T23:55:05.590+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-27T23:50:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:55:41.125Z); 5m CHoCH bullish through 84470.0; 1h CHoCH bearish through 84342.0\"}",
+"{\"ts\": \"2026-09-28T00:00:09.109+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-27T23:45:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-27T20:55:41.125Z); stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T00:05:06.231+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T00:00:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T00:10:06.777+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T00:05:00.000Z: trigger=False (none) stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T00:15:07.466+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T00:00:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-28T00:20:11.827+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T00:15:00.000Z: trigger=False (none) \"}",
+"{\"ts\": \"2026-09-28T05:28:36.030+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T05:00:00.000Z: trigger=True (review) review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 6.26 ATR since the last call; price inside 1h bullish fvg 81725.74-83700.0; 1h reversal candle (bullish_engulfing, inside_bar) inside a zon\"}",
+"{\"ts\": \"2026-09-28T05:34:13.037+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T05:15:00.000Z: trigger=False (none) spacing: last AI call 4 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 6.54 ATR since the last call; price inside 1h bullish fvg 81725.74\"}",
+"{\"ts\": \"2026-09-28T05:35:43.519+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T05:30:00.000Z: trigger=False (none) spacing: last AI call 7 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 6.83 ATR since the last call; price inside 1h bullish fvg 81725.74\"}",
+"{\"ts\": \"2026-09-28T05:40:06.968+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T05:35:00.000Z: trigger=False (none) spacing: last AI call 11 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 7.54 ATR since the last call; price inside 1h bullish fvg 81725.7\"}",
+"{\"ts\": \"2026-09-28T05:45:08.423+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T05:30:00.000Z: trigger=False (none) spacing: last AI call 16 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 5.47 ATR since the last call; price inside 1h bullish fvg 81725.7\"}",
+"{\"ts\": \"2026-09-28T05:50:06.579+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T05:45:00.000Z: trigger=False (none) spacing: last AI call 21 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 5.54 ATR since the last call; price inside 1h bullish fvg 81725.7\"}",
+"{\"ts\": \"2026-09-28T05:55:08.446+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T05:50:00.000Z: trigger=False (none) spacing: last AI call 26 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 5.63 ATR since the last call; price inside 1h bullish fvg 81725.7\"}",
+"{\"ts\": \"2026-09-28T06:00:14.242+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T05:45:00.000Z: trigger=False (none) spacing: last AI call 31 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 5.53 ATR since the last call; price inside 15m bearish fvg 83150.\"}",
+"{\"ts\": \"2026-09-28T06:05:18.552+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T06:00:00.000Z: trigger=False (none) spacing: last AI call 36 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 5.66 ATR since the last call; price inside 15m bearish fvg 83150.\"}",
+"{\"ts\": \"2026-09-28T06:10:06.061+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T06:05:00.000Z: trigger=False (none) spacing: last AI call 41 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 5.28 ATR since the last call; price inside 15m bearish fvg 83150.\"}",
+"{\"ts\": \"2026-09-28T06:15:11.692+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T06:00:00.000Z: trigger=False (none) spacing: last AI call 46 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 5.40 ATR since the last call; price inside 1h bullish fvg 81725.7\"}",
+"{\"ts\": \"2026-09-28T06:20:07.663+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T06:15:00.000Z: trigger=False (none) spacing: last AI call 51 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 5.65 ATR since the last call; price inside 1h bullish fvg 81725.7\"}",
+"{\"ts\": \"2026-09-28T06:25:06.689+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T06:20:00.000Z: trigger=False (none) spacing: last AI call 56 min ago (next after 60 min); waiting: condition; review condition: 15m close below 84132.0; next_review time reached (30 min after 2026-09-28T00:01:06.274Z); review condition: 30.0 minutes elapsed; price moved 6.07 ATR since the last call; price inside 1h bullish fvg 81725.7\"}",
+"{\"ts\": \"2026-09-28T06:30:07.135+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T06:15:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T06:35:06.952+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T06:30:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; 5m reversal candle (bullish_engulfing, outside_bar) at the location; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T06:40:07.504+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T06:35:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T06:45:06.087+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T06:30:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0\"}",
+"{\"ts\": \"2026-09-28T06:50:09.385+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T06:45:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; 5m reversal candle (doji, bearish_pin_bar) at the location\"}",
+"{\"ts\": \"2026-09-28T06:55:06.043+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T06:50:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0\"}",
+"{\"ts\": \"2026-09-28T07:00:09.300+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T06:45:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0\"}",
+"{\"ts\": \"2026-09-28T07:05:06.085+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T07:00:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-28T06:29:56.875Z); review condition: 30.0 minutes elapsed; price moved 0.73 ATR since the last call\"}",
+"{\"ts\": \"2026-09-28T07:10:07.468+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T07:05:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; 5m reversal candle (bearish_engulfing) at the location\"}",
+"{\"ts\": \"2026-09-28T07:15:08.784+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T07:00:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T07:20:07.590+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T07:15:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T07:25:06.603+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T07:20:00.000Z: trigger=False (none) spacing: last AI call 20 min ago (next after 30 min); waiting: weak; 5m CHoCH bearish through 83046.0; 5m reversal candle (bearish_engulfing, bearish_marubozu) at the location; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T07:30:08.302+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T07:15:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; 5m reversal candle (bearish_pin_bar) at the location; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T07:35:06.859+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T07:30:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; 5m reversal candle (bullish_engulfing) at the location; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T07:40:05.981+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T07:35:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-28T07:05:39.620Z); review condition: 30.0 minutes elapsed; price moved 1.42 ATR since the last call; 5m reversal candle (bearish_engulfing, outside_bar) at the location; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T07:45:09.379+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T07:30:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; 5m reversal candle (bearish_pin_bar) at the location\"}",
+"{\"ts\": \"2026-09-28T07:50:05.974+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T07:45:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0\"}",
+"{\"ts\": \"2026-09-28T07:55:07.530+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T07:50:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0\"}",
+"{\"ts\": \"2026-09-28T08:00:09.103+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T07:45:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; 5m reversal candle (bearish_engulfing, outside_bar) at the location; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T08:05:05.728+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T08:00:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; 5m reversal candle (bullish_engulfing, outside_bar) at the location; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T08:10:08.435+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T08:05:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T08:15:06.947+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 15m close 2026-09-28T08:00:00.000Z: trigger=True (review) next_review time reached (30 min after 2026-09-28T07:40:53.646Z); review condition: 30.0 minutes elapsed; price moved 0.54 ATR since the last call; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T08:20:06.610+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T08:15:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; 5m reversal candle (bearish_engulfing, outside_bar) at the location; stacked footprint imbalances on the last decision bar\"}",
+"{\"ts\": \"2026-09-28T08:25:07.334+00:00\", \"level\": \"INFO\", \"proc\": \"engine\", \"logger\": \"engine\", \"msg\": \"BTCUSDT 5m close 2026-09-28T08:20:00.000Z: trigger=False (none) price inside 1h bullish fvg 81725.74-83700.0; 5m BOS bearish through 82924.01; stacked footprint imbalances on the last decision bar\"}"
+],
+"monitor_log": [
+"{\"ts\": \"2026-09-27T22:20:52.259+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] Low free RAM: 147 MB available (warning below 600 MB)\"}",
+"{\"ts\": \"2026-09-27T22:20:55.006+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"diagnosis session started (pid 22144) for ram\"}",
+"{\"ts\": \"2026-09-27T22:20:55.010+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 1 finding(s), 1 problem(s), exit 1, diagnosis {'launched': True, 'pid': 22144, 'cmd': ['C:\\\\\\\\the_claude_new\\\\\\\\.venv\\\\\\\\Scripts\\\\\\\\python.exe', 'C:\\\\\\\\the_claude_new\\\\\\\\tools\\\\\\\\operator\\\\\\\\run_session.py', '--kind', 'diagnose', '--reason', 'warn: Low free RAM — 147 MB available (warning below 600 MB)']}\"}",
+"{\"ts\": \"2026-09-27T22:35:50.098+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-27T22:50:48.256+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-27T23:05:47.669+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-27T23:20:49.224+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-27T23:35:48.430+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-27T23:50:51.501+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T00:05:49.981+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T00:20:48.079+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T00:35:47.048+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (13 min)\"}",
+"{\"ts\": \"2026-09-28T00:35:47.049+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (13 min)\"}",
+"{\"ts\": \"2026-09-28T00:35:47.049+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (13 min)\"}",
+"{\"ts\": \"2026-09-28T00:35:47.049+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (13 min)\"}",
+"{\"ts\": \"2026-09-28T00:35:47.050+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (13 min)\"}",
+"{\"ts\": \"2026-09-28T00:35:47.050+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[info] VPN down: network adapter 'Local Area Connection 4' is now down\"}",
+"{\"ts\": \"2026-09-28T00:35:50.777+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 6 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'monitor.diagnose_enabled is false'}\"}",
+"{\"ts\": \"2026-09-28T00:50:47.076+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (28 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T00:50:47.077+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (28 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T00:50:47.077+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (28 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T00:50:47.077+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (28 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T00:50:47.077+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (28 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T00:50:47.083+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T01:05:47.054+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (43 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:05:47.054+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (43 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:05:47.055+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (43 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:05:47.055+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (43 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:05:47.055+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (43 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:05:47.062+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T01:20:47.582+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (58 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:20:47.582+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (58 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:20:47.583+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (58 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:20:47.583+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (58 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:20:47.583+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (58 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:20:47.583+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] Low free RAM: 372 MB available (warning below 600 MB) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:20:47.587+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 6 finding(s), 6 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T01:35:47.757+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (73 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:35:47.766+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (73 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:35:47.766+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (73 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:35:47.767+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (73 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:35:47.767+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (73 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:35:47.767+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] Low free RAM: 555 MB available (warning below 600 MB) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:35:47.776+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 6 finding(s), 6 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T01:50:47.155+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (88 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:50:47.156+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (88 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:50:47.156+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (88 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:50:47.156+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (88 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:50:47.156+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (88 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:50:47.157+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] Low free RAM: 570 MB available (warning below 600 MB) (already notified)\"}",
+"{\"ts\": \"2026-09-28T01:50:47.161+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 6 finding(s), 6 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T02:05:46.150+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (103 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:05:46.151+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (103 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:05:46.151+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (103 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:05:46.151+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (103 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:05:46.151+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (103 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:05:46.155+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T02:20:46.346+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (118 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:20:46.347+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (118 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:20:46.347+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (118 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:20:46.348+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (118 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:20:46.348+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (118 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:20:46.355+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T02:35:46.523+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (133 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:35:46.523+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (133 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:35:46.523+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (133 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:35:46.523+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (133 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:35:46.523+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (133 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:35:46.527+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T02:50:46.194+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (148 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:50:46.195+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (148 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:50:46.195+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (148 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:50:46.196+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (148 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:50:46.196+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (148 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T02:50:46.200+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T03:05:46.673+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (163 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:05:46.674+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (163 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:05:46.674+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (163 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:05:46.674+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (163 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:05:46.674+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (163 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:05:46.678+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T03:20:46.679+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (178 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:20:46.680+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (178 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:20:46.680+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (178 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:20:46.681+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (178 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:20:46.681+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (178 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:20:46.684+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T03:35:46.432+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (193 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:35:46.432+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (193 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:35:46.432+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (193 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:35:46.432+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (193 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:35:46.432+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (193 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:35:46.437+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T03:50:46.216+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (208 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:50:46.217+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (208 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:50:46.217+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (208 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:50:46.217+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (208 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:50:46.217+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (208 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T03:50:46.221+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T04:05:46.257+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (223 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:05:46.258+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (223 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:05:46.258+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (223 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:05:46.258+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (223 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:05:46.258+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (223 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:05:46.263+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T04:20:46.270+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (238 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:20:46.271+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (238 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:20:46.271+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (238 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:20:46.272+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (238 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:20:46.272+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (238 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:20:46.279+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T04:35:46.648+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (253 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:35:46.649+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (253 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:35:46.650+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (253 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:35:46.650+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (253 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:35:46.650+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (253 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:35:46.655+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T04:50:46.575+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (268 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:50:46.575+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (268 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:50:46.576+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (268 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:50:46.576+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (268 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:50:46.576+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (268 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T04:50:46.579+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T05:05:53.518+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (284 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T05:05:53.519+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (283 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T05:05:53.519+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (284 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T05:05:53.520+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (283 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T05:05:53.520+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (283 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T05:05:53.528+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T05:20:54.536+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.854Z (299 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T05:20:54.537+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] BTCUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.377Z (298 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T05:20:54.537+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_spot:spot since 2026-09-28T00:22:19.886Z (299 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T05:20:54.538+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] ETHUSDT: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.270Z (298 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T05:20:54.538+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] XAUUSD: connection outage: disconnected without a reconnect for more than 5 min: binance_usdm:market since 2026-09-28T00:22:27.332Z (298 min) (already notified)\"}",
+"{\"ts\": \"2026-09-28T05:20:54.547+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 5 finding(s), 5 problem(s), exit 1, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T05:35:56.956+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[info] VPN up: network adapter 'Local Area Connection 4' is now up\"}",
+"{\"ts\": \"2026-09-28T05:36:14.547+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"notification 'vpn:Local Area Connection 4:up:1790573755029' not delivered (toast: failed: timed out after 10 s, Telegram: skipped (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set)) — the next run sends it again\"}",
+"{\"ts\": \"2026-09-28T05:36:15.043+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 1 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T05:50:48.391+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T06:06:11.696+00:00\", \"level\": \"WARNING\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"[warn] Low free RAM: 163 MB available (warning below 600 MB)\"}",
+"{\"ts\": \"2026-09-28T06:06:14.559+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 1 finding(s), 1 problem(s), exit 1, diagnosis {'launched': False, 'why': 'monitor.diagnose_enabled is false'}\"}",
+"{\"ts\": \"2026-09-28T06:20:51.144+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T06:35:48.573+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T06:50:48.205+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T07:05:47.023+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T07:20:47.435+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T07:35:47.496+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T07:50:47.499+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T08:05:47.554+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}",
+"{\"ts\": \"2026-09-28T08:20:47.507+00:00\", \"level\": \"INFO\", \"proc\": \"monitor\", \"logger\": \"monitor\", \"msg\": \"monitor run: 0 finding(s), 0 problem(s), exit 0, diagnosis {'launched': False, 'why': 'no new warning'}\"}"
+],
+"monitor_state_alerts": {
+"outage:BTCUSDT:binance_spot:spot@1790554939854": {
+"cleared_ms": 1790573755029,
+"first_ms": 1790555746967,
+"last_ms": 1790572854309,
+"level": "warn",
+"notified_ms": 1790555746967,
+"title": "BTCUSDT: connection outage"
+},
+"outage:BTCUSDT:binance_usdm:market@1790554947377": {
+"cleared_ms": 1790573755029,
+"first_ms": 1790555746967,
+"last_ms": 1790572854309,
+"level": "warn",
+"notified_ms": 1790555746967,
+"title": "BTCUSDT: connection outage"
+},
+"outage:ETHUSDT:binance_spot:spot@1790554939886": {
+"cleared_ms": 1790573755029,
+"first_ms": 1790555746967,
+"last_ms": 1790572854309,
+"level": "warn",
+"notified_ms": 1790555746967,
+"title": "ETHUSDT: connection outage"
+},
+"outage:ETHUSDT:binance_usdm:market@1790554947270": {
+"cleared_ms": 1790573755029,
+"first_ms": 1790555746967,
+"last_ms": 1790572854309,
+"level": "warn",
+"notified_ms": 1790555746967,
+"title": "ETHUSDT: connection outage"
+},
+"outage:XAUUSD:binance_usdm:market@1790554947332": {
+"cleared_ms": 1790573755029,
+"first_ms": 1790555746967,
+"last_ms": 1790572854309,
+"level": "warn",
+"notified_ms": 1790555746967,
+"title": "XAUUSD: connection outage"
+},
+"ram": {
+"cleared_ms": 1790576451054,
+"first_ms": 1790547652139,
+"last_ms": 1790575570636,
+"level": "warn",
+"notified_ms": 1790575570636,
+"title": "Low free RAM"
+}
+}
+}

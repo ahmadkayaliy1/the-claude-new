@@ -19,9 +19,15 @@ The daily reviews handle incidents; this review looks at the week as a whole. Ch
    Revert (tools/tune.py revert) a change the numbers contradict; renew nothing without fresh evidence.
 6. Versions: prompt / library / config / git hashes that changed during the week, and whether results moved with them.
 7. AI usage of the week: tokens by role, cache-read share, the usage gauge; cost per placed trade if it can be computed.
-8. Decide: at most one tune.py change per pair (a playbook rewrite counts as that pair's change), proposals for
+8. Go-live evidence so far: the pack's "Go-live evidence so far" section is `tools/go_live_inputs.py` over the demo
+   window (thresholds in docs/go_live_checklist.md). Read it as it is - do not re-judge an item or change a
+   threshold: which items pass, which FAIL and why (the measured value with its n), which the owner still ticks. If
+   the section says it is unavailable, say that instead of guessing.
+9. Decide: at most one tune.py change per pair (a playbook rewrite counts as that pair's change), proposals for
    structural improvements with their numbers (at most two, none already open), notify only for urgent matters.
-9. End with the `## SUMMARY` block (level line, then at most $summary_max_chars characters): the week in one line per
-   pair, what you changed, the proposals, what the owner should decide.
+10. End with the `## SUMMARY` block (level line, then at most $summary_max_chars characters): the week in one line per
+   pair, what you changed, the proposals, what the owner should decide - and, last, one paragraph that starts with
+   "Go-live evidence so far:" (at most 400 characters, from step 8: the FAIL items with their numbers first, then how
+   many pass, then what the owner still ticks; five demo days show no statistical edge, so never call a result one).
 
 Use `$review_id` as `--review-id` for tune.py and propose.py.
