@@ -80,6 +80,7 @@ class Engine:
         self.appdb = AppDB(s.paths.state() / "app.db")
         self.builder = SnapshotBuilder(s, self.reg)
         self.store = DecisionStore(s.paths.state() / "app.db", s.config_hash)
+        self.builder.kv = self.store                 # engine_kv: the daily profile / session caches (B4, B5)
         self.usage = UsageStore(usage_db(s))
         self.governor = CostGovernor(s.ai.budget, self.usage, profit_fn=self.store.realised_since,
                                      instance=s.paths.instance)
@@ -855,7 +856,12 @@ def main(argv: list[str] | None = None) -> int:
     eng = Engine(s)
     try:
         if args.snapshot:
-            print(json.dumps(eng.builder.build(args.snapshot, now_ms()), indent=1, default=str))
+            now = now_ms()
+            p = eng.builder.build(args.snapshot, now)
+            if (p["orderflow"].get("daily_profiles") or {}).get("pending"):     # a one-shot run waits for the worker
+                eng.builder.wait_background()
+                p = eng.builder.build(args.snapshot, now)
+            print(json.dumps(p, indent=1, default=str))
             return 0
         if args.triggers:
             now = now_ms()
@@ -869,6 +875,9 @@ def main(argv: list[str] | None = None) -> int:
             wait_for_provider(eng.orch)
             now = now_ms()
             payloads = {p: eng.orch.payload(p, now, eng.live_account(p)) for p in pairs}
+            if any((pl["orderflow"].get("daily_profiles") or {}).get("pending") for pl in payloads.values()):
+                eng.builder.wait_background()       # the daily profiles are computed by a worker: a one-shot run waits
+                payloads = {p: eng.orch.payload(p, now, eng.live_account(p)) for p in pairs}
             for p, pl in payloads.items():          # manual run: the data gate only warns
                 for problem in data_problems(pl, now, s.risk.max_data_staleness_s):
                     print(f"WARNING {p}: {problem}")

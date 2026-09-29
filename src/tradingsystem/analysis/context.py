@@ -16,18 +16,18 @@ TYO = ZoneInfo("Asia/Tokyo")
 F = np.ndarray
 
 
+# cash sessions: name -> (zone, local start hour, local end hour). Each is read in its own zone, so DST moves the UTC
+# hours; the session statistics (B5) use the same table
+SESSION_HOURS = {"asia": ("Asia/Tokyo", 9, 18), "london": ("Europe/London", 8, 17),
+                 "new_york": ("America/New_York", 8, 17)}
+
+
 def sessions(utc_ms: int) -> dict:
     """Active cash sessions and ICT killzones at ``utc_ms`` (each in its own local time → DST-correct)."""
     t = dt.datetime.fromtimestamp(utc_ms / 1000, tz=UTC)
-    ny, ldn, tyo = t.astimezone(NY), t.astimezone(LDN), t.astimezone(TYO)
+    ny = t.astimezone(NY)
     hm = lambda x: x.hour + x.minute / 60  # noqa: E731
-    active = []
-    if 9 <= hm(tyo) < 18:
-        active.append("asia")
-    if 8 <= hm(ldn) < 17:
-        active.append("london")
-    if 8 <= hm(ny) < 17:
-        active.append("new_york")
+    active = [name for name, (tz, a, b) in SESSION_HOURS.items() if a <= hm(t.astimezone(ZoneInfo(tz))) < b]
     k = hm(ny)
     killzone = ("asia" if k >= 20 else "london_open" if 2 <= k < 5 else "ny_open" if 7 <= k < 10
                 else "london_close" if 10 <= k < 12 else None)

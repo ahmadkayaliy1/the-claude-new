@@ -51,6 +51,25 @@ def _compact(obj: Any, year: str) -> Any:
     return obj
 
 
+def _flags(obj: Any) -> Any:
+    """true / false as 1 / 0 (fewer tokens), like ``fits_now``."""
+    if isinstance(obj, bool):
+        return int(obj)
+    if isinstance(obj, dict):
+        return {a: _flags(b) for a, b in obj.items()}
+    if isinstance(obj, list):
+        return [_flags(b) for b in obj]
+    return obj
+
+
+def _daily_profiles(block: dict, year: str) -> dict:
+    """The daily profile rows keep their date as ``MM-DD`` (the year of ``meta.as_of``); the column names are in the legend."""
+    out = {a: b for a, b in block.items() if a != "columns"}
+    if isinstance(out.get("days"), list):
+        out["days"] = [[(r[0][5:] if isinstance(r[0], str) and r[0][:4] == year else r[0]), *r[1:]] for r in out["days"]]
+    return out
+
+
 def _row(d: dict, cols: tuple[str, ...]) -> list:
     return [(int(d[c]) if isinstance(d.get(c), bool) else d.get(c)) for c in cols]
 
@@ -108,10 +127,19 @@ def model_view(payload: dict) -> dict:
             if isinstance(v.get("min_position_risk"), dict):          # fits_now as 1/0, like the other flags
                 v["min_position_risk"] = {a: (int(b) if isinstance(b, bool) else b)
                                           for a, b in v["min_position_risk"].items()}
-        elif k == "orderflow" and isinstance(v, dict) and isinstance(v.get("depth"), dict):
-            v = {**v, "depth": {a: b for a, b in v["depth"].items() if a != "band_columns"}}   # named in the legend
+        elif k == "orderflow" and isinstance(v, dict):
+            v = dict(v)
+            if isinstance(v.get("depth"), dict):
+                v["depth"] = {a: b for a, b in v["depth"].items() if a != "band_columns"}   # named in the legend
+            if isinstance(v.get("daily_profiles"), dict):
+                v["daily_profiles"] = _daily_profiles(v["daily_profiles"], year)
         elif k == "market" and isinstance(v, dict):
             v = {a: b for a, b in v.items() if a != "note"}
+            if isinstance(v.get("session_stats"), dict):                # column names and window are in the legend
+                v["session_stats"] = {a: b for a, b in v["session_stats"].items()
+                                      if a not in ("columns", "now_columns", "days")}
+            if isinstance(v.get("gold_clock"), dict):
+                v["gold_clock"] = _flags(v["gold_clock"])
         elif k == "history" and isinstance(v, list):
             v = [{**h, "summary": (h.get("summary") or "")[:HISTORY_SUMMARY_CHARS]} if isinstance(h, dict) else h
                  for h in v]

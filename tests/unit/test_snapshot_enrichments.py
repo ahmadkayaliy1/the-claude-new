@@ -158,6 +158,7 @@ def env(tmp_path):
 
     yield type("Env", (), {"s": s, "reg": reg, "seed": staticmethod(seed), "builder": staticmethod(builder)})
     for b in builders:
+        b.wait_background()               # a daily-profile worker of one test must not run into the next
         b.close()
 
 
@@ -443,3 +444,409 @@ def test_the_model_view_keeps_forming_out_of_recent_and_dates_it(frames):
     v = model_view(p)["timeframes"]["5m"]
     assert v["forming"][0].count("-") == 1 and len(v["forming"]) == 7
     assert all(r[0] != v["forming"][0] for r in v["recent"])
+
+
+# ================================================================================================ B4 / B5 / B16
+# Daily profiles (B4), session statistics (B5) and the gold clock (B16) through the builder. Trades are hand-built
+# (pure-logic edge cases: 24 h x 20 trades per day, the expected profile recomputed independently below); the 15m and
+# 1m bars are the real ones of tests/fixtures/real. The builder's kv is a plain dict standing in for ``engine_kv``.
+import threading
+import time
+
+from tradingsystem.analysis import daily_profiles as dpf
+from tradingsystem.analysis import gold_clock as gclock
+from tradingsystem.analysis import orderflow as of
+from tradingsystem.analysis import session_stats as sstats
+from tradingsystem.analysis import snapshot as snap_mod
+from tradingsystem.analysis.desk_windows import desk_state_text
+from tradingsystem.core.sessions import calendar_for
+
+
+class KV:
+    """engine_kv stand-in: JSON round trip like the real store, and a record of what was written."""
+
+    def __init__(self) -> None:
+        self.d: dict = {}
+        self.sets: list[str] = []
+
+    def kv_get(self, key, default=None):
+        return json.loads(json.dumps(self.d[key])) if key in self.d else default
+
+    def kv_set(self, key, value) -> None:
+        self.d[key] = json.loads(json.dumps(value, default=str))
+        self.sets.append(key)
+
+
+def seed_table(env, pair: str, datatype: str, rows, tf: Timeframe | None = None) -> None:
+    inst = env.reg.primary(pair)
+    with SQLiteHotStore(inst.hot_db_path(env.s.paths.data())) as st:
+        st.ensure_tables([*table_specs(inst), *system_specs()])
+        st.upsert(spec_for(inst, datatype, tf) if tf else spec_for(inst, datatype), list(rows))
+
+
+def day_rows(day: dt.date, first_id: int) -> list[tuple]:
+    """Hand-built aggTrades of one UTC day: 20 trades in each of the 24 hours (agg_id, ts, price, qty, first_id, last_id,
+    is_buyer_maker); prices on a 0.5 grid over nine 10-dollar buckets, one hour with heavy quantities."""
+    base = ms(day.year, day.month, day.day)
+    rows = []
+    for hour in range(24):
+        for i in range(20):
+            price = 80000.0 + 10.0 * ((hour * 7 + i * 3 + day.day) % 9) + 0.5 * (i % 10)
+            qty = 0.05 * (1 + i % 4) + (0.4 if hour == 13 and i % 3 == 0 else 0.0)
+            rows.append((first_id + len(rows), base + hour * H + i * MIN, price, round(qty, 4), 0, 0, i % 2))
+    return rows
+
+
+def expected_profile(rows: list[tuple], bucket: float = 10.0) -> dict:
+    vol: dict[float, float] = {}
+    for _id, _ts, price, qty, *_ in rows:
+        k = float(np.floor(price / bucket) * bucket)
+        vol[k] = vol.get(k, 0.0) + qty
+    lv = np.array(sorted(vol))
+    va = of.value_area(lv, np.array([vol[x] for x in lv]))
+    return {"poc": va["poc"], "vah": va["vah"], "val": va["val"]}
+
+
+def btc_reader(env):
+    from tradingsystem.storage.reader import InstrumentReader
+    inst = env.reg.primary("BTCUSDT")
+    return InstrumentReader(inst, env.s.paths.data()), inst
+
+
+def test_profile_agg_trades_is_the_bucketed_value_area_of_the_day_hot_and_cold_in_any_chunking(env, monkeypatch):
+    day = dt.date(2026, 9, 28)
+    rows = day_rows(day, 1)
+    # trades just outside the day must not enter: the last second of the day before, the first one of the day after
+    edge = [(9_000_001, ms(2026, 9, 27, 23, 59, 59), 91000.0, 500.0, 0, 0, 0),
+            (9_000_002, ms(2026, 9, 29), 71000.0, 500.0, 0, 0, 1)]
+    seed_table(env, "BTCUSDT", "agg_trades", rows + edge)
+    rd, inst = btc_reader(env)
+    want = expected_profile(rows)
+    got = dpf.profile_agg_trades(rd, inst, day, 10.0)
+    assert {k: got[k] for k in ("poc", "vah", "val")} == want
+    assert got["hours"] == 24 and got["trades"] == len(rows)
+    monkeypatch.setattr(dpf, "HOT_SLICE_MS", 7 * MIN)                              # a different slicing, same day
+    assert {k: dpf.profile_agg_trades(rd, inst, day, 10.0)[k] for k in ("poc", "vah", "val")} == want
+    # the same kind of trades as a cold Parquet day file (a day older than storage.hot_days), read row group by row group
+    import pyarrow as pa
+    cold_day = dt.date(2026, 9, 20)
+    crows = day_rows(cold_day, 100_000)
+    spec = spec_for(inst, "agg_trades")
+    rd.cold.write_day(inst, spec, cold_day, pa.table({c: [r[i] for r in crows] for i, c in enumerate(spec.column_names)}))
+    assert rd.cold.day_path(inst, spec, cold_day).exists()
+    assert len(rd.hot.read_range(spec, ms(2026, 9, 20), ms(2026, 9, 21))["ts"]) == 0        # not in the hot store
+    monkeypatch.setattr(dpf, "CHUNK_ROWS", 37)
+    cold = dpf.profile_agg_trades(rd, inst, cold_day, 10.0)
+    assert {k: cold[k] for k in ("poc", "vah", "val")} == expected_profile(crows)
+    rd.close()
+
+
+def test_a_day_with_trades_in_fewer_than_20_hours_is_not_a_profile(env):
+    day = dt.date(2026, 9, 28)
+    rows = [r for r in day_rows(day, 1) if (r[1] - ms(2026, 9, 28)) // H < 19]        # 19 hours of 24
+    seed_table(env, "BTCUSDT", "agg_trades", rows)
+    rd, inst = btc_reader(env)
+    assert dpf.profile_agg_trades(rd, inst, day, 10.0) is None
+    assert dpf.profile_agg_trades(rd, inst, dt.date(2026, 9, 15), 10.0) is None        # no rows at all
+    rd.close()
+
+
+AS_OF_B4 = ms(2026, 9, 29, 12)
+
+
+def profile_days(env, days: list[int]) -> dict[int, list[tuple]]:
+    out = {d: day_rows(dt.date(2026, 9, d), 1 + n * 1000) for n, d in enumerate(days)}
+    seed_table(env, "BTCUSDT", "agg_trades", [r for rs in out.values() for r in rs])
+    return out
+
+
+def test_the_profile_block_is_pending_while_the_worker_runs_then_filled_and_cached_per_day_in_kv(env, monkeypatch):
+    days = profile_days(env, [20, 21, 22, 23, 24, 25, 27, 28])                      # 09-26 has no trades: a gap
+    kv = KV()
+    b = env.builder()
+    b.kv = kv
+    gate = threading.Event()
+    real = dpf.profile_agg_trades
+    calls = []
+
+    def slow(reader, inst, day, bucket):
+        gate.wait(20)
+        calls.append(day)
+        return real(reader, inst, day, bucket)
+
+    monkeypatch.setattr(dpf, "profile_agg_trades", slow)
+    t0 = time.perf_counter()
+    first = b.build("BTCUSDT", AS_OF_B4)["orderflow"]["daily_profiles"]
+    assert time.perf_counter() - t0 < 5 and b._profiles.running()                   # the screen path never waited
+    assert first == {"data_quality": "pending", "bucket": 10.0, "pending": 5}
+    gate.set()
+    b.wait_background()
+    done = b.build("BTCUSDT", AS_OF_B4)["orderflow"]["daily_profiles"]
+    assert calls == [dt.date(2026, 9, d) for d in (28, 27, 26, 25, 24, 23)]         # newest first, stops at 5 profiles
+    assert done["data_quality"] == "real" and "pending" not in done and done["columns"] == dpf.COLUMNS
+    assert [r[0] for r in done["days"]] == [f"2026-09-{d}" for d in (28, 27, 25, 24, 23)]      # the empty 09-26 skipped
+    for r in done["days"]:
+        assert dict(zip(("poc", "vah", "val"), r[1:])) == expected_profile(days[int(r[0][-2:])])
+    assert set(kv.sets) == {f"dprofile1:BTCUSDT:2026-09-{d}" for d in (28, 27, 26, 25, 24, 23)}
+    assert kv.d["dprofile1:BTCUSDT:2026-09-26"]["miss"] is True                      # remembered, not retried per screen
+    json.dumps(done)
+    # a restart: a new builder over the same kv reads the days back and computes nothing
+    monkeypatch.setattr(dpf, "profile_agg_trades", lambda *a: pytest.fail("recomputed a cached day"))
+    b2 = env.builder()
+    b2.kv = kv
+    assert b2.build("BTCUSDT", AS_OF_B4)["orderflow"]["daily_profiles"] == done and not b2._profiles.running()
+    # the next UTC day: 09-29 has no trades (a miss); meanwhile the block keeps the older five and says pending 1
+    monkeypatch.setattr(dpf, "profile_agg_trades", real)
+    nxt = ms(2026, 9, 30, 12)
+    stale = b2.build("BTCUSDT", nxt)["orderflow"]["daily_profiles"]
+    assert stale["pending"] == 1 and [r[0] for r in stale["days"]] == [r[0] for r in done["days"]]
+    b2.wait_background()
+    settled = b2.build("BTCUSDT", nxt)["orderflow"]["daily_profiles"]
+    assert "pending" not in settled and settled["days"] == done["days"]
+
+
+def test_a_miss_is_retried_after_six_hours_and_a_day_is_complete_only_ten_minutes_after_it_ends():
+    assert dpf.candidate_days(ms(2026, 9, 29, 0, 9))[0] == dt.date(2026, 9, 27)       # 09-28 ends at 00:00: grace
+    assert dpf.candidate_days(ms(2026, 9, 29, 0, 10))[0] == dt.date(2026, 9, 28)
+    assert len(dpf.candidate_days(AS_OF_B4)) == 10
+    now = [ms(2026, 9, 29, 12)]
+    kv = KV()
+    kv.kv_set("dprofile1:BTCUSDT:2026-09-20", {"miss": True, "at": now[0]})
+    c = dpf.DailyProfiles(Path("."), 4, kv, now=lambda: now[0])
+    assert c._state("BTCUSDT", dt.date(2026, 9, 20))[0] == "miss"
+    now[0] += 6 * H + 1
+    assert c._state("BTCUSDT", dt.date(2026, 9, 20))[0] == "unknown"
+
+
+def test_the_profile_worker_never_raises_a_failing_day_is_a_logged_miss(env, monkeypatch):
+    profile_days(env, [27, 28])
+    kv = KV()
+    b = env.builder()
+    b.kv = kv
+
+    def boom(*a):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(dpf, "profile_agg_trades", boom)
+    b.build("BTCUSDT", AS_OF_B4)
+    b.wait_background()
+    p = b.build("BTCUSDT", AS_OF_B4)["orderflow"]["daily_profiles"]
+    assert p["data_quality"] == "pending" and "days" not in p                       # honest: nothing known
+    assert kv.d["dprofile1:BTCUSDT:2026-09-28"]["miss"] is True
+
+
+def load_1m(name: str):
+    with open(REAL / name, newline="") as f:
+        rows = list(csv.DictReader(f))
+    return [(int(r["open_time"]), *(float(r[k]) for k in ("open", "high", "low", "close", "tick_volume")))
+            for r in rows]
+
+
+def test_xau_profile_comes_from_the_1m_tick_volume_and_is_flagged_approx(env):
+    bars = load_1m("xauusd_1m_2026-09-24.csv")                                     # a real Thursday of XAUUSD@
+    assert len(bars) >= dpf.MIN_BARS_1M
+    seed_table(env, "XAUUSD", "candles",
+               [(t, t, o, h, lo, c, int(v), 0, None) for t, o, h, lo, c, v in bars], Timeframe.parse("1m"))
+    kv = KV()
+    b = env.builder()
+    b.kv = kv
+    as_of = ms(2026, 9, 25, 12)
+    assert b.build("XAUUSD", as_of)["orderflow"]["daily_profiles"]["data_quality"] == "pending"
+    b.wait_background()
+    blk = b.build("XAUUSD", as_of)["orderflow"]["daily_profiles"]
+    assert blk["data_quality"] == "approx" and blk["approx"] is True and "pending" not in blk
+    assert [r[0] for r in blk["days"]] == ["2026-09-24"]                             # the other days have no bars
+    arr = np.array([b_[1:] for b_ in bars])
+    ref = of.tick_volume_profile(arr[:, 1], arr[:, 2], arr[:, 4], 0.5)
+    assert blk["days"][0][1:] == [round(ref["poc"], 2), round(ref["vah"], 2), round(ref["val"], 2)]
+    assert arr[:, 2].min() <= ref["val"] <= ref["poc"] <= ref["vah"] <= arr[:, 1].max()
+    assert kv.d["dprofile1:XAUUSD:2026-09-24"]["bars"] == len(bars)
+    assert kv.d["dprofile1:XAUUSD:2026-09-23"]["miss"] is True
+
+
+def test_the_model_view_shortens_the_profile_dates_and_drops_the_column_names():
+    blk = {"data_quality": "real", "bucket": 10.0, "columns": dpf.COLUMNS, "pending": 1,
+           "days": [["2026-09-28", 83000.0, 83600.0, 82820.0], ["2026-09-27", 84770.0, 84850.0, 84380.0]]}
+    v = model_view({"meta": {"as_of": "2026-09-29T07:25:00.000Z"}, "orderflow": {"daily_profiles": blk}})
+    out = v["orderflow"]["daily_profiles"]
+    assert "columns" not in out and out["days"][0] == ["09-28", 83000.0, 83600.0, 82820.0] and out["pending"] == 1
+    assert len(json.dumps(out, separators=(",", ":"))) / 4 <= 200                    # the B4 budget, chars / 4
+    other = model_view({"meta": {"as_of": "2027-01-02T00:00:00.000Z"}, "orderflow": {"daily_profiles": blk}})
+    assert other["orderflow"]["daily_profiles"]["days"][0][0] == "2026-09-28"       # another year stays in full
+    assert blk["columns"] == dpf.COLUMNS and blk["days"][0][0] == "2026-09-28"       # the payload itself is untouched
+
+
+# ------------------------------------------------------------------------------- B5 / B16 through the builder
+def bars15(name: str) -> list[tuple]:
+    with open(REAL / name, newline="") as f:
+        rows = list(csv.DictReader(f))
+    return [(int(r["open_time"]), *(float(r[k]) for k in ("open", "high", "low", "close"))) for r in rows]
+
+
+BARS15 = {"BTCUSDT": bars15("btcusdt_15m_3500.csv"), "XAUUSD": bars15("xauusd_15m_9300.csv")}
+DAY0_REAL = AS_OF_REAL - AS_OF_REAL % DAY
+
+
+def seed_15m(env, pair: str, extra: list[tuple] | None = None) -> None:
+    rows = BARS15[pair] + (extra or [])
+    if pair == "XAUUSD":
+        rows = [(t, t, o, h, lo, c, 100, 0, None) for t, o, h, lo, c in rows]
+    else:
+        rows = [(t, o, h, lo, c, 1.0, 1.0, 1, 0.5, 0.5) for t, o, h, lo, c in rows]
+    seed_table(env, pair, "candles", rows, M15)
+
+
+HISTORY_BARS = {"BTCUSDT": 30 * 96 + 40, "XAUUSD": 90 * 96 + 40}     # the frame the builder reads (the ATR warm-up matters)
+
+
+def arrays15(pair: str):
+    """The bars the builder's history frame holds at DAY0_REAL: the last N closed before that UTC day's start."""
+    a = np.array([r for r in BARS15[pair] if r[0] + M15.ms <= DAY0_REAL][-HISTORY_BARS[pair]:])
+    return a[:, 0].astype(np.int64), a[:, 1], a[:, 2], a[:, 3], a[:, 4]
+
+
+def tokens(obj) -> float:
+    return len(json.dumps(obj, separators=(",", ":"), ensure_ascii=False)) / 4
+
+
+def test_the_builder_adds_session_stats_for_every_pair_and_the_gold_blocks_only_for_a_desk_pair(env):
+    seed_15m(env, "BTCUSDT")
+    seed_15m(env, "XAUUSD")
+    b = env.builder()
+    btc = b.build("BTCUSDT", AS_OF_REAL)
+    ot, o, h, lo, c = arrays15("BTCUSDT")
+    st = btc["market"]["session_stats"]
+    assert st["sessions"] == sstats.session_history(ot, o, h, lo, c, M15.ms, DAY0_REAL)
+    assert set(st["now"]) == {"asia", "london"} and "gold_clock" not in btc["market"] and "round" not in btc["levels"]
+    xau = b.build("XAUUSD", AS_OF_REAL)
+    gc_ = xau["market"]["gold_clock"]
+    ot, o, h, lo, c = arrays15("XAUUSD")
+    hist = gclock.gold_history(ot, o, h, lo, c, M15.ms, DAY0_REAL)
+    assert gc_["london_asia_sweep_days"] == hist["sweep"] and gc_["asia_range"]["complete"] is True
+    assert gc_["asia_range"]["width_x_median"] == round(gc_["asia_range"]["width"] / hist["asia_width_median"], 2)
+    pcfg = env.s.pairs["XAUUSD"]
+    execu = env.reg.with_role("XAUUSD", "execution")[0]
+    cal = calendar_for(execu.venue, execu.symbol, pcfg.asset_class)
+    # the window state is B15's own function, not a copy: 07:25 UTC is 08:25 in London (BST), inside 07:45-11:00
+    assert gc_["desk_window"] == desk_state_text(pcfg.desk, AS_OF_REAL, cal, "XAUUSD") == "open"
+    ind15 = xau["timeframes"]["15m"]["indicators"]
+    px, atr = ind15["close"], ind15["atr14"]                                        # no quote stored: the last 15m close
+    rnd = xau["levels"]["round"]
+    assert rnd == gclock.round_levels(px, atr, 2)
+    assert rnd["10"][0] < px < rnd["10"][2] and rnd["50"][0] <= rnd["10"][0] and rnd["50"][2] >= rnd["10"][2]
+    json.dumps(xau)
+
+
+def test_the_new_blocks_stay_inside_their_token_budgets_on_real_payloads(env):
+    seed_15m(env, "XAUUSD")
+    seed_15m(env, "BTCUSDT")
+    b = env.builder()
+    x = model_view(b.build("XAUUSD", AS_OF_REAL))
+    assert tokens(x["market"]["session_stats"]) <= 150
+    assert tokens({"gold_clock": x["market"]["gold_clock"], "round": x["levels"]["round"]}) <= 190
+    assert "true" not in json.dumps(x["market"]["gold_clock"]) and "columns" not in x["market"]["session_stats"]
+    assert tokens(model_view(b.build("BTCUSDT", AS_OF_REAL))["market"]["session_stats"]) <= 150
+
+
+def test_the_session_history_is_read_once_per_utc_day_and_cached_in_kv(env, monkeypatch):
+    seed_15m(env, "XAUUSD")
+    kv = KV()
+    b = env.builder()
+    b.kv = kv
+    real = snap_mod.load_frame
+    reads: list[int] = []
+
+    def counting(reader, inst, tf, bars, as_of, cal=None):
+        if tf == M15 and bars > 3000:
+            reads.append(as_of)
+        return real(reader, inst, tf, bars, as_of, cal)
+
+    monkeypatch.setattr(snap_mod, "load_frame", counting)
+    b.build("XAUUSD", AS_OF_REAL)
+    b.build("XAUUSD", AS_OF_REAL + 5 * MIN)
+    assert reads == [DAY0_REAL]                                                     # the history is cut at the day start
+    assert {k for k in kv.d if k.startswith("sess1")} == {"sess1:XAUUSD:2026-09-29"}
+    assert kv.d["sess1:XAUUSD:2026-09-29"]["gold"]["sweep"]
+    b2 = env.builder()                                                              # a restart: read back from the kv
+    b2.kv = kv
+    b2.build("XAUUSD", AS_OF_REAL)
+    assert reads == [DAY0_REAL]
+    b2.build("XAUUSD", DAY0_REAL + DAY + 8 * H)                                     # the next UTC day: a new key
+    assert reads == [DAY0_REAL, DAY0_REAL + DAY] and "sess1:XAUUSD:2026-09-30" in kv.d
+    b3 = env.builder()                                                              # a BTC-style (non-desk) history: 30 d
+    seed_15m(env, "BTCUSDT")
+    b3.kv = kv
+    b3.build("BTCUSDT", AS_OF_REAL)
+    assert "gold" not in kv.d["sess1:BTCUSDT:2026-09-29"] and "stats" in kv.d["sess1:BTCUSDT:2026-09-29"]
+
+
+def test_the_session_and_gold_blocks_never_see_bars_after_as_of(env):
+    seed_15m(env, "XAUUSD")
+    clean = env.builder().build("XAUUSD", AS_OF_REAL)
+    # poisoned bars from the cycle instant on (the 07:15 bar is the one forming at 07:25, the rest lies in the future)
+    poison = [(AS_OF_REAL - 600_000 + k * M15.ms, 9e3, 9e4, 1.0, 9e3) for k in range(8)]
+    seed_15m(env, "XAUUSD", poison)
+    dirty = env.builder().build("XAUUSD", AS_OF_REAL)
+    assert dirty["market"]["gold_clock"] == clean["market"]["gold_clock"]
+    assert dirty["market"]["session_stats"] == clean["market"]["session_stats"]
+    assert dirty["levels"]["round"] == clean["levels"]["round"]
+
+
+def test_a_failure_in_the_advice_blocks_leaves_them_out_and_never_breaks_the_payload(env, monkeypatch):
+    seed_15m(env, "XAUUSD")
+    b = env.builder()
+
+    def boom(*a, **k):
+        raise RuntimeError("bad bars")
+
+    monkeypatch.setattr(snap_mod, "session_history", boom)
+    p = b.build("XAUUSD", AS_OF_REAL)
+    assert "session_stats" not in p["market"] and "gold_clock" not in p["market"] and p["meta"]["payload_hash"]
+
+
+def test_too_little_history_says_so_instead_of_inventing_statistics(env):
+    seed_table(env, "BTCUSDT", "candles",
+               [(t, o, h, lo, c, 1.0, 1.0, 1, 0.5, 0.5) for t, o, h, lo, c in BARS15["BTCUSDT"][-400:]], M15)
+    p = env.builder().build("BTCUSDT", AS_OF_REAL)
+    st = p["market"]["session_stats"]
+    assert "sessions" in st                                   # 400 bars = 4 days: a few complete sessions exist ...
+    assert all(v[0] <= 5 for v in st["sessions"].values())      # ... with their true (small) day counts
+    p2 = env.builder().build("BTCUSDT", ms(2026, 1, 1))
+    assert p2["market"]["session_stats"]["data_quality"] == "unavailable"
+
+
+def test_the_engine_hands_its_decision_store_to_the_builder(tmp_path):
+    from tradingsystem.analysis.engine import Engine
+    s = load_settings(env_path=Path("nope.env"))
+    s = s.model_copy(update={"paths": s.paths.model_copy(update={"data_dir": str(tmp_path)})})
+    e = Engine(s)
+    try:
+        assert e.builder.kv is e.store
+        e.store.kv_set("sess1:X:2026-01-01", {"stats": {}})
+        assert e.builder.kv.kv_get("sess1:X:2026-01-01") == {"stats": {}}
+    finally:
+        e.close()
+
+
+def test_the_model_view_renders_the_session_and_gold_blocks_compactly():
+    market = {"session_stats": {"days": 30, "columns": ["days", "range_atr", "up_pct"], "now_columns": ["a"],
+                                "sessions": {"london": [30, 10.19, 60]}, "now": {"london": [1.03, 0.1, 41]}},
+              "gold_clock": {"session": "london", "asia_range": {"complete": True}, "london_swept": {"side": "high",
+                             "back_inside": False}, "next": [["lbma_am", "2026-09-29T09:30:00.000Z", 125]]},
+              "note": "dropped"}
+    v = model_view({"meta": {"as_of": "2026-09-29T07:25:00.000Z"}, "market": market})["market"]
+    assert v["session_stats"] == {"sessions": {"london": [30, 10.19, 60]}, "now": {"london": [1.03, 0.1, 41]}}
+    assert v["gold_clock"]["asia_range"] == {"complete": 1} and v["gold_clock"]["london_swept"]["back_inside"] == 0
+    assert v["gold_clock"]["next"] == [["lbma_am", "09-29 09:30", 125]] and "note" not in v
+    assert market["session_stats"]["columns"] and market["gold_clock"]["asia_range"]["complete"] is True
+
+
+def test_the_legend_explains_every_new_field_in_place_without_a_version_bump():
+    text = (Path(__file__).resolve().parents[1].parent / "src" / "tradingsystem" / "ai" / "prompts" / "shared"
+            / "payload_legend.md").read_text(encoding="utf-8")
+    assert text.startswith("<!-- prompt: shared/payload_legend · version 5 -->")
+    for name in ("orderflow.daily_profiles", "market.session_stats", "market.gold_clock", "london_swept",
+                 "london_asia_sweep_days", "levels.round", "desk_window", "width_x_median", "pending"):
+        assert name in text, name
+    assert "$" not in text                                    # a literal dollar sign breaks the template (test_prompts)
+    assert snap_mod.PAYLOAD_VERSION == "3"                    # the lead bumps it at B7, not here

@@ -12,8 +12,10 @@ against the 5-min grid, so a screen sometimes sees the row of 10 min before as t
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -30,13 +32,20 @@ from ..storage.tablespec import spec_for
 from . import context as ctx
 from . import indicators as ind
 from . import orderflow as of
+from .daily_profiles import DailyProfiles
+from .desk_windows import desk_state_text
 from .frames import MIN_BARS, Frame, forming_bar, load_frame
+from .gold_clock import clock_block, gold_history, round_levels
 from .price_action import patterns, range_state
 from .registry import Capability, capability_matrix
+from .session_stats import DAY_MS, STATS_DAYS, current_sessions, session_history
 from .structure import analyze_structure, premium_discount
 from .zones import fair_value_gaps, nearest_active, order_blocks, update_mitigation
 
+log = logging.getLogger("engine")
 PAYLOAD_VERSION = "3"
+SESSION_KEY = "sess1"           # engine_kv key prefix of the per-day session history (B5 / B16); bump on a new definition
+GOLD_HISTORY_DAYS = 90          # 15m bars read (before the UTC day start) for a desk pair's measured sweep share
 FORMING_TFS = (Timeframe.M15, Timeframe.M5)   # the timeframes that show the bar in progress (B3)
 PERIOD_BARS = 380               # daily bars read for the previous week / month levels and the year open
 HTF_GATE = ("4h", "1d")         # decision context: without enough history here the AI is not asked (F11)
@@ -288,9 +297,12 @@ def depth_block(ts, pct, notional, as_of: int, *, ref_ts=None, ref_pct=None, ref
 
 
 class SnapshotBuilder:
-    def __init__(self, settings: Settings, registry: InstrumentRegistry) -> None:
+    def __init__(self, settings: Settings, registry: InstrumentRegistry, kv=None) -> None:
         self.s = settings
         self.reg = registry
+        self.kv = kv        # anything with kv_get(key, default) / kv_set(key, value) - the DecisionStore (engine_kv)
+        self._profiles: DailyProfiles | None = None
+        self._sess_mem: dict[str, dict] = {}     # the session history per pair and UTC day (also cached in kv)
         self.data = settings.paths.data()
         self._readers: dict[str, InstrumentReader] = {}
         self._spread_cache: dict[str, tuple[int, np.ndarray, np.ndarray]] = {}   # key -> (as_of, times, spreads)
@@ -299,6 +311,11 @@ class SnapshotBuilder:
         if inst.key not in self._readers:
             self._readers[inst.key] = InstrumentReader(inst, self.data, cache_mb=self.s.resource.sqlite_cache_mb)
         return self._readers[inst.key]
+
+    def wait_background(self, timeout: float = 600.0) -> None:
+        """ Wait for the daily-profile worker (tools and tests only; the engine never waits for it)."""
+        if self._profiles is not None:
+            self._profiles.wait(timeout)
 
     def close(self) -> None:
         for r in self._readers.values():
@@ -329,6 +346,9 @@ class SnapshotBuilder:
         orderflow = self._orderflow(pair, primary, frames, caps, as_of, pcfg, d)
         if depth is not None:
             orderflow["depth"] = depth
+        profiles = self._daily_profiles(pair, primary, caps, as_of, pcfg, d)
+        if profiles is not None:
+            orderflow["daily_profiles"] = profiles
         payload = {
             "meta": {"pair": pair, "as_of": iso(as_of), "decision_timeframe": dec_tf,
                      "price_reference": primary.key, "execution_instrument": execu.key,
@@ -349,6 +369,8 @@ class SnapshotBuilder:
             "memory": memory or {},
             "performance": performance or {},
         }
+        self._session_blocks(payload, pair, primary, cal, exec_cal, frames.get("15m"), per_tf.get("15m"), as_of, pcfg, d,
+                             dec_atr)
         payload["meta"]["data_warnings"] = [
             f"{t}: {f.quality.get('status')}" + (f" ({len(f)} bars)" if f.quality.get("short_history") else "")
             for t, f in frames.items() if f.quality.get("status") != "ok"]
@@ -554,6 +576,85 @@ class SnapshotBuilder:
         ref = rd.read_range(spec, target - DEPTH_REF_TOL_MS, target + DEPTH_REF_TOL_MS + 1, cols)
         return depth_block(cur["ts"], cur["percentage"], cur["notional"], as_of, ref_ts=ref["ts"],
                            ref_pct=ref["percentage"], ref_notional=ref["notional"])
+
+    # ------------------------------------------------------------------ daily profiles (B4)
+    def _daily_profiles(self, pair: str, primary: Instrument, caps, as_of: int, pcfg, d: int) -> dict | None:
+        """``orderflow.daily_profiles``: POC / VAH / VAL of the last 5 complete UTC days from the profile cache (a worker
+        computes a missing day; this call never does - see ``daily_profiles``). BTC / ETH from aggTrades, XAU from the 1m
+        tick volume (approx); None where neither exists."""
+        if "agg_trades" in primary.datatypes and caps["footprint"].quality == "real":
+            approx = False
+        elif primary.venue == "mt5" and Timeframe.M1 in primary.timeframes:
+            approx = True
+        else:
+            return None
+        try:
+            if self._profiles is None:
+                self._profiles = DailyProfiles(self.data, self.s.resource.sqlite_cache_mb, self.kv)
+            return self._profiles.block(pair, primary, as_of, pcfg.footprint_bucket, d, approx=approx)
+        except Exception as e:  # noqa: BLE001 - advice only: never break the payload
+            log.warning("daily profiles %s: %r", pair, e)
+            return {"data_quality": "unavailable", "reason": "daily profile cache failed"}
+
+    # ------------------------------------------------------------------ session statistics (B5) and gold clock (B16)
+    def _session_history(self, pair: str, primary: Instrument, cal, as_of: int, gold: bool) -> dict:
+        """The per-UTC-day history behind ``market.session_stats`` (and, for a desk pair, ``market.gold_clock``): computed
+        from the 15m bars closed before this UTC day's start, so it is one value per pair and day - cached in memory and
+        in ``engine_kv`` (``sess1:<pair>:<date>``). An empty result (no bars yet) is not cached."""
+        day0 = as_of - as_of % DAY_MS
+        key = f"{SESSION_KEY}:{pair}:{dt.datetime.fromtimestamp(day0 / 1000, tz=dt.timezone.utc).date().isoformat()}"
+        hit = self._sess_mem.get(key)
+        if hit is None and self.kv is not None:
+            hit = self.kv.kv_get(key)
+        if hit is not None and (not gold or "gold" in hit):
+            self._sess_mem[key] = hit
+            return hit
+        days = GOLD_HISTORY_DAYS if gold else STATS_DAYS
+        tf = Timeframe.M15
+        fr = load_frame(self.reader(primary), primary, tf, days * 96 + 40, day0, cal)
+        hist: dict = {}
+        if len(fr) >= 30:
+            hist["stats"] = session_history(fr.open_time, fr.open, fr.high, fr.low, fr.close, tf.ms, day0)
+            if gold:
+                hist["gold"] = gold_history(fr.open_time, fr.open, fr.high, fr.low, fr.close, tf.ms, day0)
+        if hist.get("stats"):
+            for k in [k for k in self._sess_mem if k.startswith(f"{SESSION_KEY}:{pair}:")]:
+                del self._sess_mem[k]
+            self._sess_mem[key] = hist
+            if self.kv is not None:
+                self.kv.kv_set(key, hist)
+        return hist
+
+    def _session_blocks(self, payload: dict, pair: str, primary: Instrument, cal, exec_cal, m15: Frame | None,
+                        tf15: dict | None, as_of: int, pcfg, d: int, dec_atr: float | None) -> None:
+        """Adds ``market.session_stats`` (all pairs) and, for a desk pair, ``market.gold_clock`` and ``levels.round``.
+        Advice blocks: a failure leaves them out and is logged, it never breaks the payload."""
+        if m15 is None or Timeframe.M15 not in primary.timeframes:
+            return
+        gold = pcfg.desk is not None
+        try:
+            hist = self._session_history(pair, primary, cal, as_of, gold)
+            tf_ms = Timeframe.M15.ms
+            stats = hist.get("stats")
+            if stats:
+                now = current_sessions(m15.open_time, m15.open, m15.high, m15.low, m15.close, tf_ms, as_of, stats)
+                payload["market"]["session_stats"] = {"days": STATS_DAYS, "columns": ["days", "range_atr", "up_pct"],
+                                                      "sessions": stats, "now_columns": ["range_atr", "x_mean", "min_in"],
+                                                      "now": now}
+            else:
+                payload["market"]["session_stats"] = {"data_quality": "unavailable",
+                                                      "reason": "fewer than 30 closed 15m bars before this UTC day"}
+            if gold:
+                window = desk_state_text(pcfg.desk, as_of, exec_cal, pair)
+                payload["market"]["gold_clock"] = clock_block(as_of, m15.open_time, m15.high, m15.low, m15.close, tf_ms,
+                                                              hist.get("gold") or {}, window, d)
+                ap = payload["market"].get("analysis_price") or {}
+                px = _mid(ap) or ap.get("last_close_1m") or m15.last_close
+                atr = ((tf15 or {}).get("indicators") or {}).get("atr14") or dec_atr
+                if px and np.isfinite(px):
+                    payload.setdefault("levels", {})["round"] = round_levels(float(px), atr, d)
+        except Exception as e:  # noqa: BLE001
+            log.warning("session blocks %s: %r", pair, e)
 
     def _orderflow(self, pair: str, primary: Instrument, frames: dict[str, Frame], caps, as_of: int, pcfg,
                    d: int) -> dict:
