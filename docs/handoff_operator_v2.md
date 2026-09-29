@@ -42,6 +42,14 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-09-29 — D-049: gold becomes a professional desk in SHADOW (checkpoint B rows B11–B19 added to §3.9.1).**
+  A read-only design workflow (facts → pro practice → design → skeptic) found that the XAU blocker is our own
+  0.5×ATR(15m) stop floor (the model called it "the venue's"), that 1 oz at $97 is 42× leverage against the
+  10× cap, and that stops small enough to fit 3 % lose to spread and answer latency. The owner chose the shadow
+  desk: full gold analysis (gold clock, Asia range, round numbers, EURUSD + silver, news tiers, a desk brief),
+  ideas gated and scored in R but never sent, calls only in the London/New York windows (≈ 12/day instead of
+  ≈ 24); real gold trades only after capital/contract, ≥ 30 ideas with an edge and the machine move (H32).
+
 * **2026-09-29 — H26a done ≈ 05:40 UTC: checkpoint A runs in production (`main` 0de05ab).** Verified read-only:
   the three per-pair supervisors up (0 restarts), the five `TradingSystemOps-*` tasks, the first backup
   `backups\20260929T053958Z.zip`, `diagnose_enabled: false` removed, the recorder restarted by its task at
@@ -951,7 +959,7 @@ handoff §0b, and the checkpoint-A merge steps in Arabic: **H26a** = `git merge 
 `scripts\restart_all.bat` + `install_operator_tasks.bat` again (it registers the backup and the recorder tasks; as
 built, the recorder task is not in `install_autostart.bat`).
 
-#### Checkpoint B — "goes deeper" (≈ 6 days, exactly ONE billed live call) — H26b
+#### Checkpoint B — "goes deeper" (≈ 12 days of listed effort: B1–B10 ≈ 7.5 d, B11–B19 ≈ 4.75 d; exactly ONE billed live call) — H26b
 
 | # | §3.9 | Item | Effort | Note |
 |---|---|---|---|---|
@@ -965,6 +973,37 @@ built, the recorder task is not in `install_autostart.bat`).
 | B8 | 10 | News blackout for XAU per decision (a): feed-based `analysis/news.py`, `market.news`, gate `news_blackout`, trigger suppression, config `pairs.XAUUSD.news_blackout`; tests: fixture JSON, UTC/DST parsing, stale fails open, the gate refuses inside the window and the model is told why; if no feed is usable → XAU prompt text only, recorded | 1 d | |
 | B9 | 11 | Gold-proxy study `research/gold_flow/study.py` → `docs/exploration/gold_flow.md`: one day-file at a time with pyarrow (≤ 500 MB RAM), run only while the laptop is idle and never on the trading path; XAUUSDT taker delta vs XAUUSD@ mid returns per 1-min/5-min bucket, corr at k = −5…+5 min, per week over the 290 overlapping days, rolling 4-week sign stability, weekends and the 21:00–22:00 UTC daily break excluded, Monday-gap check; pass/fail against |corr| ≥ 0.5 and 4-week sign stability → H25 only if it passes. In the same idle run, P7.1 `research/price_matching/analyze.py` over the recorder parquet if ≥ 72 h exist by then (spread distribution per session, basis median/p95, lead/lag at 100 ms / 1 s, stale-quote share, weekend behaviour → `docs/price_matching.md` with a proposed `max_basis_deviation_pct` from the measured p95, for H5) | 1.5 d | |
 | B10 | 13 | Fill `tools/go_live_inputs.py` from the Phase 4 data now in production | 0.25 d | |
+| B11 | — | `tools/propose.py` accepts a one-line `--body` whose `\n` escapes are decoded to newlines, and the operator prompts say to use it, so a review session can create a proposal under its existing allow rule `Bash(.venv/Scripts/python.exe tools/propose.py *)` — the rule is NOT widened (P12.5 note 8b: the 2026-09-29 review was refused twice because the rule's `.` does not match a newline and Write is disallowed) | 0.25 d | owner 2026-09-29 |
+| B12 | — | No entry call while no position fits (pairs without a desk): when `account.min_position_risk` shows that the minimum lot at the minimum stop risks more than `risk.max_risk_per_trade_pct` or exceeds `risk.max_effective_leverage`, strong/weak/idle triggers are suppressed (the setup signature advances, as A5's closed market); review/event calls stay while the pair holds anything; key `ai.skip_entry_calls_when_no_fit: true`; one `skipped: no_fit` event per hour; a line in status and demo_report. A pair with `desk.mode: shadow` uses B15 instead | 0.25 d | owner 2026-09-29 |
+| B13 | — | Honest stop labels and fit fields (all pairs, D-049): `min_stop_set_by ∈ {system_atr_floor, venue_stops_plus_spread, system_spread_rule}`; `account.min_position_risk` gains `fits_now`, `leverage_at_min_lot`, `leverage_cap`, `equity_for_min_lot` (the equity at which the minimum lot passes both the per-trade cap at the current floor and the leverage cap); legend v5 and the review prompt say "the venue's own minimum is `stops_level`; the floor is the system's rule" (the model and the daily review called our 15m ATR floor "the venue's min_stop_distance"); ≤ 45 tokens | 0.25 d | D-049 |
+| B14 | — | Gold desk in shadow (D-049): `pairs.<PAIR>.desk` (`DeskCfg`; metal pairs only; code default `None` = today's behaviour; `config.yaml` sets XAUUSD `desk: {mode: shadow, brief: desks/xau, …}`). In shadow the executor NEVER places, modifies or cancels an order for that pair — checked before any backend call — and every valid BUY/SELL is gated in full for the record, then stored `not_executed` with detail `shadow` and `desk_ok` (= every check passed except `position_size`/`effective_leverage`), so the existing virtual-outcome and `decision_metrics` machinery scores it in R. Same item: `instances.*.overrides.risk` may only tighten each `RiskCfg` field and overrides may not set `execution.magic` (the load fails otherwise) | 0.75 d | money path: fail closed; golden test = BTC/ETH gate unchanged |
+| B15 | — | Gold call windows (replaces B12 for a desk pair): entry calls only inside `desk.windows` (default London 07:45–11:00 Europe/London = the open + the LBMA AM auction; New York 08:15–11:30 America/New_York = COMEX open, 08:30 data, NYSE open), never within `desk.reopen_grace_min` (60) of the Sunday reopen, after 12:00 ET on Friday, inside a B8 blackout, or while the news feed is stale; outside → triggers suppressed, signature advanced, one `skipped: outside_desk_window` event per window; expected ≈ 12 XAU calls/day instead of ≈ 24 (measured with `tools/replay_triggers.py`, M4) | 0.5 d | |
+| B16 | 5 | Gold clock and levels (folded into B2/B5 for XAU): `market.gold_clock` = session, the Asia range (00:00–07:00 UTC high/low/width, width ÷ its 30-day median, complete flag), `london_swept` (side, closed back inside), the next events in UTC from zoneinfo (London open, LBMA AM 10:30 and PM 15:00 London, COMEX open 08:20 ET and settle 13:30 ET, US data 08:30 ET, NYSE 09:30 ET, rollover 17:00 ET), `desk_window: open|closed:<reason>`; `levels.round` = the nearest $10 and $50 levels above/below with distance in ATR; B5 for XAU adds the MEASURED share of days where London takes an Asia extreme and closes back inside (30/90 d, causal) — no folklore numbers; ≤ 190 tokens; DST-mismatch test (2026-10-25 → 11-01) | 0.75 d | causal |
+| B17 | 4 | Intermarket for gold (extends B6): `EURUSD@` (USD proxy, ≈ 58 % of DXY, no futures roll) and `XAGUSD@` (silver) recorded under `pairs.XAUUSD.instruments` with a new role `cross_context`, `datatypes: [candles]`, TFs 15m/1h/4h/1d; ingest guards `_poll_ticks`/`_init_cursor` on `"ticks" in inst.datatypes`; `reg.primary()` and the other role lookups ignore the new role; `cross.py` reads them like a sibling: `chg_pct {1h,4h,session}`, trend 15m/1h, 96×15m log-return corr, beta, silver `confirms_xau_extreme`, info-only `votes` (0 with a note when \|corr\| < 0.3) — NEVER a gate input; ≤ 170 tokens, ≤ 100 ms, `unavailable` without an exception; ingest RSS Δ ≤ 30 MB measured. Deferred: USINDX (quarterly roll), US500 (calendar), yields (none at the broker) | 1 d | cut line: ships as `unavailable` if the RAM/latency budget fails |
+| B18 | — | Gold desk brief `ai/prompts/desks/xau.md` (versioned header, ≤ 350 tokens) appended to the XAU system prompt through `render(..., appendix=)` — no new placeholder, recorded in `prompt_versions`, BTC/ETH prompts byte-identical (test). Content: the shadow framing ("your gold trades are recorded and scored in R, not sent, until the account can carry 1 oz at a professional stop — propose the trade a professional would take with its real structural stop; never shrink a stop to fit; `account.min_position_risk` does not bind shadow ideas, the `market.execution.costs` min/max distances do"); the routine (4h/1d bias → location: Asia range edges, PDH/PDL, PW/PM, round numbers → confirmation: intermarket votes and silver → session behaviour → entry: LIMIT/STOP at the level, the answer arrives 1–3 min after the screen → stop behind the sweep/structure + spread + a buffer beyond the round number → targets ≥ 2R after spread); intraday ideas only, none near news, the rollover or the Sunday open | 0.5 d | rides on B7's version bump |
+| B19 | — | Gold scorecard (the evidence for any future real gold trading): `tools/desk_report.py` → `docs/measurements/gold_desk.md` and a section of `demo_report`: per shadow idea the R outcome, MFE/MAE, minutes to resolve, by window/session, `desk_ok` vs not; a random-entry baseline computed once from 90 days of 1m bars at the same stop sizes and hours with the real spread and bid/ask-correct triggers; M1 = every stored XAU decision re-gated with the desk rules; M4 = XAU calls/day with the windows | 0.5 d | read-only, idle time, one DB at a time |
+
+**Gold desk (D-049, the owner's choice 2026-09-29) — the rules that bind B13–B19.** Why shadow and not real gold
+trades (measured read-only 2026-09-29, the design workflow's facts + skeptic): at $97 the 1-oz minimum is ≈ $4,130 of
+exposure = **42× leverage** against `max_effective_leverage: 10` (the check runs only after sizing passes, so it never
+showed); a professional structural stop on gold is $7–9 (the model's one SELL: 9.06) = **7–9 % per trade** at 1 oz; the
+system's 0.5×ATR(15m) floor fits the 3 % cap on 0.9 % of 5m closes (30 d); a stop that does fit ($2–2.9) is smaller
+than one median 15m bar, and random entries at those stops over 90 days of 1m bars LOSE (−0.08…−0.15 R, 80–93 % of
+the losses within 15 min) while the model answers in 37 s (p50) to 147 s (max). So: **not built** — a leverage
+exception, a 5m-ATR stop floor for gold, a scalp desk, a daily flat job; `max_risk_per_trade_pct` 3,
+`max_daily_loss_pct` 10 and `max_effective_leverage` 10 stay unchanged (D-046 d). **Promotion to real gold trades is a
+future owner decision (H32)** and needs ALL of: (1) equity ≥ `equity_for_min_lot` at the median shadow structural
+stop within 3 % and ≤ 10× leverage (≈ $400+ at today's prices) or a broker gold contract ≤ 0.1 oz (Windsor has none:
+XAUUSD@/XAUEUR@/XAUAUD@ are all 100 oz × 0.01 min); (2) ≥ 30 `desk_ok` shadow ideas with expectancy > 0 after spread
+AND ≥ the B19 baseline + 0.15 R; (3) production on the dedicated machine (D-046). Until then XAU stays out of go-live
+(H9). **Budget:** the gold-specific input delta is ≤ +800 tokens per XAU call against the post-B7 baseline (a dry
+build, no call); with ≈ 12 calls/day XAU's daily input tokens fall by about half. **B8 for gold:** tiers amend B8's
+±15 min — high impact (CPI, NFP, core PCE) −30/+30 min, FOMC −60 min to +75 min, medium (PPI, retail sales, ISM, JOLTS,
+GDP) −10/+10; a stale feed → no XAU entry calls (no money is at stake in shadow, so fail closed on calls is free).
+**Build order for checkpoint B:** B11 → profile the snapshot build (≈ 5.9 s on BTC/ETH; B7 wants < 3 s) → B13 → B14 →
+B12 + B15 → B1–B5 with B16 → B6 + B17 → B8 with the gold tiers → B18 + B7 (one version bump; the ONE live call stays
+BTC) → B9, B10, B19. **H26b:** the two new MT5 instruments need the ingest restarted — the session states
+`stop_all → merge → start_all` (with the backfill of the new symbols) and what to verify.
 
 **Not built (recorded as decisions):** items 8 and 9 (decision b); the hollow forming bar on the 15m chart (cache
 cost); P8.8/P11.2 mode comparisons (obsolete); P7.4 Binance backend (only if P7.2 = B).
@@ -973,16 +1012,16 @@ cost); P8.8/P11.2 mode comparisons (obsolete); P7.4 Binance backend (only if P7.
 `mklink /J` junctions, a copy of BTC's app.db, own `shared\ai_usage.db`, stdout/stderr redirected to files, the engine
 waits for the sign-in check), started right after a 5-hour reset. Acceptance: valid first attempt, 6 images, input
 ≤ 26.7 k and ≤ +1.5 k vs that day's production median, every new block present in the stored payload,
-`snapshot_build_ms` < 3 s; numbers to `docs/measurements/phase5_live.md`; XAU verified by a dry payload build (no call).
+`snapshot_build_ms` < 3 s; numbers to `docs/measurements/phase5_live.md`; XAU verified by a dry payload build + render (no call): the gold-specific delta ≤ +800 input tokens, the brief present, `gold_clock`/`levels.round`/intermarket in the stored payload, the shadow path proven by tests only.
 
 **Tests (spec names):** `test_snapshot_enrichments.py` (depth from a seeded table of real rows incl. stale; OI from
 metrics with gaps and null ratios; PW/PM causal with the broker day roll; session stats causal + DST; forming excluded
 from triggers and `setup_signature` unchanged), `test_cross.py`, `test_news.py`, `test_model_view_v3.py`,
-`test_prompt_versions` (bump), `test_go_live_inputs.py`, plus the checkpoint-A tests (backup verify/restore, monitor
+`test_prompt_versions` (bump), `test_go_live_inputs.py`, `test_propose_body.py` (B11), `test_no_fit_suppression.py` (B12), `test_desk_cfg.py` (metal only, tighten-only overrides, no magic), `test_gate_desk_shadow.py` (shadow never reaches the backend; `desk_ok`; golden: BTC/ETH gate output identical on every stored gate input), `test_desk_windows.py` (DST, Friday, Sunday grace, stale feed), `test_gold_clock.py`, `test_cross_context.py`, `test_prompt_appendix.py` (BTC/ETH byte-identical), plus the checkpoint-A tests (backup verify/restore, monitor
 battery/commit/recorder/diagnosis budget, interrupted cycle, transient retry, cancelled-call ledger row, quota
 reserve, kill-switch protective, backfill worker exit).
 
-**Review of checkpoint B** (lenses at least): payload/token budget, money path incl. the news gate, the research
+**Review of checkpoint B** (lenses at least): payload/token budget, money path incl. the news gate and the gold shadow path (nothing ever reaches the backend for a shadow pair; BTC/ETH unchanged), the research
 jobs' resource use, config/ops/rollback, prompts vs code. Then PROJECT_STATUS.md (P12.5 block with numbers,
 P1.11/P9.9/P11.4 cross-references, H22–H26 as they stand, D entries), handoff §0b + a "4.9 As built" note under §3.9
 (deviations, live-call numbers, deferrals), `docs/ops_windows.md` §1b/§8 rollback switches for every new key, and the
@@ -997,7 +1036,7 @@ merge/restart steps in Arabic (**H26b**) — stating whether the prompt/legend c
 | Day ≈ 3–5 | Checkpoint A merged (H26a): backup task live, recorder task, monitor rules, `tools/demo_report.py` → `docs/runs/demo.md` over the window, `docs/go_live_checklist.md` filled by `go_live_inputs.py`; the recorder reaches 72 h → P7.1 → H5. |
 | Day ≈ 5 | The owner's go-live decision (H9) on the checklist as it stands: ONE pair (ETH) at the minimum lot, everything else stays demo; the live-refusal rehearsal on a scratch root (`EXECUTION_MODE=live` + the phrase against the demo terminal must fail "account mismatch") and one restored backup come first. |
 | Days 5–12 | Checkpoint B built and merged (H26b) while the first pair trades live at the minimum lot; XAU cycles observed; the gold-study verdict → H25 or not; H21 gauge calibration after a week. |
-| Later | More pairs only on the weekly review's evidence; XAU excluded until item 10 and P1.11 pass. Production on a machine that is not the development laptop (a 16 GB upgrade or a small dedicated Windows box) removes sleep, battery, development RAM and shared-plan interference at once. |
+| Later | More pairs only on the weekly review's evidence; XAU excluded until item 10 and P1.11 pass and D-049's promotion conditions hold (H32). Production on a machine that is not the development laptop (a 16 GB upgrade or a small dedicated Windows box) removes sleep, battery, development RAM and shared-plan interference at once. |
 
 **Go-live checklist thresholds** (the session writes them into `docs/go_live_checklist.md`, the owner signs):
 the 5 demo days on Phase 4+ code complete (D-047); the resolved outcomes per pair REPORTED (not required — five days
