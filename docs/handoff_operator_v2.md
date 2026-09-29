@@ -906,6 +906,20 @@ check), so the safety nets reach production while the demo runs.**
 | A8 | **Readiness deliverables**: `tools/demo_report.py` (a `demo` kind of `tools/review_pack.py` over 672 h: per-pair funnel screens → calls by role → valid → ideas → gate by check → placed → outcomes broker/virtual; `decision_metrics` means; MT5 deals history for the family's magics → equity curve, realised PnL, commission/swap; availability = share of 15m cycles lost to data_not_ready / ai_quota / system_suspend / killed / session limit; incident table with first-detection time from the monitor state; cost per day from the ledger; prompt/config/adaptive hashes; tuning changes; the sample-size statement) writing `docs/runs/demo.md`; `docs/go_live_checklist.md` with the thresholds below; `tools/go_live_inputs.py` printing the measured table (= §3.9 item 13); the weekly review prompt appends one paragraph "go-live evidence so far". | P11.3/P11.4, the owner's end state |
 | A9 | One `tools\check_integrity.py --since-hours 48` run pasted into P3.9/P4.6. | closes two soak phases |
 
+**As built (checkpoint A, 2026-09-28/29) — where the implementation differs from the table:** A3's keep-alive task is
+`TradingSystemOps-Recorder` in `install_operator_tasks.ps1`; `start_recorder.bat` goes through
+`tools/recorder_keepalive.py` (never two recorders; STOP is the only stop; a hung recorder is ended with `taskkill`).
+A5's quota reserve binds only BEFORE 12:00 UTC in the UTC quota day (after 21:00 the kept calls could only expire),
+exempts events and the reviews of a pair with money at risk (or unknown holdings), and is off for a provider whose
+quota day is not the UTC day; the back-to-back cache reuse (optional) was not built (separate processes, different
+system prompts). A6's metrics-based OI figures (changes, rank) use a 15-min freshness limit (the 5-min poll drifts
+against the screens: a 10-min limit blanked them on 4–6 % of screens); the 60-s 'last' keeps 10 min; the null taker
+ratio was an ingest defect (the metrics row was stored before Binance published the ratio) and the metrics table now
+fills NULL columns on a later write. A7: one backfill worker process per pass; the supervisor scan prefetches names only
+(3.6 s → 0.2 s); `check_integrity.py --since-hours` fixed (D-048). A8: the go-live checklist has 19 rows (row 19 = the
+decision role separated from development, D-046 e); demo_report counts Fast-Startup shutdowns from supervisor restarts
+and the Windows System log.
+
 Then: full unit suite green from the worktree (`PYTHONPATH=src C:/the_claude_new/.venv/Scripts/python.exe -m pytest
 tests/unit -q -p no:cacheprovider`; the 1208 Phase 4 tests stay green), the adversarial review, PROJECT_STATUS +
 handoff §0b, and the checkpoint-A merge steps in Arabic: **H26a** = `git merge --ff-only <checkpoint-A commit>` +

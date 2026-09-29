@@ -400,8 +400,11 @@ class AICfg(_Model):
     # or pending (the setup signature still advances, so the reopen does not fire on the closed session's structure)
     skip_closed_market: bool = True
     transient_retry_s: float = Field(60.0, ge=0, le=600)   # OAuth refresh race / 403: one retry after this; 0 = off
-    # share of daily_calls_per_pair kept for the busy UTC hours [start, end): outside them a pair may use at most
-    # (1 − share) × cap, so the afternoon sessions keep calls; 0 = no reserve
+    # share of daily_calls_per_pair kept for the busy UTC hours [start, end): BEFORE the window starts in the UTC
+    # quota day a pair may use at most (1 − share) × cap, so the afternoon sessions keep calls; from `start` on every
+    # call left is free (after the window the kept calls could only expire). Event calls and the reviews of a pair
+    # holding a position or pending order (or whose holdings are unknown) are exempt; a provider whose quota day is
+    # not the UTC day gets no reserve; 0 = no reserve
     quota_reserve_share: float = Field(0.4, ge=0, le=0.9)
     quota_reserve_hours_utc: list[int] = Field(default_factory=lambda: [12, 21])
     consensus_providers: list[str] = Field(default_factory=list)
