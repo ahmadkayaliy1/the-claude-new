@@ -36,7 +36,10 @@ def test_view_is_smaller_and_keeps_every_level(payload):
     assert len(b) < 0.75 * len(a)
     assert len(ISO.findall(b)) == 1 and v["meta"]["as_of"] == payload["meta"]["as_of"]   # only the cycle time
     assert v["meta"]["view_version"] == VIEW_VERSION
+    assert "1m" not in v["timeframes"]                 # Phase 5 B7: the 1m view pays for the new blocks
     for tf, t in payload["timeframes"].items():
+        if tf == "1m":
+            continue
         w = v["timeframes"][tf]
         if "zones" in t:                 # every zone and every level survives, as a row
             for kind, zones in t["zones"].items():

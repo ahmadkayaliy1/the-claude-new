@@ -54,8 +54,10 @@ def test_a_desk_has_no_live_mode_and_no_unknown_keys():
 def test_a_desk_is_for_metal_pairs_only(tmp_path):
     with pytest.raises(Exception, match="desk is only valid for metal pairs"):
         load(tmp_path, "pairs:\n  BTCUSDT:\n    desk: {mode: shadow}\n")
-    s = load(tmp_path, "pairs:\n  XAUUSD:\n    desk: {mode: shadow, brief: x, reopen_grace_min: 30}\n")
-    assert s.pairs["XAUUSD"].desk.reopen_grace_min == 30 and s.pairs["XAUUSD"].desk.brief == "x"
+    s = load(tmp_path, "pairs:\n  XAUUSD:\n    desk: {mode: shadow, brief: desks/x, reopen_grace_min: 30}\n")
+    assert s.pairs["XAUUSD"].desk.reopen_grace_min == 30 and s.pairs["XAUUSD"].desk.brief == "desks/x"
+    with pytest.raises(Exception, match="brief"):                     # B18: a library file under desks/ only
+        load(tmp_path, "pairs:\n  XAUUSD:\n    desk: {mode: shadow, brief: ../secrets}\n")
     # no desk at all is still valid for a metal (a desk is opt-in)
     s = load(tmp_path, "pairs:\n  XAUUSD:\n    desk: null\n")
     assert s.pairs["XAUUSD"].desk is None

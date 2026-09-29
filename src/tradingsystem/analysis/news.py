@@ -159,14 +159,25 @@ def fetch(cfg: NewsBlackoutCfg, dest: Path, now_ms: int, opener=None) -> Calenda
     return cal
 
 
+_CACHE: dict[str, tuple[tuple[int, int], Calendar | None]] = {}
+
+
 def load(path: Path) -> Calendar | None:
-    """The stored calendar, or None when there is none or it cannot be read (= not fresh)."""
+    """The stored calendar, or None when there is none or it cannot be read (= not fresh). Parsed once per file
+    version (modification time + size): the engine asks every 2 s."""
     try:
+        st = path.stat()
+        key = (st.st_mtime_ns, st.st_size)
+        hit = _CACHE.get(str(path))
+        if hit is not None and hit[0] == key:
+            return hit[1]
         doc = json.loads(path.read_text(encoding="utf-8"))
-        if doc.get("version") != FILE_VERSION:
-            return None
-        events = tuple(Event(int(t), str(ti), str(c), str(im)) for t, ti, c, im in doc["events"])
-        return Calendar(int(doc["fetched_ms"]), str(doc.get("source_url") or ""), events)
+        cal = None
+        if doc.get("version") == FILE_VERSION:
+            events = tuple(Event(int(t), str(ti), str(c), str(im)) for t, ti, c, im in doc["events"])
+            cal = Calendar(int(doc["fetched_ms"]), str(doc.get("source_url") or ""), events)
+        _CACHE[str(path)] = (key, cal)
+        return cal
     except (OSError, ValueError, KeyError, TypeError):
         return None
 

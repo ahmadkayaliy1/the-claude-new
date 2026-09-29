@@ -416,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
         if not a.print and not a.out and not a.json:
             raise Invalid("say where: --print, --out FILE or --json FILE")
         root = Path(a.root) if a.root else None
-        if a.out and root is None and (ROOT / "data" / "instances").exists():
+        if a.out and root is None and any((ROOT / "data").glob("instances/*/app.db")):
             raise Invalid("this checkout runs a system: --print, or --out under data\\reviews (a changed doc blocks "
                           "the next ff-merge)")
         t0 = time.time()

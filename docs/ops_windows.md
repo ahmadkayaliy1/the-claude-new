@@ -504,6 +504,13 @@ the tools (monitor, sessions, `tune.py`) read the config at every run, so for th
 | Phase 5: a monitor rule is noisy | `monitor:` → `battery_warn_pct: 0` + `battery_critical_pct: 0` + `on_battery_warn_min: 1440` (battery: no charge rule and no time rule), `commit_warn_pct: 100` (commit charge), `recorder_stall_min: 0` (recorder), `diagnose_max_per_day: 0` (no diagnosis at all) |
 | Phase 5: the daily backup | `backup: {enabled: false}` (the task and `restart_all.bat` then do nothing), or `install_operator_tasks.bat -Uninstall` |
 | Phase 5: the cold-archive disk guard | `storage: {cold_archive_min_free_gb: 0}` |
+| Phase 5 B: no entry call while the minimum lot does not fit | `ai: {skip_entry_calls_when_no_fit: false}` (every trigger calls again, as in checkpoint A) |
+| Phase 5 B: the gold desk's call windows / its shadow mode | `pairs:` → `XAUUSD: {desk: null}` — XAU loses the desk: no windows, no brief, no shadow record; it is gated like any pair again (at ≈ $100 every gold idea is refused by `position_size` / leverage, and the no-fit rule above then keeps it from calling at all) |
+| Phase 5 B: the gold news blackout | `pairs:` → `XAUUSD: {news_blackout: {enabled: false}}` (no calendar download, no `news_blackout` gate check, no `market.news`) |
+| Phase 5 B: the two gold context symbols (EURUSD@, XAGUSD@) | they only record candles and cost the ingest < 1 MB; to drop them restate XAU's whole `instruments:` list under `pairs: {XAUUSD: …}` without the two `cross_context` entries (a list replaces the list), then `stop_all` → `start_all` — `market.cross` then says unavailable |
+
+A `pairs:` switch goes into ONE top-level `pairs:` block of `config.local.yaml` (the pair names under it), not under
+`instances.*.overrides` (an override may not set `pairs`).
 
 Check what is in force with `.venv\Scripts\python.exe -m tradingsystem config` before `restart_all.bat` (the
 "phase 4:" line: adaptive, `TUNING_FREEZE`, notify/toast/Telegram configured, monitor, diagnose, sessions, gauge). A
