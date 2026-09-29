@@ -299,9 +299,9 @@ def main(argv=None) -> int:
             dt.date.fromisoformat(a.until) if a.until else None, a.max_days, progress=lambda m: print(m, flush=True))
     text = render(d)
     if a.out:
-        Path(a.out).write_text(text, encoding="utf-8")
+        Path(a.out).write_text(text, encoding="utf-8", newline="\n")
     if a.json:
-        Path(a.json).write_text(json.dumps(d, indent=1), encoding="utf-8")
+        Path(a.json).write_text(json.dumps(d, indent=1), encoding="utf-8", newline="\n")
     if not a.out:
         print(text)
     return 0

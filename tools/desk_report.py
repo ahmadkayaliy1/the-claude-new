@@ -427,9 +427,9 @@ def main(argv: list[str] | None = None) -> int:
         if a.print:
             print(text)
         if a.out:
-            Path(a.out).write_text(text, encoding="utf-8")
+            Path(a.out).write_text(text, encoding="utf-8", newline="\n")
         if a.json:
-            Path(a.json).write_text(json.dumps(d, indent=1, default=str), encoding="utf-8")
+            Path(a.json).write_text(json.dumps(d, indent=1, default=str), encoding="utf-8", newline="\n")
         return 0
     except Invalid as e:
         print(f"desk_report: {e}", file=sys.stderr)
