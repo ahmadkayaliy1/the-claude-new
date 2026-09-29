@@ -357,3 +357,38 @@ def test_shadow_rows_are_not_errors_or_rejections_in_the_reports(tmp_path, monke
         con.close()
     assert out["rejected"] == 0 and out["by_class"] == {}
     assert "position_size" not in json.dumps(out)                        # the waived check is not a gate rejection
+
+
+@pytest.mark.parametrize("trigger", ["manual", "auto"])
+def test_a_shadow_idea_is_recorded_in_any_trigger_mode_and_after_executor_downtime(tmp_path, monkeypatch, trigger):
+    """Review fix: an XAU idea is gated for the record whatever the trigger mode (nothing is ever sent, so there is no
+    manual approval for it) and also when it was stored while the executor was down (bounded to 24 h); a real pair's
+    candidates are exactly as before."""
+    s = h.settings(tmp_path, desk=True, equity=100_000.0, trigger=trigger)
+    ex = h.make_executor(s, monkeypatch)
+    for pair, did in (("XAUUSD", "1" * 32), ("BTCUSDT", "2" * 32), ("XAUUSD", "3" * 32)):
+        h.store_candidate(ex, pair, h.rec(pair), did, state="not_executed")      # NOW-10 s: before the start
+    con = sqlite3.connect(ex.app_db)
+    con.execute("UPDATE ai_decisions SET ts=? WHERE id=?", (h.NOW - 25 * 3_600_000, "3" * 32))   # beyond 24 h
+    con.commit()
+    con.close()
+    assert [c["id"][:1] for c in ex.candidates()] == ["1"]                     # BTC before the start: not (as before)
+    ex.handle(next(c for c in ex.candidates()))
+    st, det = h.stored(ex, "1" * 32)
+    assert st == "not_executed" and det["shadow"] is True and "gate" in det
+    assert ex.candidates() == []                                                # final once recorded
+
+
+def test_the_model_sees_a_shadow_ideas_verdict_in_its_history(tmp_path, monkeypatch):
+    """Review fix: history[] of a shadow idea says shadow / desk_ok and the failed desk checks as gate_reason (rule 10's
+    feedback), and a plain not_executed row (not picked up yet) says nothing."""
+    s = h.settings(tmp_path, desk=True, equity=100_000.0)
+    ex = h.make_executor(s, monkeypatch)
+    ex.handle(h.store_candidate(ex, "XAUUSD", h.rec("XAUUSD", rr=1.0), "4" * 32))          # RR 1.0 < min_rr
+    ex.handle(h.store_candidate(ex, "XAUUSD", h.rec("XAUUSD", side="SELL"), "5" * 32))
+    h.store_candidate(ex, "XAUUSD", h.rec("XAUUSD"), "6" * 32, state="not_executed")      # not gated yet
+    rows = ex.store.recent("XAUUSD", 10)
+    bad = [x for x in rows if x.get("gate_reason", "").startswith("rr_after_costs")]
+    assert len(bad) == 1 and bad[0]["shadow"] == 1 and bad[0]["desk_ok"] == 0
+    assert any(x.get("shadow") == 1 and x.get("desk_ok") == 1 and "gate_reason" not in x for x in rows)
+    assert sum("shadow" in x for x in rows) == 2                               # the ungated row carries nothing

@@ -150,13 +150,16 @@ class DailyProfiles:
         if self.kv is not None:
             self.kv.kv_set(key, value)
 
-    def _state(self, pair: str, day: dt.date) -> tuple[str, dict | None]:
-        """('valid', profile) | ('miss', None) | ('unknown', None) — a miss older than 6 h is unknown again."""
+    def _state(self, pair: str, day: dt.date, bucket: float) -> tuple[str, dict | None]:
+        """('valid', profile) | ('miss', None) | ('unknown', None) — a miss older than 6 h is unknown again, and so is
+        a profile computed with another price bucket (``footprint_bucket`` changed in the config: recomputed)."""
         v = self._get(self.key(pair, day))
         if v is None:
             return "unknown", None
         if v.get("miss"):
             return ("miss", None) if self._now() - int(v.get("at", 0)) < MISS_RETRY_MS else ("unknown", None)
+        if v.get("bucket") != bucket:
+            return "unknown", None
         return "valid", v
 
     def wait(self, timeout: float = 600.0) -> None:
@@ -174,7 +177,7 @@ class DailyProfiles:
         computed; no profile at all yet → ``data_quality: pending``."""
         rows, pending, todo = [], 0, []
         for day in candidate_days(as_of):
-            st, v = self._state(pair, day)
+            st, v = self._state(pair, day, bucket)
             if st == "valid":
                 rows.append([day.isoformat(), round(v["poc"], d), round(v["vah"], d), round(v["val"], d)])
                 if len(rows) == PROFILE_DAYS:
@@ -218,14 +221,14 @@ class DailyProfiles:
             for day in cands:
                 if have >= PROFILE_DAYS:
                     break
-                if self._state(pair, day)[0] == "unknown":
+                if self._state(pair, day, bucket)[0] == "unknown":
                     try:
                         res = (profile_1m_tick_volume if approx else profile_agg_trades)(reader, inst, day, bucket)
                     except Exception as e:  # noqa: BLE001 — a failed day is a miss; the next hour retries it
                         log.warning("daily profile %s %s failed: %r", pair, day, e)
                         res = None
-                    self._put(self.key(pair, day), res if res else {"miss": True, "at": self._now()})
-                have += self._state(pair, day)[0] == "valid"
+                    self._put(self.key(pair, day), {**res, "bucket": bucket} if res else {"miss": True, "at": self._now()})
+                have += self._state(pair, day, bucket)[0] == "valid"
                 try:                                 # give the day's decode buffers back to the OS (RAM is tight)
                     import pyarrow as pa
                     pa.default_memory_pool().release_unused()

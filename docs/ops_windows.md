@@ -505,7 +505,7 @@ the tools (monitor, sessions, `tune.py`) read the config at every run, so for th
 | Phase 5: the daily backup | `backup: {enabled: false}` (the task and `restart_all.bat` then do nothing), or `install_operator_tasks.bat -Uninstall` |
 | Phase 5: the cold-archive disk guard | `storage: {cold_archive_min_free_gb: 0}` |
 | Phase 5 B: no entry call while the minimum lot does not fit | `ai: {skip_entry_calls_when_no_fit: false}` (every trigger calls again, as in checkpoint A) |
-| Phase 5 B: the gold desk's call windows / its shadow mode | `pairs:` → `XAUUSD: {desk: null}` — XAU loses the desk: no windows, no brief, no shadow record; it is gated like any pair again (at ≈ $100 every gold idea is refused by `position_size` / leverage, and the no-fit rule above then keeps it from calling at all) |
+| Phase 5 B: the gold desk's call windows / its shadow mode | `pairs:` → `XAUUSD: {desk: null}` — XAU loses the desk: no windows, no brief, no shadow record; it is gated like any pair again (at ≈ $100 every gold idea is refused by `position_size` / leverage, and the no-fit rule above then keeps it from calling at all). The gold field notes (`desks/xauusd_fields`) stay in XAU's prompt while its payload still carries `market.news` or the cross votes; the review sessions read the desk mode from the pack |
 | Phase 5 B: the gold news blackout | `pairs:` → `XAUUSD: {news_blackout: {enabled: false}}` (no calendar download, no `news_blackout` gate check, no `market.news`) |
 | Phase 5 B: the two gold context symbols (EURUSD@, XAGUSD@) | they only record candles and cost the ingest < 1 MB; to drop them restate XAU's whole `instruments:` list under `pairs: {XAUUSD: …}` without the two `cross_context` entries (a list replaces the list), then `stop_all` → `start_all` — `market.cross` then says unavailable |
 
@@ -518,8 +518,19 @@ Check what is in force with `.venv\Scripts\python.exe -m tradingsystem config` b
 a line in `logs\monitor-config-error.log` / `logs\operator-session-config-error.log` and a toast; `check_ops.bat`
 points there.
 
+**Going back to checkpoint A (`0de05ab`, the code before Phase 5 checkpoint B):** while checkpoint B still runs,
+remove every checkpoint-B key from `config\config.local.yaml` — `ai:` `skip_entry_calls_when_no_fit`, and under a
+`pairs:` block `desk` (a `desk: null` line too), `news_blackout`, and any restated `instruments:` list that holds a
+`cross_context` entry (the same keys under `instances.*.overrides`) — checkpoint A refuses every key it does not know,
+even with the value null. Then `scripts\stop_all.bat`, `git checkout 0de05ab` (or `git reset --hard 0de05ab` on
+`main`), `.venv\Scripts\python.exe -m tradingsystem config` (must succeed; it names any key still refused),
+`scripts\start_all.bat`. Nothing else: checkpoint A ignores the new files (`data\shared\news_calendar.json`,
+`data\hot\mt5\EURUSD.db` / `XAGUSD.db`) and the new `execution_detail` fields of stored XAU ideas; the older executor
+never picks up a stored shadow idea (in auto mode it takes only rows stored after its own start, and every shadow idea
+is older than that).
+
 **Going back to the code before Phase 5:** see §9.7 (uninstall the two new tasks, remove every Phase 5 key from
-`config.local.yaml`, put `diagnose_enabled: false` back).
+`config.local.yaml` — checkpoint A's and checkpoint B's —, put `diagnose_enabled: false` back).
 
 **Going back to the code before Phase 4:** first run `scripts\install_operator_tasks.bat -Uninstall` (the older code
 has no monitor or session runner), then remove every Phase 4 key from `config\config.local.yaml` (`ai.usage`,
@@ -683,7 +694,9 @@ creating the STOP file is enough to keep the recorder down.
    - `ai:` `skip_closed_market`, `transient_retry_s`, `quota_reserve_share`, `quota_reserve_hours_utc`;
    - `monitor:` `battery_warn_pct`, `battery_critical_pct`, `on_battery_warn_min`, `commit_warn_pct`,
      `recorder_stall_min`, `diagnose_max_per_day`, `diagnose_max_gauge_level`;
-   - `storage:` `cold_archive_min_free_gb`.
+   - `storage:` `cold_archive_min_free_gb`;
+   - checkpoint B: `ai:` `skip_entry_calls_when_no_fit`, and under `pairs:` `desk` (also a `desk: null` line),
+     `news_blackout` and any restated `instruments:` list with a `cross_context` entry.
 
    Then **put `diagnose_enabled: false` back into the `monitor:` block**: Phase 4 has no diagnosis budget, and its
    monitor would start a billed Claude diagnosis for every warning (up to one every 3 h) on the shared plan.

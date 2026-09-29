@@ -12,6 +12,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 from functools import lru_cache
@@ -867,6 +868,8 @@ def _check_risk_tightens(instance: str, base_risk: dict[str, Any], override: Any
                              "for it) — change it globally")
         if isinstance(val, bool) or not isinstance(val, (int, float)):
             raise ValueError(f"{where}.{key}: {val!r} is not a number")
+        if not math.isfinite(val):                     # .nan compares False both ways: it would pass as "tighter"
+            raise ValueError(f"{where}.{key}: {val!r} is not finite")
         cur = getattr(base, key)
         if (val > cur) if direction == "down" else (val < cur):
             raise ValueError(f"{where}.{key}: {val} would loosen the limit {cur} (an instance may only "

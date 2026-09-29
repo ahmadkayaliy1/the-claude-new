@@ -438,15 +438,24 @@ def forming_reader(cols, inst, as_of: int, close_delta: float = 1.5, tfs=("5m", 
     return r
 
 
+def forming_payload(cols, as_of: int, close_delta: float = 1.5, tfs=("5m", "1h")) -> dict:
+    """The payload's ``timeframes.<tf>.forming`` rows for the bars containing ``as_of`` (hand-built values around the
+    last real close) - what the model reads, and what the chart must draw."""
+    last = float(cols["close"][-1])
+    return {"timeframes": {t: {"forming": [iso(Timeframe.parse(t).floor(as_of)), last, last + 40.0, last - 25.0,
+                                           last + close_delta, 0.5, 5]} for t in tfs}}
+
+
 def test_the_5m_chart_draws_the_forming_bar_and_only_the_5m_chart(monkeypatch, cols, inst):
-    """B3: a hollow candle after the last closed bar on the 5m chart; the 1h chart is byte-identical with or without
-    a forming row and keeps its cache while the forming bar moves."""
+    """B3: a hollow candle after the last closed bar on the 5m chart, taken from the payload the model reads (never a
+    second read of the live table - review fix); the 1h chart is byte-identical with or without one and keeps its
+    cache while the forming bar moves."""
     calls = counting(monkeypatch)
     as_of = M5.floor(int(cols["open_time"][-1]) + MS_PER_MINUTE) + 5_000
     c = cfg(timeframes=["1h", "5m"], overlays=[])
     plain = ChartRenderer(c).render_set(FakeReader(cols, inst), inst, as_of, {})
     r = ChartRenderer(c)
-    rich = r.render_set(forming_reader(cols, inst, as_of), inst, as_of, {})
+    rich = r.render_set(FakeReader(cols, inst), inst, as_of, forming_payload(cols, as_of))
     assert [i.tf for i in rich] == ["1h", "5m"]
     assert rich[0].png == plain[0].png                                        # 1h: closed bars only
     assert rich[1].png != plain[1].png and calls[-1]["forming"]["close"] > 0   # 5m: the hollow bar is drawn
@@ -454,14 +463,17 @@ def test_the_5m_chart_draws_the_forming_bar_and_only_the_5m_chart(monkeypatch, c
     assert (rich[1].width, rich[1].height) == (W, H)
 
     n = len(calls)
-    r.render_set(forming_reader(cols, inst, as_of), inst, as_of, {})            # same forming values: both cached
+    r.render_set(FakeReader(cols, inst), inst, as_of, forming_payload(cols, as_of))   # same values: both cached
     assert len(calls) == n
-    moved = r.render_set(forming_reader(cols, inst, as_of, close_delta=-9.0), inst, as_of, {})
+    moved = r.render_set(FakeReader(cols, inst), inst, as_of, forming_payload(cols, as_of, close_delta=-9.0))
     assert [k["tf"] for k in calls[n:]] == ["5m"]                               # only the 5m chart follows its bar
     assert moved[0].png == plain[0].png and moved[1].png != rich[1].png
-    # a forming row of a replayed past instant is another bar: ignored, the chart is the plain one
-    old = ChartRenderer(c).render_set(forming_reader(cols, inst, as_of - 10 * 300_000), inst, as_of, {})
+    # a payload row of another bar (a replayed past instant) is ignored, and so is the live table's own row
+    old = ChartRenderer(c).render_set(FakeReader(cols, inst), inst, as_of,
+                                      forming_payload(cols, as_of - 10 * 300_000))
     assert old[1].png == plain[1].png
+    live_only = ChartRenderer(c).render_set(forming_reader(cols, inst, as_of), inst, as_of, {})
+    assert live_only[1].png == plain[1].png
 
 
 def test_the_forming_bar_is_drawn_inside_the_price_band_and_leaves_the_last_close_line(cols):

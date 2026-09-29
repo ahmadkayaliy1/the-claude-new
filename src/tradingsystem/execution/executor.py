@@ -58,6 +58,7 @@ log = logging.getLogger("executor")
 # risk-gate checks a shadow idea is not held to (D-049): the account cannot carry the 1-oz minimum while the model is
 # asked for the trade a professional would take; ``desk_ok`` = every OTHER check passed
 DESK_WAIVED_CHECKS = ("position_size", "effective_leverage")
+SHADOW_BACKLOG_MS = 24 * 3_600_000   # a shadow idea stored while the executor was down is still recorded this long
 STOPS_LEVEL_PRICE = {"XAUUSD@": 0.25, "BTCUSD@": 25.0, "ETHUSD@": 2.0}   # P1.5 (stops_level × point); MT5 backend reads live
 MT5_SETTLE_MS = 3_000          # after an MT5 placement, before the next candidate is gated (broker listing lag)
 SETTLE_LOOKBACK_DAYS = 45      # executed decisions older than this are no longer polled for their outcome
@@ -341,14 +342,20 @@ class Executor:
         con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True)
         try:
             states = ("queued",) if self.s.execution.trigger == "manual" else ("queued", "not_executed")
+            # D-049: a shadow desk's idea is recorded whatever the trigger mode (nothing is ever sent, so there is no
+            # manual approval for it) and also when it was stored while the executor was down (it is gated for the
+            # record: an old idea fails its age check and is stored desk_ok false - never silently missing)
+            shadow = sorted(self.shadow_pairs & set(self.s.enabled_pairs()))
+            shadow_sql = (f" OR (execution_state='not_executed' AND pair IN ({','.join('?' * len(shadow))}) "
+                          f"AND ts >= ?)") if shadow else ""
             rows = con.execute(
                 f"SELECT id, ts, pair, recommendation, execution_state FROM ai_decisions WHERE status='valid' "
-                f"AND decision IN ('BUY','SELL') AND execution_state IN ({','.join('?' * len(states))}) "
-                f"AND (execution_state='queued' OR ts >= ?) "
+                f"AND decision IN ('BUY','SELL') AND ((execution_state IN ({','.join('?' * len(states))}) "
+                f"AND (execution_state='queued' OR ts >= ?)){shadow_sql}) "
                 # a shadow idea is final once stored (D-049): never picked up again, whatever the trigger mode
                 f"AND (execution_detail IS NULL OR NOT json_valid(execution_detail) "
                 f"OR json_extract(execution_detail, '$.{SHADOW_KEY}') IS NULL) ORDER BY ts",
-                (*states, self.started)).fetchall()
+                (*states, self.started, *((*shadow, now_ms() - SHADOW_BACKLOG_MS) if shadow else ()))).fetchall()
         finally:
             con.close()
         return [{"id": r[0], "ts": r[1], "pair": r[2], "rec": json.loads(r[3]), "state": r[4]} for r in rows]

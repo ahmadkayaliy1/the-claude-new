@@ -45,6 +45,7 @@ from .budget import CostGovernor, RateLimiter, UsageStore
 from .contract import (AssessmentSet, Decision, EscalationReview, Recommendation, RecommendationSet, RiskReview,
                        TimeframeAssessment)
 from .model_view import view
+from .prompts import DIR as PROMPTS_DIR
 from .prompts import library_hash, render
 from .providers import LLMProvider, ProviderError, make_provider
 from .providers.base import ImageInput
@@ -238,13 +239,23 @@ class Orchestrator:
                 "charts_note": NO_CHARTS, "playbook": tn.playbook or NO_PLAYBOOK, "tp_hint": tn.tp_hint or NO_TP_HINT,
                 **extra}
 
-    def _brief(self, pair: str | None) -> str | None:
-        """The desk brief appended to a desk pair's trader, reviewer and escalation prompts (B18, D-049); None for a
-        pair without a desk (its prompts stay byte-identical)."""
-        desk = self.s.pairs[pair].desk if pair in self.s.pairs else None
-        return (desk.brief or None) if desk is not None else None
+    def _brief(self, pair: str | None) -> tuple[str, ...]:
+        """What is appended to a pair's trader, reviewer and escalation prompts (B18, D-049): the desk brief of a desk
+        pair, and the pair's own field notes (``desks/<pair>_fields``: the legend of its pair-only payload blocks) while
+        its payload can carry them - a desk, a news blackout or context instruments - so turning the desk off never
+        leaves `market.news` or the cross votes without their legend. Empty for BTC/ETH (byte-identical prompts)."""
+        pcfg = self.s.pairs.get(pair) if pair else None
+        if pcfg is None:
+            return ()
+        out = [pcfg.desk.brief] if pcfg.desk is not None and pcfg.desk.brief else []
+        fields = f"desks/{pair.lower()}_fields"
+        if (PROMPTS_DIR / f"{fields}.md").is_file() and (
+                pcfg.desk is not None or pcfg.news_blackout.enabled
+                or any("cross_context" in i.roles for i in pcfg.instruments)):
+            out.append(fields)
+        return tuple(out)
 
-    def _render(self, role: str, system_vars: dict, user_vars: dict, appendix: str | None = None):
+    def _render(self, role: str, system_vars: dict, user_vars: dict, appendix: tuple[str, ...] | str | None = None):
         """Render a role and register the prompt versions it used (``prompt_versions``; never fails the cycle)."""
         pr = render(role, system_vars, user_vars, appendix=appendix)
         try:

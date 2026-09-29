@@ -675,6 +675,12 @@ class SnapshotBuilder:
                 window = desk_state_text(pcfg.desk, as_of, exec_cal, pair, desk_news_reason(news_st))
                 payload["market"]["gold_clock"] = clock_block(as_of, m15.open_time, m15.high, m15.low, m15.close, tf_ms,
                                                               hist.get("gold") or {}, window, d)
+                # ONE Asia range for the desk: levels.asia_* (drawn on the charts) become the gold clock's 00-07 UTC
+                # range the sweep and its base rate are measured against, not the Tokyo 09-15 hours of the others
+                ar = payload["market"]["gold_clock"].get("asia_range") or {}
+                if ar.get("high") is not None and ar.get("low") is not None:
+                    lv = payload.setdefault("levels", {})
+                    lv["asia_high"], lv["asia_low"] = ar["high"], ar["low"]
                 ap = payload["market"].get("analysis_price") or {}
                 px = _mid(ap) or ap.get("last_close_1m") or m15.last_close
                 atr = ((tf15 or {}).get("indicators") or {}).get("atr14") or dec_atr

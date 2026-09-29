@@ -327,13 +327,16 @@ def collect(pair: str = "XAUUSD", root: Path | None = None, since: int | None = 
                "passes": bool(so["resolved"] >= MIN_IDEAS and so["expectancy_r"] is not None and so["expectancy_r"] > 0
                               and ref is not None and so["expectancy_r"] >= ref + EDGE_MARGIN_R)}
     by_window: dict[str, list] = {}
+    by_session: dict[str, list] = {}
     for r in shadow:
         by_window.setdefault(r.get("window") or "?", []).append(r)
+        by_session.setdefault(r.get("session") or "?", []).append(r)
     m1 = [r for r in rows if r["desk_ok"] is not None]
     return {"pair": pair, "generated": iso(now), "window": {"since": iso(since) if since else "all", "until": iso(until)},
             "data_root": str(s.paths.data()), "ideas": rows, "shadow": summary(shadow), "desk_ok": so,
             "not_desk_ok": summary([r for r in shadow if r["desk_ok"] is False]),
             "by_window": {k: summary(v) for k, v in sorted(by_window.items())},
+            "by_session": {k: summary(v) for k, v in sorted(by_session.items())},
             "m1": {"regated": len(m1), "desk_ok": sum(1 for r in m1 if r["desk_ok"]),
                    "failed_checks": _count([c for r in m1 for c in r["desk_failed"]])},
             "m4_calls_per_day": cpd, "baseline": base, "verdict": verdict}
@@ -364,16 +367,17 @@ def render(d: dict[str, Any]) -> str:
          "## Shadow ideas", "",
          "| | n | resolved | expectancy R (net) | TP1 first | median min | MFE R | MAE R |", "|---|---|---|---|---|---|---|---|"]
     for name, x in (("all shadow", d["shadow"]), ("desk_ok", so), ("not desk_ok", d["not_desk_ok"]),
-                    *[(f"window {k}", x) for k, x in d["by_window"].items()]):
+                    *[(f"window {k}", x) for k, x in d["by_window"].items()],
+                    *[(f"session {k}", x) for k, x in d.get("by_session", {}).items()]):
         L.append(f"| {name} | {x['n']} | {x['resolved']} | {_f(x['expectancy_r'], 3)} | {_f(x['tp_first_share'], 3)} | "
                  f"{_f(x['median_minutes'])} | {_f(x['mfe_r_mean'], 3)} | {_f(x['mae_r_mean'], 3)} |")
     L += ["", "Per idea (R net = the virtual R minus the spread at the gate over the stop):", "",
-          "| id | time | side | stop | shadow | desk_ok | failed (not waived) | outcome | R | R net | window |",
-          "|---|---|---|---|---|---|---|---|---|---|---|"]
+          "| id | time | side | stop | shadow | desk_ok | failed (not waived) | outcome | R | R net | window | session |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in d["ideas"][-60:]:
         L.append(f"| {r['id']} | {r['ts'][:16]} | {r['decision']} | {_f(r['stop'])} | {int(r['shadow'])} | "
                  f"{_f(r['desk_ok'])} | {', '.join(r['desk_failed']) or '–'} | {r['virtual_outcome'] or '–'} | "
-                 f"{_f(r['r'], 3)} | {_f(r['r_net'], 3)} | {r['window'] or '–'} |")
+                 f"{_f(r['r'], 3)} | {_f(r['r_net'], 3)} | {r['window'] or '–'} | {r.get('session') or '–'} |")
     m1 = d["m1"]
     L += ["", f"## M1 — every stored {d['pair']} BUY/SELL re-gated with the desk rules", "",
           f"{m1['regated']} ideas with a gate record; desk_ok {m1['desk_ok']}; failed checks (not waived): "
@@ -400,6 +404,18 @@ def render(d: dict[str, Any]) -> str:
     return "\n".join(L) + "\n"
 
 
+def _in_running_checkout(out: Path) -> bool:
+    """``out`` lies in a git checkout whose data root holds a system's app.db (production) and not under its
+    ``data/reviews`` (a changed tracked doc there would block the next ``git merge --ff-only``)."""
+    p = out.resolve()
+    for top in p.parents:
+        if (top / ".git").exists():
+            if not any((top / "data").glob("instances/*/app.db")):
+                return False
+            return not p.is_relative_to(top / "data" / "reviews")
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--pair", default="XAUUSD")
@@ -416,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         if not a.print and not a.out and not a.json:
             raise Invalid("say where: --print, --out FILE or --json FILE")
         root = Path(a.root) if a.root else None
-        if a.out and root is None and any((ROOT / "data").glob("instances/*/app.db")):
+        if a.out and _in_running_checkout(Path(a.out)):
             raise Invalid("this checkout runs a system: --print, or --out under data\\reviews (a changed doc blocks "
                           "the next ff-merge)")
         t0 = time.time()

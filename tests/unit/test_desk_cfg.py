@@ -167,3 +167,11 @@ def test_the_committed_config_loads_in_every_view():
     for inst in ("", "BTCUSDT", "ETHUSDT", "XAUUSD"):
         s = load_settings(DEFAULT_CONFIG, env_path=ENV, extra_env={"TS_INSTANCE": inst})
         assert s.pairs["XAUUSD"].desk.mode == "shadow"
+
+
+@pytest.mark.parametrize("value", [".nan", ".NaN", ".inf", "-.inf"])
+def test_a_non_finite_risk_override_is_refused(tmp_path, value):
+    """Review fix: NaN compares False both ways, so it passed the direction check and removed the ATR stop floor
+    (max(stops+spread, nan) keeps the first argument); infinities are no tightening either."""
+    with pytest.raises(Exception, match="finite"):
+        load(tmp_path, f"instances:\n  XAUUSD:\n    overrides:\n      risk: {{sl_atr_min_mult: {value}}}\n")

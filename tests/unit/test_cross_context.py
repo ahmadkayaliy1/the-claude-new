@@ -404,8 +404,18 @@ def test_the_backfill_schedules_no_tick_work_for_context_instruments(env):
 
 
 def test_no_decision_gate_or_executor_code_reads_the_context_instruments():
+    """The context instruments and market.cross never feed a trigger, the gate or the executor. The orchestrator names
+    the role only to attach the gold field notes to the prompt (Orchestrator._brief) and never reads the data."""
+    import ast
     src = Path(__file__).resolve().parents[2] / "src" / "tradingsystem"
     for rel in ("execution", "ai/triggers.py", "ai/orchestrator.py"):
         for p in ([src / rel] if rel.endswith(".py") else sorted((src / rel).rglob("*.py"))):
             text = p.read_text(encoding="utf-8")
-            assert "cross_context" not in text and "market.get(\"cross\")" not in text, p
+            assert "market.get(\"cross\")" not in text and "[\"cross\"]" not in text, p
+            if p.name == "orchestrator.py":
+                tree = ast.parse(text)
+                brief = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_brief")
+                outside = text.replace(ast.get_source_segment(text, brief), "")
+                assert "cross_context" not in outside, p
+            else:
+                assert "cross_context" not in text, p

@@ -43,7 +43,7 @@ from ..core.timeframes import Timeframe
 from ..core.timeutil import from_ms, iso, parse_date_spec
 from ..storage.reader import InstrumentReader
 from . import indicators as ind
-from .frames import Frame, forming_bar, load_frame
+from .frames import Frame, load_frame
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +67,24 @@ ENTRY_COLOR, SL_COLOR, TP_COLOR = "#212121", "#d50000", "#00a152"
 EVENT_MARKERS = {"BOS": "^", "CHoCH": "D", "sweep": "x"}
 
 _RENDER_LOCK = threading.Lock()
+
+
+def payload_forming(payload: dict, tf: str) -> dict | None:
+    """The bar in progress exactly as the payload the model reads carries it (``timeframes.<tf>.forming`` =
+    ``[open_time, o, h, l, c, v, age_s]``), never a second read of the live table: the chart and the text must show the
+    same bar. None when the payload has none."""
+    try:
+        row = ((payload.get("timeframes") or {}).get(tf) or {}).get("forming")
+        if not isinstance(row, (list, tuple)) or len(row) < 5:
+            return None
+        o, h, lo, c = (float(x) for x in row[1:5])
+        if not all(np.isfinite([o, h, lo, c])):
+            return None
+        return {"open_time": parse_date_spec(row[0]), "open": o, "high": h, "low": lo, "close": c,
+                "volume": float(row[5]) if len(row) > 5 and row[5] is not None else None,
+                "age_s": float(row[6]) if len(row) > 6 and row[6] is not None else None}
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------------------------------------- API types
@@ -213,7 +231,7 @@ def _mpl():
 def render_png(frame: Frame, tf: str, spec: dict, *, width: int, height: int, title: str, warmup: int = 0,
                forming: dict | None = None) -> bytes:
     """One chart as PNG bytes. The first ``warmup`` bars of ``frame`` only warm the EMAs up; the rest is drawn.
-    ``tf`` is informational (the overlay ``spec`` was already extracted for it). ``forming`` (``frames.forming_bar``)
+    ``tf`` is informational (the overlay ``spec`` was already extracted for it). ``forming`` (:func:`payload_forming`)
     adds the bar in progress as a hollow candle after the last closed one - drawn only, never analysed."""
     n_all = len(frame)
     warmup = max(0, min(int(warmup), n_all - 1))
@@ -517,7 +535,10 @@ class ChartRenderer:
         self._logged -= {k for k in self._logged if k[:2] == where and k[2] != "write"}   # recovered: log a relapse
         last_open = int(fr.open_time[-1])
         # the 15m / 1h / ... charts are keyed by closed bars alone; only the 5m chart also follows its bar in progress
-        fb = forming_bar(fr) if tf in FORMING_CHART_TFS else None
+        # (the payload's own reading - the bar right after the last closed one - so the chart and the text agree)
+        fb = payload_forming(payload, tf) if tf in FORMING_CHART_TFS else None
+        if fb is not None and fb["open_time"] != last_open + tfo.ms:
+            fb = None
         key = spec_hash({"spec": spec, "bars": drawn, "first": int(fr.open_time[-drawn]), "w": self.cfg.width,
                          "h": self.cfg.height, **({"forming": fb} if fb else {})})
         hit = self._cache.get(where)

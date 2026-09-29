@@ -613,9 +613,21 @@ def test_a_miss_is_retried_after_six_hours_and_a_day_is_complete_only_ten_minute
     kv = KV()
     kv.kv_set("dprofile1:BTCUSDT:2026-09-20", {"miss": True, "at": now[0]})
     c = dpf.DailyProfiles(Path("."), 4, kv, now=lambda: now[0])
-    assert c._state("BTCUSDT", dt.date(2026, 9, 20))[0] == "miss"
+    assert c._state("BTCUSDT", dt.date(2026, 9, 20), 10.0)[0] == "miss"
     now[0] += 6 * H + 1
-    assert c._state("BTCUSDT", dt.date(2026, 9, 20))[0] == "unknown"
+    assert c._state("BTCUSDT", dt.date(2026, 9, 20), 10.0)[0] == "unknown"
+
+
+def test_a_profile_of_another_price_bucket_is_computed_again():
+    """Review fix: the cached POC/VAH/VAL were computed with the bucket they carry; after a footprint_bucket change
+    the day is unknown again (never shown under the new bucket's label)."""
+    kv = KV()
+    kv.kv_set("dprofile1:BTCUSDT:2026-09-28", {"poc": 83000.0, "vah": 83600.0, "val": 82820.0, "bucket": 10.0})
+    c = dpf.DailyProfiles(Path("."), 4, kv, now=lambda: ms(2026, 9, 29, 12))
+    assert c._state("BTCUSDT", dt.date(2026, 9, 28), 10.0)[0] == "valid"
+    assert c._state("BTCUSDT", dt.date(2026, 9, 28), 5.0)[0] == "unknown"
+    kv.kv_set("dprofile1:BTCUSDT:2026-09-27", {"poc": 1.0, "vah": 2.0, "val": 0.5})       # no bucket recorded
+    assert c._state("BTCUSDT", dt.date(2026, 9, 27), 10.0)[0] == "unknown"
 
 
 def test_the_profile_worker_never_raises_a_failing_day_is_a_logged_miss(env, monkeypatch):
@@ -723,6 +735,9 @@ def test_the_builder_adds_session_stats_for_every_pair_and_the_gold_blocks_only_
     ot, o, h, lo, c = arrays15("XAUUSD")
     hist = gclock.gold_history(ot, o, h, lo, c, M15.ms, DAY0_REAL)
     assert gc_["london_asia_sweep_days"] == hist["sweep"] and gc_["asia_range"]["complete"] is True
+    # review fix: ONE Asia range for the desk - levels.asia_* (drawn on the charts) are the gold clock's 00-07 UTC
+    assert (xau["levels"]["asia_high"], xau["levels"]["asia_low"]) == (gc_["asia_range"]["high"], gc_["asia_range"]["low"])
+    assert "gold_clock" not in btc["market"]                                             # BTC: no desk, no gold clock
     assert gc_["asia_range"]["width_x_median"] == round(gc_["asia_range"]["width"] / hist["asia_width_median"], 2)
     pcfg = env.s.pairs["XAUUSD"]
     execu = env.reg.with_role("XAUUSD", "execution")[0]
@@ -857,7 +872,7 @@ def test_the_legend_explains_every_new_field_in_place_without_a_version_bump():
             / "payload_legend.md").read_text(encoding="utf-8")
     assert text.startswith("<!-- prompt: shared/payload_legend · version 5 -->")
     gold = (Path(__file__).resolve().parents[1].parent / "src" / "tradingsystem" / "ai" / "prompts" / "desks"
-            / "xau.md").read_text(encoding="utf-8")                  # the gold-only fields: the XAU appendix (B18)
+            / "xauusd_fields.md").read_text(encoding="utf-8")                  # the gold-only fields: the XAU appendix (B18)
     for name in ("orderflow.daily_profiles", "market.session_stats", "pending"):
         assert name in text, name
     for name in ("market.gold_clock", "london_swept", "london_asia_sweep_days", "levels.round", "desk_window",

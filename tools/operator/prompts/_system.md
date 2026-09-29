@@ -20,9 +20,10 @@ exit reason, slippage, spread). You review that record.
 * Name stop limits correctly: the venue's own minimum is `stops_level`; `min_stop_distance` is the SYSTEM's floor and
   `min_stop_set_by` names its rule (`system_atr_floor`, `system_spread_rule` or `venue_stops_plus_spread`).
   `account.min_position_risk.fits_now` says whether the minimum lot fits the risk and leverage caps at all.
-* XAUUSD is a gold desk in SHADOW (D-049): its trade ideas are gated in full and scored in R but never sent to the
-  broker - `not_executed` with `shadow` / `desk_ok` is by design, and its entry calls happen only inside the London and
-  New York desk windows.
+* A pair whose pack section has `desk: {mode: shadow}` (XAUUSD while `pairs.XAUUSD.desk` is set, D-049) is in SHADOW: its
+  trade ideas are gated in full and scored in R but never sent to the broker - `not_executed` with `shadow` / `desk_ok`
+  is by design, and its entry calls happen only inside the London and New York desk windows. Without a desk it is an
+  ordinary pair again.
 
 # Bounded autonomy (D-039)
 
@@ -104,7 +105,8 @@ structure, what failed and why); they may never talk about risk, lot size, lever
 limit, the kill switch, minimum RR, confidence numbers from 80 up, or tell the trader to ignore/override anything or to
 always trade - the lint refuses such text (prices and indicator periods near the word are fine: "95k", "the 80
 EMA"; `--dry-run` checks the lint without writing). Write the playbook as short bullet lines inside one single-quoted `--text`
-argument (real line breaks).
+argument on ONE line, like a proposal body: the permission rule refuses real line breaks, so write the two characters
+backslash and n between the bullets (`tools/tune.py` turns them into line breaks).
 
 # tools/propose.py - everything else
 

@@ -142,6 +142,11 @@ def fetch(cfg: NewsBlackoutCfg, dest: Path, now_ms: int, opener=None) -> Calenda
         raise ValueError("the calendar feed is larger than expected")
     events = parse_feed(raw)
     cal = Calendar(now_ms, cfg.source_url, tuple(events))
+    lo, hi = cal.week()
+    if not any(lo <= e.time_ms < hi for e in events):
+        # an empty list or another week's (a cached copy at the week's roll): keep the previous file - it is either
+        # still this week's (the blackout goes on) or already stale (it says so); the fetcher retries in 15 min
+        raise ValueError(f"the calendar feed holds no event of the week {iso(lo)} to {iso(hi)}")
     doc = {"version": FILE_VERSION, "fetched_ms": now_ms, "fetched": iso(now_ms), "source_url": cfg.source_url,
            "events": [[e.time_ms, e.title, e.country, e.impact] for e in events]}
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -173,12 +178,12 @@ def load(path: Path) -> Calendar | None:
             return hit[1]
         doc = json.loads(path.read_text(encoding="utf-8"))
         cal = None
-        if doc.get("version") == FILE_VERSION:
+        if isinstance(doc, dict) and doc.get("version") == FILE_VERSION:   # anything else: not a calendar file
             events = tuple(Event(int(t), str(ti), str(c), str(im)) for t, ti, c, im in doc["events"])
             cal = Calendar(int(doc["fetched_ms"]), str(doc.get("source_url") or ""), events)
         _CACHE[str(path)] = (key, cal)
         return cal
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
 

@@ -147,10 +147,41 @@ def test_freshness_is_the_fetch_week_and_24_hours(tmp_path):
     cal2 = news.load(news.calendar_path(stored(tmp_path / "b", fetched=sat_late)))
     assert news.state_at(GOLD, cal2, sat_late + 30 * MIN).fresh
     assert not news.state_at(GOLD, cal2, sat_late + 90 * MIN).fresh
-    # a download just after the week rolled that still serves last week's list is not fresh
-    cal3 = news.load(news.calendar_path(stored(tmp_path / "c", fetched=sat_late + 90 * MIN)))
-    assert not news.state_at(GOLD, cal3, sat_late + 95 * MIN).fresh
+    # a download just after the week rolled that still serves last week's list is refused (review fix): the previous
+    # file stays - here last week's, which is already stale at the new week
+    shared_b = tmp_path / "b" / "shared"
+    with pytest.raises(ValueError, match="no event of the week"):
+        news.fetch(GOLD, news.calendar_path(shared_b), sat_late + 90 * MIN, opener=opener())
+    assert news.load(news.calendar_path(shared_b)).fetched_ms == sat_late
+    assert not news.state_now(GOLD, shared_b, sat_late + 95 * MIN).fresh
     assert not news.state_at(GOLD, None, FETCHED).fresh
+
+
+def test_an_empty_download_keeps_this_weeks_blackout(tmp_path):
+    """Review fix: a feed answering `[]` mid-week must not replace a fresh calendar (the Core PCE blackout stays)."""
+    shared = stored(tmp_path, fetched=PCE - 120 * MIN)
+    with pytest.raises(ValueError, match="no event of the week"):
+        news.fetch(GOLD, news.calendar_path(shared), PCE - 60 * MIN, opener=opener(b"[]"))
+    st = news.state_now(GOLD, shared, PCE)
+    assert st.fresh and st.blocked and news.gate_check(st)[0] is False
+
+
+@pytest.mark.parametrize("content", ["[]", "null", '"text"', "3"])
+def test_a_file_that_is_not_a_calendar_object_is_stale_and_the_fetcher_replaces_it(tmp_path, content):
+    """Review fix: valid JSON that is not an object never raises (the engine asks every 2 s) and a download is due."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    news.calendar_path(shared).write_text(content, encoding="utf-8")
+    assert news.load(news.calendar_path(shared)) is None
+    f = news.Fetcher(GOLD, shared)
+    assert f.due(FETCHED)
+    real = news.fetch
+    try:
+        news.fetch = lambda cfg, dest, now, opener_=None: real(cfg, dest, now, opener=opener())
+        assert f.maybe_fetch(FETCHED, background=False) is True
+    finally:
+        news.fetch = real
+    assert news.state_now(GOLD, shared, FETCHED + MIN).fresh
 
 
 def test_the_week_boundaries_follow_new_york_dst():

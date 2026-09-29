@@ -676,6 +676,9 @@ def pair_report(s: Settings, pair: str, since: int, now: int, usage_rows: dict[s
     db = s.paths.state() / "app.db"
     hi = _upto(until)
     rep: dict[str, Any] = {"pair": pair, "db": str(db), "system": s.paths.instance or "all-pairs"}
+    pcfg = s.pairs.get(pair)
+    if pcfg is not None and pcfg.desk is not None:         # D-049: the session prompt reads the desk mode from here
+        rep["desk"] = {"mode": pcfg.desk.mode, "windows": [w.name for w in pcfg.desk.windows]}
     rep["screens"] = screens(s.paths.logs(), pair, since, until, slot_ms=screen_slot_ms)
     rep["calls_by_role"] = usage_rows
     rep["adaptive"] = adaptive_info(s, pair, now)
@@ -1270,6 +1273,9 @@ def _render(d: dict[str, Any], n_ideas: int, n_health: int, n_rows: int) -> str:
                 f"{x['time']} {x['key']} {x['old']}→{x['new']} by {x['actor']}"
                 + (f" reverted {x['reverted']}" if x["reverted"] else "") for x in tc[:n_rows]))
         p(f"pair kill switch: {_switch(r.get('kill_switch') or {})}")
+        if r.get("desk"):
+            p(f"desk: {{mode: {r['desk']['mode']}}} (D-049: ideas gated and scored, never sent; entry calls only in "
+              f"the windows {', '.join(r['desk']['windows'])})")
         lv = r.get("last_valid") or {}
         if lv.get("operator_notes"):
             p(f"last operator_notes ({lv.get('notes_ts')}): {lv['operator_notes']}")

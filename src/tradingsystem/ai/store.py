@@ -366,6 +366,8 @@ class DecisionStore:
                 h["rejected_by"] = by
                 if why:
                     h["gate_reason" if by == "gate" else "reject_reason"] = why[:160]
+            elif ex == "not_executed" and det:
+                h.update(_shadow_verdict(det))      # D-049: a shadow desk's idea carries the gate's verdict too
             out.append(h)
         return out
 
@@ -452,6 +454,20 @@ def _rejection(detail_json: str | None) -> tuple[str, str]:
     if d.get("gate"):
         return "gate", str(d.get("reason") or "")
     return "system", str(d.get("reason") or "")
+
+
+def _shadow_verdict(detail_json: str | None) -> dict[str, Any]:
+    """For a shadow desk's idea (D-049, ``execution_detail.shadow``): ``shadow`` 1, ``desk_ok`` 1/0 and the failed
+    checks the desk is held to as ``gate_reason`` (the account-size checks are waived) - the model's feedback that a
+    rejected idea gets as ``gate_reason``. Empty for any other ``not_executed`` row (an idea not picked up yet)."""
+    d = _loads(detail_json)
+    if not isinstance(d, dict) or not d.get("shadow"):
+        return {}
+    failed = set(d.get("desk_failed") or [])
+    why = "; ".join(f"{g.get('check')}: {g.get('detail')}" for g in d.get("gate") or []
+                    if isinstance(g, dict) and not g.get("ok") and g.get("check") in failed)
+    why = why or str(d.get("reason") or d.get("error") or "")
+    return {"shadow": 1, "desk_ok": int(bool(d.get("desk_ok"))), **({"gate_reason": why[:160]} if why else {})}
 
 
 def _loads(text: str | None) -> Any:

@@ -184,3 +184,33 @@ def test_the_demo_report_carries_the_desk_section(root):
     finally:
         con.close()
     assert d["shadow"]["n"] == 1 and d["desk_ok"]["resolved"] == 1 and d["calls_per_day"] == {"2026-09-24": 1}
+
+
+def test_the_out_guard_protects_a_running_checkout_whatever_root_says(tmp_path):
+    """Review fix: the file's own location decides (a production checkout with a system's app.db: only data/reviews)."""
+    prod = tmp_path / "prod"
+    (prod / "data" / "instances" / "XAUUSD").mkdir(parents=True)
+    (prod / "data" / "instances" / "XAUUSD" / "app.db").write_bytes(b"")
+    (prod / ".git").mkdir()
+    (prod / "data" / "reviews").mkdir()
+    assert dr._in_running_checkout(prod / "docs" / "measurements" / "gold_desk.md")
+    assert not dr._in_running_checkout(prod / "data" / "reviews" / "gold_desk.md")
+    wt = tmp_path / "wt"
+    (wt / "data" / "instances" / "XAUUSD").mkdir(parents=True)         # a worktree: no app.db
+    (wt / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
+    assert not dr._in_running_checkout(wt / "docs" / "measurements" / "gold_desk.md")
+    assert dr.main(["--root", str(prod), "--out", str(prod / "docs" / "x.md")]) == 3
+
+
+def test_the_scorecard_breaks_the_ideas_down_by_session(root, monkeypatch):
+    tmp, s = root
+    ts = parse_date_spec("2026-09-24T13:10:00Z")
+    add_idea(s, "a" * 32, ts, "SELL", 4290.0, 4299.0, 4272.0, {"shadow": True, "desk_ok": True, "gate": GATE_OK,
+                                                               "spread_at_gate": 0.3}, "tp1_first", 2.0)
+    con = sqlite3.connect(s.paths.state() / "app.db")
+    con.execute("UPDATE ai_decisions SET session='ny_open'")
+    con.commit()
+    con.close()
+    monkeypatch.setattr(dr, "pair_settings", lambda pair, r: s)
+    d = dr.collect("XAUUSD", None, days=2, with_baseline=False, now=parse_date_spec("2026-09-25T00:00:00Z"))
+    assert d["by_session"]["ny_open"]["n"] == 1 and "| session ny_open | 1 |" in dr.render(d)

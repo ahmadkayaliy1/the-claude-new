@@ -70,6 +70,6 @@ def test_the_legend_names_every_new_market_block():
     for block in ("market.session_stats", "market.cross", "orderflow.daily_profiles", "timeframes.15m.forming",
                   "`pwh`/`pwl`", "min_stop_set_by", "fits_now", "orderflow.depth"):
         assert block in text, block
-    gold = (LEGEND.parents[1] / "desks" / "xau.md").read_text(encoding="utf-8")
+    gold = (LEGEND.parents[1] / "desks" / "xauusd_fields.md").read_text(encoding="utf-8")
     for block in ("market.gold_clock", "market.news", "levels.round", "confirms_xau_extreme", "votes"):
         assert block in gold and block not in text, block
