@@ -219,6 +219,27 @@ def test_the_first_cycle_after_a_reopen_is_not_lost_the_engine_waits_for_its_fir
     assert av["lost"] == {"stopped": 1, "no_screen": 1} and av["lost_total"] == 2
 
 
+def test_a_cycle_held_back_with_calls_left_is_rationed_not_lost(dr, tmp_path):
+    """The engine logs F8 rationing and the pre-12:00 reserve as 'ai_quota' events while calls are LEFT: deliberate
+    budget allocation, reported as 'rationed' and never counted against the availability threshold. Only a quota event
+    with no call left (the cap used up) is a lost cycle (checkpoint-A re-review)."""
+    base = base_at(tmp_path)
+    _, db = system_db(dr, base, "BTCUSDT")
+    add_events(db, [
+        {"ts": T("2026-09-30T06:05:10Z"), "collector": "engine", "event": "ai_quota",
+         "detail": "BTCUSDT: 18/30 calls used today — the 12 left are kept for 12:00–21:00 UTC (not analysed: strong)"},
+        {"ts": T("2026-09-30T06:20:10Z"), "collector": "engine", "event": "ai_quota",
+         "detail": "claude_code: 5/30 requests left today — not analysed: BTCUSDT"},
+        {"ts": T("2026-09-30T06:35:10Z"), "collector": "engine", "event": "ai_quota",
+         "detail": "claude_code: 0/30 requests left today — not analysed: BTCUSDT"}])
+    av = dr.collect(base, since=T("2026-09-30T06:00:00Z"), until=T("2026-09-30T07:00:00Z"),
+                    now=T("2026-09-30T08:00:00Z"), pair="BTCUSDT")["per_pair"]["BTCUSDT"]["availability"]
+    assert av["open_cycles"] == 4 and av["rationed"] == 2
+    assert av["lost"] == {"ai_quota": 1} and av["lost_total"] == 1 and av["share"] == 0.75
+    assert any("held back with calls left" in n for n in av["notes"])
+    assert dr.calls_left("the 12 left are kept for") == 12 and dr.calls_left("quota exhausted") is None
+
+
 # --------------------------------------------------------------------------- gate, SL, outcomes
 def test_gate_rejections_are_classified_with_the_min_lot_split_and_not_gated(dr, tmp_path):
     base = base_at(tmp_path)

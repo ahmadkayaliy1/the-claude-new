@@ -135,7 +135,9 @@ def test_the_monitor_drill_edits_the_existing_disk_key_and_sets_it_back(tmp_path
     assert "add `free_disk_warn_gb" not in drill and "Remove the line" not in drill
     assert "change the EXISTING line `free_disk_warn_gb: 8`" in drill and "back to `free_disk_warn_gb: 8`" in drill
     assert "Never add a second `free_disk_warn_gb` line" in drill and "never delete it" in drill
-    assert drill.count("`.venv\\Scripts\\python.exe -m tradingsystem config`") == 2      # after each edit
+    assert drill.count("`.venv\\Scripts\\python.exe -m tradingsystem config`") == 3      # after each edit (1, 2, 4)
+    # H26a removed diagnose_enabled: false — the drill adds it once for the induced warning and removes it after
+    assert "add it once" in drill and "remove the `diagnose_enabled: false` line you added" in drill
     block = "monitor:\n  free_disk_warn_gb: 8\n  diagnose_enabled: false\n"
     p = tmp_path / "config.local.yaml"
     p.write_text(block.replace("free_disk_warn_gb: 8", "free_disk_warn_gb: 9999"), encoding="utf-8")

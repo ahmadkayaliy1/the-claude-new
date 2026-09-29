@@ -33,7 +33,7 @@ Windows toast.
 |---|---|---|---|---|---|
 | 1 | The demo days on Phase 4+ code complete | 5 days, window ended | auto | the window from the config; the git sha of the window's decisions is listed (the Phase 4 merge is 301f60c) | [ ] |
 | 2 | Resolved outcomes per pair | **reported, not required** | auto (n.a.) | settled broker outcomes (won / lost / USD) and resolved virtual outcomes per pair, with n | [ ] |
-| 3 | Availability of the 15-min cycles | ≥ 95 % of the market-open cycles, every pair | auto | `demo_report.py` availability: a market-open 15-min cycle (XAU's weekend and daily break and the crypto CFDs' Saturday 05–08 UTC maintenance excluded) is lost to a stopped system, a suspend, a killed/exited service, `data_not_ready`, a stale-data skip, `ai_not_ready`, `ai_quota`, the session limit, an interrupted or failed AI call, a `cycle_error`, or no 5-min screen in the engine log; the first cycle after a reopen (its decision bar lies in closed time: the engine waits for its first bar by design) is never lost | [ ] |
+| 3 | Availability of the 15-min cycles | ≥ 95 % of the market-open cycles, every pair | auto | `demo_report.py` availability: a market-open 15-min cycle (XAU's weekend and daily break and the crypto CFDs' Saturday 05–08 UTC maintenance excluded) is lost to a stopped system, a suspend, a killed/exited service, `data_not_ready`, a stale-data skip, `ai_not_ready`, `ai_quota` with no call left, the session limit, an interrupted or failed AI call, a `cycle_error`, or no 5-min screen in the engine log; the first cycle after a reopen (its decision bar lies in closed time: the engine waits for its first bar by design) is never lost, and a cycle held back while calls are left (F8 rationing, the pre-12:00 reserve) is reported as `rationed`, not lost | [ ] |
 | 4 | Positions ever without SL | 0 | auto | monitor "position without SL" findings; placed ideas without a passing `stop_loss_present` gate check; open positions without SL now | [ ] |
 | 5 | Daily-loss or drawdown trip | none | auto | `account_peak.json` trip, the executor's drawdown flag, monitor daily-loss / drawdown / critical equity-drop findings, gate refusals `daily_loss_limit` / `account_drawdown` | [ ] |
 | 6 | Every gate rejection in an expected class | no class outside the list below | auto | every failed check of every rejected idea of the window, by class | [ ] |
@@ -83,8 +83,10 @@ reason follows), and `not_gated: …` (a rejection without a gate record: no quo
 
 A harmless induced warning, timed by the owner:
 
-1. Keep `monitor.diagnose_enabled: false` in `config\config.local.yaml` for the drill (otherwise the warning may start
-   one billed diagnosis session within the day's budget).
+1. For the drill, the `monitor:` block of `config\config.local.yaml` must hold `diagnose_enabled: false` (otherwise the
+   induced warning starts one billed diagnosis session within the day's budget). H26a removed that line: add it once
+   inside the existing `monitor:` block — if it is already there, do not add a second one (a repeated key makes every
+   config load fail). Check with `.venv\Scripts\python.exe -m tradingsystem config`.
 2. In the `monitor:` block of `config\config.local.yaml`, change the EXISTING line `free_disk_warn_gb: 8` (H30) to
    `free_disk_warn_gb: 9999`, save, and note the time T0 (UTC). Never add a second `free_disk_warn_gb` line: a
    repeated key makes every config load fail — the monitor stops checking and no service can start or restart until
@@ -95,7 +97,8 @@ A harmless induced warning, timed by the owner:
    `data\shared\monitor_state.json` (`alerts.disk.first_ms`) and in the demo report's incident table.
 4. Set the same line back to `free_disk_warn_gb: 8` — never delete it (the default, 5 GB, would apply) — and check
    again with `.venv\Scripts\python.exe -m tradingsystem config`; the next run clears the warning. MTTD = T1 − T0
-   must be ≤ 15 min; write both times next to the tick.
+   must be ≤ 15 min; write both times next to the tick. Then remove the `diagnose_enabled: false` line you added in
+   step 1 (the monitor's diagnosis budget applies again).
 
 ### The live-refusal rehearsal (item 16)
 

@@ -20,7 +20,8 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
   protection is on but has not removed it. This is why the machine has 0.2–0.4 GB free, why `claude auth status`
   took 55 s, and why the ≤ 1.5 GB RAM budget was impossible. **Only the user removes it (system/security
   change); the agent never kills or deletes it.** Until it is gone, plan RAM as if only ~1 GB were available.
-* **Open ops issue (check in Phase 1):** since the user installed autostart (2026-09-26 16:57 UTC) the supervisor
+* **Resolved (recorded 2026-09-29, Phase 5 A7): fixed in c844318** — the MT5 attach guard in `ingest/mt5/terminal.py` (attach only to a terminal running ≥ 30 s: attaching to one still loading made `initialize()` launch a second copy inside the supervisor job); no `terminal_in_job` event since 2026-09-26 16:58 UTC; the own-job-handle check is pinned by `test_the_terminal_job_check_asks_about_the_supervisor_job_only`. The original note:
+  **Open ops issue (check in Phase 1):** since the user installed autostart (2026-09-26 16:57 UTC) the supervisor
   logs `terminal_in_job` for the MT5 terminal it launched itself via `cmd start` (events 16:57:28 terminal_started
   → 16:57:44 / 16:58:30 terminal_in_job, two different terminal pids). Either `spawn_outside()`'s
   CREATE_BREAKAWAY_FROM_JOB is refused when the supervisor runs under Task Scheduler / the detached launcher (the
@@ -40,6 +41,21 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
   for Windsor's spread), 0 executed, 0 broker outcomes.
 
 ## 0b. Progress log (newest first — read this before §4)
+
+* **2026-09-29 — Phase 5 checkpoint A "ready and safe" is DONE on `feat/phase5-goes-deeper` (worktree
+  `C:\the_claude_new_wt\phase5`); production runs Phase 4 until the user's H26a.** 1425 unit tests, no live
+  call. Built in the order of §3.9.1 (A0 shared keys → A1 tracker → A9 integrity → A2/A3 backup + recorder
+  keep-alive → A4 monitor rules + diagnosis budget → A5 engine/provider → A6 OI + taker-ratio ingest fix → A8
+  demo report + go-live checklist → A7 the rest), six builders one at a time (the owner's RAM rule). Review: 6
+  lenses + skeptics (21 of 27 confirmed, 4 medium — the quota reserve binding after 21:00 UTC, a drill adding a
+  duplicate config key, an incomplete rollback list), fixed; re-review + final check (7 low), fixed. As built:
+  §3.9.1's note under the checkpoint-A table. D-048 corrected two facts of 2026-09-28 (XAU's first call was on
+  the open Sunday market; `check_integrity.py --since-hours` had checked nothing). Facts for checkpoint B: the
+  demo window's availability is ≈ 32 % (Binance outage, hibernates, a cold boot) — the checklist's 95 % will
+  fail unless the machine holds; the recorder is down since 2026-09-28 20:54 UTC (≈ 44 h recorded; H28);
+  `terminal_in_job` (§0) is resolved. User steps: H26a in PROJECT_STATUS (stop_all → merge → config →
+  start_all → install_operator_tasks → first backup → remove `diagnose_enabled: false`). Next: checkpoint B
+  after the user confirms H26a.
 
 * **2026-09-28 — Phase 5 plan approved (D-046, §3.9.1); production still on Phase 3 (main `6e24353`) until H20;
   Phase 4 finished on `feat/phase4-watches-learns` (`301f60c`).** A five-analyst read-only review (spec coverage,

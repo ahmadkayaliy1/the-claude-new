@@ -110,7 +110,7 @@ LOSS_CLASSES = {
     "data_not_ready": "the decision bar was not stored 90 s after its close",
     "data_stale": "an AI cycle skipped by the data gate (stale analysis price)",
     "ai_not_ready": "the AI provider was not ready (sign-in check, cooldown)",
-    "ai_quota": "the daily call cap was used up",
+    "ai_quota": "the daily call cap was used up (0 calls left, or budget_blocked)",
     "session_limit": "the subscription's session/usage limit",
     "interrupted": "an AI call cut off by a suspend",
     "ai_error": "an AI call failed (timeout, deadline, sign-in race)",
@@ -120,6 +120,21 @@ LOSS_CLASSES = {
 SAMPLE_SIZE = ("{days:g} days show the absence of catastrophic behaviour and the execution quality, not a statistical "
                "edge: every rate in this report comes with its n, and no n here is large enough to estimate an edge "
                "(D-047). The owner signs the go-live checklist knowing this.")
+
+
+# an engine 'ai_quota' event whose text says calls are still LEFT is rationing, not exhaustion: the F8 ladder ("5/30
+# requests left today — not analysed: …") or the pre-12:00 reserve ("18/30 calls used today — the 12 left are kept for
+# …"). Deliberate budget allocation: reported on its own, never counted against the availability threshold.
+LEFT_RES = (re.compile(r"(\d+)/\d+ requests left today"), re.compile(r"the (\d+) left are kept"))
+
+
+def calls_left(text: str) -> int | None:
+    """The calls left that an engine quota message states, or None when it states none."""
+    for rx in LEFT_RES:
+        m = rx.search(text or "")
+        if m:
+            return int(m.group(1))
+    return None
 
 
 class Invalid(Exception):
@@ -431,6 +446,7 @@ def availability(con: sqlite3.Connection, sp: Settings, pair: str, since: int, u
     waits = {t for t in open_ if cal is not None and not cal.is_open(t - SLOT_MS)}
     open_set = set(open_) - waits                     # the cycles that can be lost
     lost: dict[str, set[int]] = collections.defaultdict(set)
+    rationed: set[int] = set()              # held back with calls left (F8 / the reserve): not lost
 
     def mark(cls: str, t0: int, t1: int | None = None) -> None:
         """The open cycles overlapping ``[t0, t1]`` (the one holding ``t0`` when ``t1`` is None) → ``cls``."""
@@ -453,7 +469,7 @@ def availability(con: sqlite3.Connection, sp: Settings, pair: str, since: int, u
                            "AND event IN ('stopped', 'started', 'system_suspend', 'killed', 'exited', 'data_not_ready', "
                            "'ai_not_ready', 'ai_quota', 'cycle_error') ORDER BY ts",
                            (since, until + MS_PER_DAY)).fetchall()
-        for ts, col, ev, _det, dur in rows:
+        for ts, col, ev, det, dur in rows:
             if ev == "system_suspend":
                 if ts - int(dur or 0) < until:
                     mark("system_suspend", max(ts - int(dur or 0), since), min(ts, until))
@@ -468,6 +484,10 @@ def availability(con: sqlite3.Connection, sp: Settings, pair: str, since: int, u
                     down_since = None
             elif ev in ("killed", "exited") and str(col).startswith("supervisor:"):
                 mark("killed", ts)
+            elif ev == "ai_quota" and (calls_left(str(det or "")) or 0) > 0:
+                slot = ts - ts % SLOT_MS
+                if slot in open_set:
+                    rationed.add(slot)
             elif ev in ("data_not_ready", "ai_not_ready", "ai_quota", "cycle_error") and \
                     (col == "engine" or ev != "cycle_error"):
                 mark(ev, ts)
@@ -503,11 +523,16 @@ def availability(con: sqlite3.Connection, sp: Settings, pair: str, since: int, u
     if waits:
         notes.append(f"{len(waits)} first cycle(s) after a reopen not counted as lost: the decision bar lies in "
                      "closed time, the engine waits for its first stored bar")
+    rationed -= set().union(*lost.values()) if lost else set()
+    if rationed:
+        notes.append(f"{len(rationed)} cycle(s) held back with calls left (F8 rationing / the pre-12:00 reserve) — "
+                     "deliberate budget allocation, not counted as lost")
     total = set().union(*lost.values()) if lost else set()
     n_open = len(open_)
     return {"calendar": cal_name, "cycles": len(starts), "open_cycles": n_open, "closed_cycles": len(starts) - n_open,
             "lost": {k: len(lost[k]) for k in LOSS_CLASSES if lost.get(k)}, "lost_total": len(total),
             "share": round(1 - len(total) / n_open, 4) if n_open else None, "reopen_waits": len(waits),
+            "rationed": len(rationed),
             "screen_log_from": iso(screen_from) if screen_from else None, "notes": notes}
 
 

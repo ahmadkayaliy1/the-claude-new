@@ -1210,10 +1210,12 @@ def test_going_back_before_phase5_names_every_phase5_key_and_puts_diagnose_off_b
     assert all(f"`{sec}:`" in back for sec in PHASE5_SECTIONS)
     assert "`instances.*.overrides`" in back
     assert "put `diagnose_enabled: false` back into the `monitor:` block" in back
-    assert "`.venv\\Scripts\\python.exe -m tradingsystem config` must succeed (it names any key still refused) before " \
-           "`scripts\\restart_all.bat`" in back
-    assert back.index("install_operator_tasks.bat -Uninstall") < back.index("Clean `config\\config.local.yaml`") \
-        < back.index("-m tradingsystem config")
+    # the config is cleaned while the Phase 5 code still runs, then stop → check out → check → start (a leftover key
+    # would stop every service the supervisor restarts after the checkout); the lock file leaves the checkout
+    assert "`.venv\\Scripts\\python.exe -m tradingsystem config` must succeed with the older code" in back
+    assert back.index("install_operator_tasks.bat -Uninstall") < back.index("Clean `config\\config.local.yaml` FIRST") \
+        < back.index("scripts\\stop_all.bat") < back.index("-m tradingsystem config") < back.index("start_all.bat")
+    assert "Delete `backups\\backup.lock`" in back
 
 
 # ------------------------------------------------------------------ commit charge

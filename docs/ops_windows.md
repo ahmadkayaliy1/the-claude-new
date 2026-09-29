@@ -668,10 +668,10 @@ creating the STOP file is enough to keep the recorder down.
 
 1. **Remove the two new tasks first**, while the Phase 5 code is still checked out (the older installer does not know
    them): `scripts\install_operator_tasks.bat -Uninstall`.
-2. **Go back to the older code** (check out the commit before Phase 5).
-3. **Clean `config\config.local.yaml`.** The older code refuses every key it does not know, also inside a section it
-   knows (`ai:`, `monitor:`, `storage:`): a single leftover key and no system starts, `restart_all.bat` aborts and the
-   monitor exits 3 on every run. Remove each of these, and the same keys under `instances.*.overrides`:
+2. **Clean `config\config.local.yaml` FIRST, while the Phase 5 code still runs** (it accepts a config without its
+   own keys — every one has a default; the older code refuses every key it does not know, also inside a section it
+   knows, so a leftover key would make every service the supervisor restarts after the checkout fail to start).
+   Remove each of these, and the same keys under `instances.*.overrides`:
    - the whole `backup:` and `evaluation:` sections;
    - `ai:` `skip_closed_market`, `transient_retry_s`, `quota_reserve_share`, `quota_reserve_hours_utc`;
    - `monitor:` `battery_warn_pct`, `battery_critical_pct`, `on_battery_warn_min`, `commit_warn_pct`,
@@ -680,9 +680,12 @@ creating the STOP file is enough to keep the recorder down.
 
    Then **put `diagnose_enabled: false` back into the `monitor:` block**: Phase 4 has no diagnosis budget, and its
    monitor would start a billed Claude diagnosis for every warning (up to one every 3 h) on the shared plan.
-4. **Check it with the older code:** `.venv\Scripts\python.exe -m tradingsystem config` must succeed (it names any key
-   still refused) before `scripts\restart_all.bat`.
-5. `scripts\install_operator_tasks.bat` registers the three Phase 4 tasks again.
+3. **Stop, go back, check, start:** `scripts\stop_all.bat`, check out the commit before Phase 5, then
+   `.venv\Scripts\python.exe -m tradingsystem config` must succeed with the older code (it names any key still
+   refused), then `scripts\start_all.bat`.
+4. `scripts\install_operator_tasks.bat` registers the three Phase 4 tasks again.
+5. **Delete `backups\backup.lock`** (or move `backups\` out of the checkout): the older `.gitignore` does not ignore it,
+   and every review pack would call the checkout DIRTY.
 
-`backups\` and `keepalive.json` can stay (the older code does not read them). The recorder is no longer kept alive:
-start it by hand after every sleep again.
+The backup zips and `keepalive.json` can stay (the older code does not read them). The recorder is no longer kept
+alive: start it by hand after every sleep again.
