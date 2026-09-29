@@ -65,7 +65,11 @@ def test_the_1m_timeframe_leaves_the_view_but_stays_in_the_stored_payload():
 
 
 def test_the_legend_names_every_new_market_block():
+    """Shared blocks in the shared legend; the gold-only ones in the XAU appendix (BTC/ETH never pay for them)."""
     text = LEGEND.read_text(encoding="utf-8")
-    for block in ("market.session_stats", "market.gold_clock", "market.cross", "market.news", "levels.round",
-                  "orderflow.daily_profiles", "timeframes.15m.forming", "`pwh`/`pwl`", "min_stop_set_by", "fits_now"):
+    for block in ("market.session_stats", "market.cross", "orderflow.daily_profiles", "timeframes.15m.forming",
+                  "`pwh`/`pwl`", "min_stop_set_by", "fits_now", "orderflow.depth"):
         assert block in text, block
+    gold = (LEGEND.parents[1] / "desks" / "xau.md").read_text(encoding="utf-8")
+    for block in ("market.gold_clock", "market.news", "levels.round", "confirms_xau_extreme", "votes"):
+        assert block in gold and block not in text, block

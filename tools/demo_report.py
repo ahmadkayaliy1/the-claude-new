@@ -692,11 +692,26 @@ def pair_section(sp: Settings, pair: str, w: dict[str, Any], ledger: list[dict[s
             rep["sl_proof"] = placed_without_sl(con, pair, since, until)
             rep["realised"] = realised(con, pair, since, until)
             rep["hashes_seen"] = hashes_seen(con, pair, since, until)
+            if sp.pairs[pair].desk is not None:                # B19: the shadow desk's ideas (no baseline here)
+                rep["desk"] = desk_section(con, sp, pair, since, until)
     except sqlite3.Error as exc:
         rep["error"] = f"database unreadable: {exc}"[:200]
     finally:
         con.close()
     return rep
+
+
+def desk_section(con: sqlite3.Connection, sp: Settings, pair: str, since: int, until: int) -> dict[str, Any]:
+    """B19 (D-049): a desk pair's shadow ideas of the window - ``tools/desk_report.py``'s own functions; the
+    random-entry baseline and the H32 verdict are that tool's (``python tools/desk_report.py --print``)."""
+    try:
+        dr = _load("ts_tools_desk_report", TOOLS / "desk_report.py")
+        rows = dr.ideas(con, pair, since, until, sp)
+        shadow = [r for r in rows if r["shadow"]]
+        return {"shadow": dr.summary(shadow), "desk_ok": dr.summary([r for r in shadow if r["desk_ok"]]),
+                "calls_per_day": dr.calls_per_day(con, pair, since, until)}
+    except Exception as exc:  # noqa: BLE001 - one section, never the whole report
+        return {"error": repr(exc)[:200]}
 
 
 # --------------------------------------------------------------------------- incidents
@@ -1271,6 +1286,14 @@ def render(d: dict[str, Any]) -> str:
             p(f"- outcomes of the window's ideas: broker {broker or 'none'} · virtual "
               f"{_counts(f['virtual_outcomes'])} (resolved {f['virtual_resolved']}, TP1 first "
               f"{f['virtual_tp1_first']}, mean R {_num(f['mean_virtual_r'])})")
+            dk = r.get("desk")
+            if dk and not dk.get("error"):
+                sh, ok = dk["shadow"], dk["desk_ok"]
+                p(f"- gold desk in shadow (D-049; never sent): shadow ideas {sh['n']}, desk_ok {ok['n']} (resolved "
+                  f"{ok['resolved']}, expectancy after the spread {_num(ok['expectancy_r'])} R); calls per UTC day "
+                  f"{_counts(dk['calls_per_day'])} — the baseline and the H32 verdict: `tools/desk_report.py --print`")
+            elif dk:
+                p(f"- gold desk section: {dk['error']}")
             p(f"- decision metrics (n {m['n']}; with excursion n {m['n_with_excursion']}): MFE "
               f"{_num(m['mean_mfe_r'])} R, MAE {_num(m['mean_mae_r'])} R, TP1/2/3 hit {_num(m['tp1_hit_share'])}/"
               f"{_num(m['tp2_hit_share'])}/{_num(m['tp3_hit_share'])}, minutes to resolve "

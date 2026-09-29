@@ -38,15 +38,16 @@ def test_the_brief_is_appended_verbatim_and_versioned(role):
     brief, name, version = _read_versioned("desks/xau.md")
     assert name == "desks/xau" and version == 1
     assert xau.system == base.system + "\n\n" + brief                  # appended after the whole system prompt
-    assert "$10/$50" in xau.system                                    # verbatim: '$' is not a placeholder here
+    assert "levels.round" in xau.system and "### Gold fields" in xau.system   # verbatim, the gold field notes too
     assert xau.user == base.user and xau.versions == {**base.versions, "desks/xau": 1}
     later = render(role, SYS, {**USER, "now_utc": "2026-09-30T10:15:00Z", "payload": '{"x": 1}'}, appendix="desks/xau")
     assert later.prompt_hash == xau.prompt_hash                        # constant per pair: the cache prefix holds
 
 
 def test_the_brief_is_small_and_says_the_shadow_rules():
-    brief = _read_versioned("desks/xau.md")[0]
-    assert len(brief) / 3.6 <= 350
+    text = _read_versioned("desks/xau.md")[0]
+    brief, fields = text.split("### Gold fields")
+    assert len(brief) / 3.6 <= 350 and len(text) / 3.6 <= 600       # the brief (B18) + the gold-only field notes
     for must in ("scored in R", "never shrink a stop", "`account.min_position_risk` does not bind", "LIMIT or STOP",
                  "2R after the spread", "market.news", "rollover"):
         assert must in brief, must

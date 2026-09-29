@@ -856,8 +856,12 @@ def test_the_legend_explains_every_new_field_in_place_without_a_version_bump():
     text = (Path(__file__).resolve().parents[1].parent / "src" / "tradingsystem" / "ai" / "prompts" / "shared"
             / "payload_legend.md").read_text(encoding="utf-8")
     assert text.startswith("<!-- prompt: shared/payload_legend · version 5 -->")
-    for name in ("orderflow.daily_profiles", "market.session_stats", "market.gold_clock", "london_swept",
-                 "london_asia_sweep_days", "levels.round", "desk_window", "width_x_median", "pending"):
+    gold = (Path(__file__).resolve().parents[1].parent / "src" / "tradingsystem" / "ai" / "prompts" / "desks"
+            / "xau.md").read_text(encoding="utf-8")                  # the gold-only fields: the XAU appendix (B18)
+    for name in ("orderflow.daily_profiles", "market.session_stats", "pending"):
         assert name in text, name
+    for name in ("market.gold_clock", "london_swept", "london_asia_sweep_days", "levels.round", "desk_window",
+                 "width_x_median"):
+        assert name in gold, name
     assert "$" not in text                                    # a literal dollar sign breaks the template (test_prompts)
-    assert snap_mod.PAYLOAD_VERSION == "3"                    # the lead bumps it at B7, not here
+    assert snap_mod.PAYLOAD_VERSION == "4"                    # bumped once at B7
