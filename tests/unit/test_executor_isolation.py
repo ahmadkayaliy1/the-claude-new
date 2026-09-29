@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import tradingsystem.execution.executor as ex_mod
+from tests.conftest import no_desk
 from tradingsystem.ai.store import DecisionRecord
 from tradingsystem.core.settings import PathsCfg, load_settings
 from tradingsystem.core.timeutil import iso, now_ms
@@ -17,7 +18,7 @@ from tradingsystem.execution.executor import MAX_HANDLE_ATTEMPTS, Executor
 @pytest.fixture
 def ex(tmp_path):
     s = load_settings(env_path=Path("nope.env"), extra_env={"EXECUTION_MODE": "paper", "EXECUTION_TRIGGER": "manual"})
-    s = s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"))})
+    s = no_desk(s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"))}))
     return Executor(s)
 
 

@@ -9,6 +9,7 @@ import pytest
 import tradingsystem.execution.executor as ex_mod
 import tradingsystem.ingest.mt5.terminal as term_mod
 from tradingsystem.ai.store import DecisionRecord
+from tests.conftest import no_desk
 from tradingsystem.core.settings import PathsCfg, load_settings
 from tradingsystem.core.timeutil import iso, now_ms
 from tradingsystem.execution.backends.mt5_backend import MT5Backend
@@ -68,7 +69,7 @@ def test_executor_uses_broker_specs_and_mt5_account(tmp_path, monkeypatch):
     mt5 = fake_mt5(sent=sent)
     monkeypatch.setattr(term_mod, "MT5Terminal", lambda prof: terminal(mt5, prof.server))
     s = load_settings(env_path=Path("nope.env"), extra_env={"EXECUTION_MODE": "demo", "EXECUTION_TRIGGER": "manual"})
-    s = s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"))})
+    s = no_desk(s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"))}))
     ex = ex_mod.Executor(s)
     assert ex.mt5.pair_by_symbol == {"BTCUSD@": "BTCUSDT", "ETHUSD@": "ETHUSDT", "XAUUSD@": "XAUUSD"}
     now = now_ms()

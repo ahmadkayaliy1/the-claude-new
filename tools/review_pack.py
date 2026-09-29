@@ -764,6 +764,10 @@ def _funnel(decs: list[dict[str, Any]], metrics: dict[str, dict[str, Any]]) -> d
         "decisions": dict(collections.Counter(d.get("decision") or "-" for d in decs if d.get("status") == "valid")),
         "ideas": len(ideas),
         "execution": dict(collections.Counter(d.get("execution_state") or "-" for d in ideas)),
+        # D-049: ideas of a desk in shadow (not_executed, never sent, scored in R) and how many passed every desk check
+        "shadow_ideas": sum(1 for d in ideas if (d.get("execution_detail") or {}).get("shadow")),
+        "shadow_desk_ok": sum(1 for d in ideas if (d.get("execution_detail") or {}).get("desk_ok") is True
+                              and (d.get("execution_detail") or {}).get("shadow")),
         "gate_failures_by_check": dict(gate_fail),
         "placed": len(placed),
         "broker_outcomes": broker,

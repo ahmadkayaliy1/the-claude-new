@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import no_desk
 from tradingsystem.ai.store import DecisionRecord
 from tradingsystem.core.settings import PathsCfg, RiskCfg, load_settings
 from tradingsystem.core.timeutil import iso, now_ms
@@ -30,7 +31,7 @@ def xticks(real_xau_ticks):
 @pytest.fixture
 def settings(tmp_path):
     s = load_settings(env_path=Path("nope.env"), extra_env={"EXECUTION_MODE": "paper", "EXECUTION_TRIGGER": "manual"})
-    return s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"))})
+    return no_desk(s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"))}))
 
 
 def write_ticks(s, ticks):

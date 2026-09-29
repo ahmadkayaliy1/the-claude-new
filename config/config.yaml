@@ -126,6 +126,14 @@ pairs:
     pip_size: 0.1
     footprint_bucket: 0.5
     flow_proxy_approved: false       # XAUUSDT perp order flow as proxy — only after the P1.11 study approves it
+    desk:                            # D-049 / B14: gold is analysed and scored, never traded (the 1-oz minimum is 42x
+      mode: shadow                   # leverage at this account); ideas are gated in full and stored not_executed/shadow.
+      brief: desks/xau               # prompt appendix (B18). Promotion to real trades = an owner decision (H32).
+      windows:                       # entry-call windows (B15): local wall-clock, DST follows the zone
+        - {name: london, tz: Europe/London, start: "07:45", end: "11:00"}
+        - {name: new_york, tz: America/New_York, start: "08:15", end: "11:30"}
+      reopen_grace_min: 60
+      friday_cutoff: {time: "12:00", tz: America/New_York}
     instruments:
       - venue: mt5
         symbol_by_profile: {demo: "XAUUSD@", live: "XAUUSD@"}

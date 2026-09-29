@@ -1,0 +1,1486 @@
+{
+ "00eded5acd614ca0866cdf0dc99f77b9": {
+  "approved": true,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 0.0% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live BUY position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 0.5s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-26T23:00:00Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "131s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "60 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 84342.58 vs SL 84094.58",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "248.00 ≥ max(stops_level+spread 51.00, 0.5×ATR 46.32)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "248.00 ≤ 5.0×ATR 463.20",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 26.00 ≤ 20% of SL distance 248.00",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "3.677 ≥ 1.5 (single leg at TP2: 0.01 lots cannot be split)",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 2.49% ($2.48) — target 1.00% is below the minimum lot; minimum lot risks 2.49% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "8.5× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 2.49% open+new SL risk (≤ 4.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 0.00% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 0.00% − open SL risk 0.00% − this trade 2.49% = -2.49% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 84342.58,
+  "lots": 0.01,
+  "rr_exec": 3.6774193548387095
+ },
+ "044a1d9d55844b3c958e899134fabf12": {
+  "approved": true,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 3.6% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live SELL position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 1.0s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-29T02:25:00Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "123s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "60 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 2660.26 vs SL 2679.36",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "19.10 ≥ max(stops_level+spread 4.28, 0.5×ATR 4.37)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "19.10 ≤ 5.0×ATR 43.72",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 2.28 ≤ 20% of SL distance 19.10",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "3.234 ≥ 1.5 (single leg at TP2: 0.01 lots cannot be split)",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 1.91% ($1.91) — target 1.00% is below the minimum lot; minimum lot risks 1.91% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "2.7× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 1.91% open+new SL risk (≤ 4.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 0.00% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 0.00% − open SL risk 0.00% − this trade 1.91% = -1.91% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 2660.26,
+  "lots": 0.01,
+  "rr_exec": 3.233507853403168
+ },
+ "0620349cc8504eb080fdf1dc3a500182": {
+  "approved": true,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 4.3% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live BUY position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 0.7s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-29T04:20:00Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "104s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "57 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "pending_price_valid",
+    "detail": "BUY_LIMIT 82979.99 is 133.01 from ask 83113.0 (≥ stops level 25.00)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 82979.99 vs SL 82829.99",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "150.00 ≥ max(stops_level+spread 51.00, 0.5×ATR 102.01)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "150.00 ≤ 5.0×ATR 1020.13",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 26.00 ≤ 20% of SL distance 150.00",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "4.427 ≥ 1.5 (single leg at TP1: 0.01 lots cannot be split)",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 1.51% ($1.50) — target 1.00% is below the minimum lot; minimum lot risks 1.51% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "8.3× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 2.56% open+new SL risk (≤ 4.0%), of which 1.05% held by the other pairs' systems",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 0.51% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 0.51% − open SL risk 0.00% − this trade 1.51% = -1.00% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 82979.99,
+  "lots": 0.01,
+  "rr_exec": 4.426733333333298
+ },
+ "0d13c8548a7543dcbda26a9adbbd612c": {
+  "approved": false,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 2.4% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live SELL position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 38.2s (≤30s)",
+    "ok": false
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-28T10:55:05.621000Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "128s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "62 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 82589.0 vs SL 83155.89",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "566.89 ≥ max(stops_level+spread 51.00, 0.5×ATR 110.13)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "566.89 ≤ 5.0×ATR 1101.32",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 26.00 ≤ 20% of SL distance 566.89",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "2.515 ≥ 1.5",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.0 lots, risk 5.59% ($5.67) — minimum lot 0.01 risks 5.59% of equity > max 3.00%",
+    "ok": false
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 1.89% open+new SL risk (≤ 4.0%), of which 1.89% held by the other pairs' systems",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 0.00% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 0.00% − open SL risk 0.00% − this trade 0.00% = 0.00% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 82589.0,
+  "lots": 0.0,
+  "rr_exec": 2.5145125156555905
+ },
+ "1efbe5c40eee4129b8d84993078098bb": {
+  "approved": false,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 0.0% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live SELL position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 1.4s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-27T10:20:06.799000Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "188s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "60 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 84648.86 vs SL 84910.34",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "261.48 ≥ max(stops_level+spread 51.00, 0.5×ATR 55.38)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "261.48 ≤ 5.0×ATR 553.84",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 26.00 ≤ 20% of SL distance 261.48",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "1.497 < 1.5",
+    "ok": false
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 2.52% ($2.61) — target 1.00% is below the minimum lot; minimum lot risks 2.52% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "8.2× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 2.52% open+new SL risk (≤ 4.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 2.46% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 2.46% − open SL risk 0.00% − this trade 2.52% = -0.06% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 84648.86,
+  "lots": 0.01,
+  "rr_exec": 1.4973229310081466
+ },
+ "2e52bef2e66342c986427762f92b94e9": {
+  "approved": true,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 4.7% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live SELL position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 0.4s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-29T06:34:40.835000Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "159s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "58 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "pending_price_valid",
+    "detail": "SELL_LIMIT 83226.8 is 276.80 from bid 82950.0 (≥ stops level 25.00)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 83226.8 vs SL 83396.8",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "170.00 ≥ max(stops_level+spread 51.00, 0.5×ATR 83.59)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "170.00 ≤ 5.0×ATR 835.89",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 26.00 ≤ 20% of SL distance 170.00",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "2.294 ≥ 1.5 (single leg at TP1: 0.01 lots cannot be split)",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 1.72% ($1.70) — target 1.00% is below the minimum lot; minimum lot risks 1.72% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "8.4× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 1.72% open+new SL risk (≤ 4.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 0.52% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 0.52% − open SL risk 0.00% − this trade 1.72% = -1.20% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 83226.8,
+  "lots": 0.01,
+  "rr_exec": 2.2941176470588234
+ },
+ "5fe74a5e42414644b323740846b99867": {
+  "approved": true,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 0.0% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live SELL position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 0.1s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-27T16:45:05.724000Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "98s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "58 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 84443.02 vs SL 84685.02",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "242.00 ≥ max(stops_level+spread 51.00, 0.5×ATR 88.71)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "242.00 ≤ 5.0×ATR 887.11",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 26.00 ≤ 20% of SL distance 242.00",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "2.500 ≥ 1.5 (single leg at TP2: 0.01 lots cannot be split)",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 2.33% ($2.42) — target 1.00% is below the minimum lot; minimum lot risks 2.33% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "8.1× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 2.33% open+new SL risk (≤ 4.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 2.46% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 2.46% − open SL risk 0.00% − this trade 2.33% = 0.13% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 84443.02,
+  "lots": 0.01,
+  "rr_exec": 2.5
+ },
+ "725d44cf934a4dfc8ba4d102974ac2ef": {
+  "approved": false,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 4.3% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live SELL position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 0.9s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-28T23:02:34.064000Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "126s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "58 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "market_in_zone",
+    "detail": "touch 83148.5 vs zone 83042.98-83112.98",
+    "ok": false
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 83148.5 vs SL 83362.98",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "214.48 ≥ max(stops_level+spread 51.00, 0.5×ATR 114.03)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "214.48 ≤ 5.0×ATR 1140.26",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 26.00 ≤ 20% of SL distance 214.48",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "2.902 ≥ 1.5 (single leg at TP1: 0.01 lots cannot be split)",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 2.16% ($2.14) — target 1.00% is below the minimum lot; minimum lot risks 2.16% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "8.4× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 2.16% open+new SL risk (≤ 4.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 0.00% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 0.00% − open SL risk 0.00% − this trade 2.16% = -2.16% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 83148.5,
+  "lots": 0.01,
+  "rr_exec": 2.90246176799709
+ },
+ "86afa703370c474faa4d6eae5831bb53": {
+  "approved": true,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 2.4% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live SELL position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 1.5s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-28T10:50:05.614000Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "88s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "62 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 2640.95 vs SL 2660.1",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "19.15 ≥ max(stops_level+spread 4.40, 0.5×ATR 4.54)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "19.15 ≤ 5.0×ATR 45.43",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 2.40 ≤ 20% of SL distance 19.15",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "2.179 ≥ 1.5 (single leg at TP2: 0.01 lots cannot be split)",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 1.89% ($1.92) — target 1.00% is below the minimum lot; minimum lot risks 1.89% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "2.6× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 1.89% open+new SL risk (≤ 4.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 0.00% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 0.00% − open SL risk 0.00% − this trade 1.89% = -1.89% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 2640.95,
+  "lots": 0.01,
+  "rr_exec": 2.1791122715404607
+ },
+ "9ff6248148c04ce4be72f3dcd7b07aeb": {
+  "approved": false,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 0.0% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live SELL position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 0.5s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-27T16:00:00Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "180s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "58 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 84531.55 vs SL 84857.54",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "325.99 ≥ max(stops_level+spread 51.00, 0.5×ATR 85.78)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "325.99 ≤ 5.0×ATR 857.81",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 26.00 ≤ 20% of SL distance 325.99",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "1.639 ≥ 1.5",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.0 lots, risk 3.14% ($3.26) — minimum lot 0.01 risks 3.14% of equity > max 3.00%",
+    "ok": false
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 0.00% open+new SL risk (≤ 4.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 2.46% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 2.46% − open SL risk 0.00% − this trade 0.00% = 2.46% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 84531.55,
+  "lots": 0.0,
+  "rr_exec": 1.639105494033633
+ },
+ "c0c25d0218784132847021e6f8a1c424": {
+  "approved": false,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 0.8% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live BUY position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 0.9s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-27T02:45:00Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "95s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "62 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 2702.38 vs SL 2681.3",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "21.08 ≥ max(stops_level+spread 4.16, 0.5×ATR 2.23)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "21.08 ≤ 5.0×ATR 22.26",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 2.16 ≤ 20% of SL distance 21.08",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "1.922 ≥ 1.5 (single leg at TP2: 0.01 lots cannot be split)",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 2.09% ($2.11) — target 1.00% is below the minimum lot; minimum lot risks 2.09% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "2.7× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 4.63% open+new SL risk (≤ 4.0%), of which 2.54% held by the other pairs' systems",
+    "ok": false
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 0.00% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 0.00% − open SL risk 0.00% − this trade 2.09% = -2.09% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 2702.38,
+  "lots": 0.01,
+  "rr_exec": 1.9222011385199298
+ },
+ "d9633718658447e0887d25ecc1d8cd6c": {
+  "approved": true,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 0.0% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live BUY position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 0.9s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-27T06:30:00Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "89s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "60 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "pending_price_valid",
+    "detail": "BUY_LIMIT 84515.42 is 60.00 from ask 84575.42 (≥ stops level 25.00)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 84515.42 vs SL 84255.42",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "260.00 ≥ max(stops_level+spread 51.00, 0.5×ATR 44.97)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "260.00 ≤ 5.0×ATR 449.71",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 26.00 ≤ 20% of SL distance 260.00",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "2.846 ≥ 1.5 (single leg at TP2: 0.01 lots cannot be split)",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 2.54% ($2.60) — target 1.00% is below the minimum lot; minimum lot risks 2.54% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "8.3× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 2.54% open+new SL risk (≤ 4.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 2.49% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 2.49% − open SL risk 0.00% − this trade 2.54% = -0.05% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 84515.42,
+  "lots": 0.01,
+  "rr_exec": 2.8461538461538463
+ },
+ "ef1a09e58549425fad47a5ad62375c71": {
+  "approved": true,
+  "checks": [
+   {
+    "check": "kill_switch",
+    "detail": "off",
+    "ok": true
+   },
+   {
+    "check": "account_drawdown",
+    "detail": "account 4.3% below its peak (stop at 25%)",
+    "ok": true
+   },
+   {
+    "check": "no_same_direction",
+    "detail": "no live SELL position or order on this pair",
+    "ok": true
+   },
+   {
+    "check": "stop_loss_present",
+    "detail": "SL present",
+    "ok": true
+   },
+   {
+    "check": "market_open",
+    "detail": "open",
+    "ok": true
+   },
+   {
+    "check": "quote_fresh",
+    "detail": "quote age 1.0s (≤30s)",
+    "ok": true
+   },
+   {
+    "check": "basis",
+    "detail": "basis within tolerance",
+    "ok": true
+   },
+   {
+    "check": "not_expired",
+    "detail": "valid until 2026-09-29T02:15:05.277000Z",
+    "ok": true
+   },
+   {
+    "check": "recommendation_age",
+    "detail": "156s old (≤300s)",
+    "ok": true
+   },
+   {
+    "check": "confidence",
+    "detail": "60 (≥55)",
+    "ok": true
+   },
+   {
+    "check": "pending_price_valid",
+    "detail": "SELL_LIMIT 83005.21 is 126.21 from bid 82879.0 (≥ stops level 25.00)",
+    "ok": true
+   },
+   {
+    "check": "sl_side",
+    "detail": "entry 83005.21 vs SL 83235.21",
+    "ok": true
+   },
+   {
+    "check": "sl_min_distance",
+    "detail": "230.00 ≥ max(stops_level+spread 51.00, 0.5×ATR 95.40)",
+    "ok": true
+   },
+   {
+    "check": "sl_max_distance",
+    "detail": "230.00 ≤ 5.0×ATR 954.01",
+    "ok": true
+   },
+   {
+    "check": "spread_vs_sl",
+    "detail": "spread 26.00 ≤ 20% of SL distance 230.00",
+    "ok": true
+   },
+   {
+    "check": "rr_after_costs",
+    "detail": "2.117 ≥ 1.5",
+    "ok": true
+   },
+   {
+    "check": "position_size",
+    "detail": "0.01 lots, risk 2.31% ($2.30) — target 1.00% is below the minimum lot; minimum lot risks 2.31% (≤ max 3.00%)",
+    "ok": true
+   },
+   {
+    "check": "effective_leverage",
+    "detail": "8.4× ≤ 10.0×",
+    "ok": true
+   },
+   {
+    "check": "max_open_positions",
+    "detail": "0 open positions/pending orders (< 3)",
+    "ok": true
+   },
+   {
+    "check": "correlated_exposure",
+    "detail": "group ['BTCUSDT', 'ETHUSDT']: 2.31% open+new SL risk (≤ 4.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_limit",
+    "detail": "today 0.00% (limit −10.0%)",
+    "ok": true
+   },
+   {
+    "check": "daily_loss_worst_case",
+    "detail": "realised today 0.00% − open SL risk 0.00% − this trade 2.31% = -2.31% (≥ −10.0%)",
+    "ok": true
+   }
+  ],
+  "entry": 83005.21,
+  "lots": 0.01,
+  "rr_exec": 2.117391304347826
+ }
+}

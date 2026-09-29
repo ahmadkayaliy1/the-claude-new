@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import no_desk
 from tradingsystem.ai.store import DecisionRecord
 from tradingsystem.core.settings import PathsCfg, PositionActionsCfg, load_settings
 from tradingsystem.core.timeutil import iso, now_ms
@@ -126,7 +127,7 @@ def live(tmp_path, real_xau_ticks, monkeypatch):
              zip(t["key"].to_pylist(), t["time_msc"].to_pylist(), t["bid"].to_pylist(), t["ask"].to_pylist())]
     s = load_settings(env_path=Path("nope.env"), extra_env={"EXECUTION_MODE": "paper", "EXECUTION_TRIGGER": "manual",
                                                            "TS_INSTANCE": ""})
-    s = s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"))})
+    s = no_desk(s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"))}))
     write_ticks(s, ticks)
 
     class Open:

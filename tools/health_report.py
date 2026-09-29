@@ -475,6 +475,11 @@ def system_report(s: Settings, hours: float, now: float) -> list[str]:
     ex = con.execute("SELECT pair, decision, execution_state, execution_detail FROM ai_decisions WHERE ts>=? AND "
                      "decision IN ('BUY','SELL')", (since,)).fetchall()
     p(f"trade ideas: {len(ex)} ({', '.join(f'{k} {v}' for k, v in collections.Counter(r[2] for r in ex).most_common())})")
+    shadow = [r for r in ex if r[2] == "not_executed" and r[3] and '"shadow": true' in r[3]]
+    if shadow:       # D-049: a desk in shadow is gated and scored, never sent - not a rejection, not an error
+        ok = sum('"desk_ok": true' in r[3] for r in shadow)
+        p(f"   shadow desk ideas (recorded, never sent): {len(shadow)} (desk_ok {ok}) - "
+          + ", ".join(f"{k} {v}" for k, v in collections.Counter(r[0] for r in shadow).most_common()))
     reasons = collections.Counter()
     for r in ex:
         if r[2] == "rejected" and r[3]:

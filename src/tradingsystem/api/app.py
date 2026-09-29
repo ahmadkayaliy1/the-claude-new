@@ -512,11 +512,14 @@ def create_app(s: Settings) -> FastAPI:
             raise HTTPException(404, "decision not found")
         con = sqlite3.connect(app_db, timeout=10)
         try:
-            row = con.execute("SELECT status, decision, execution_state, valid_until, ts, recommendation FROM ai_decisions "
-                              "WHERE id=?", (decision_id,)).fetchone()
+            row = con.execute("SELECT status, decision, execution_state, valid_until, ts, recommendation, pair "
+                              "FROM ai_decisions WHERE id=?", (decision_id,)).fetchone()
             if not row:
                 raise HTTPException(404, "decision not found")
-            status, dec, state, valid_until, ts, rec_json = row
+            status, dec, state, valid_until, ts, rec_json, row_pair = row
+            desk = (s.pairs.get(row_pair).desk if row_pair in s.pairs else None)
+            if desk is not None and desk.mode == "shadow":        # D-049: a shadow desk's ideas are never executed
+                raise HTTPException(409, f"{row_pair} is a shadow desk: its ideas are recorded and scored, never executed")
             if status != "valid" or dec not in ("BUY", "SELL"):
                 raise HTTPException(409, f"not executable (status={status}, decision={dec})")
             if valid_until and now_ms() >= valid_until:

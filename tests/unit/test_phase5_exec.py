@@ -13,6 +13,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from tests.conftest import no_desk
 from tradingsystem.ai.store import DecisionRecord
 from tradingsystem.core.killswitch import kill_switch_path, set_kill_switch
 from tradingsystem.core.settings import PathsCfg, load_settings
@@ -45,8 +46,8 @@ def armed(tmp_path, real_xau_ticks, monkeypatch):
              zip(t["key"].to_pylist(), t["time_msc"].to_pylist(), t["bid"].to_pylist(), t["ask"].to_pylist())]
     s = load_settings(env_path=Path("nope.env"), extra_env={"EXECUTION_MODE": "paper", "EXECUTION_TRIGGER": "manual",
                                                            "TS_INSTANCE": ""})
-    s = s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs")),
-                             "execution": s.execution.model_copy(update={"paper_equity": 100_000.0})})
+    s = no_desk(s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs")),
+                                     "execution": s.execution.model_copy(update={"paper_equity": 100_000.0})}))
     write_ticks(s, ticks)
 
     class Open:

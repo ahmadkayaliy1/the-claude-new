@@ -17,6 +17,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import yaml
 from dotenv import dotenv_values
@@ -159,6 +160,78 @@ class BinanceCfg(_Model):
 
 
 # --------------------------------------------------------------------------- pairs/instruments
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _check_tz(name: str, where: str) -> str:
+    try:
+        ZoneInfo(name)
+    except Exception as exc:  # noqa: BLE001 — ZoneInfoNotFoundError, ValueError (bad key), OSError
+        raise ValueError(f"{where}: unknown time zone {name!r}") from exc
+    return name
+
+
+def _check_hhmm(v: str, where: str) -> str:
+    if not isinstance(v, str) or not _HHMM_RE.match(v):
+        raise ValueError(f"{where}: {v!r} is not a 24-h HH:MM time")
+    return v
+
+
+class DeskWindowCfg(_Model):
+    """One call window of a desk (B15 reads it): local wall-clock ``start``..``end`` in ``tz`` (DST follows the zone)."""
+    name: str = Field(min_length=1)
+    tz: str
+    start: str
+    end: str
+
+    @model_validator(mode="after")
+    def _check(self) -> "DeskWindowCfg":
+        _check_tz(self.tz, f"desk window {self.name!r}")
+        _check_hhmm(self.start, f"desk window {self.name!r} start")
+        _check_hhmm(self.end, f"desk window {self.name!r} end")
+        if self.start >= self.end:
+            raise ValueError(f"desk window {self.name!r}: start {self.start} must be before end {self.end} "
+                             "(no window crosses midnight)")
+        return self
+
+
+class DeskClockCfg(_Model):
+    """A wall-clock time in a zone (the Friday cutoff)."""
+    time: str
+    tz: str
+
+    @model_validator(mode="after")
+    def _check(self) -> "DeskClockCfg":
+        _check_hhmm(self.time, "desk friday_cutoff time")
+        _check_tz(self.tz, "desk friday_cutoff")
+        return self
+
+
+def _default_desk_windows() -> list[DeskWindowCfg]:
+    return [DeskWindowCfg(name="london", tz="Europe/London", start="07:45", end="11:00"),
+            DeskWindowCfg(name="new_york", tz="America/New_York", start="08:15", end="11:30")]
+
+
+class DeskCfg(_Model):
+    """A desk (D-049): a pair that is analysed and scored but never traded. ``mode: shadow`` is the only mode — the
+    executor gates every valid BUY/SELL of the pair in full for the record and stores it ``not_executed``/``shadow``
+    (scored in R by the virtual outcomes); it never places, modifies or cancels an order for the pair. A real
+    ("live") mode is a future owner decision (H32) and does not exist. Code default of ``PairCfg.desk`` is None =
+    the pair trades as before."""
+    mode: Literal["shadow"] = "shadow"
+    brief: str = Field("", max_length=200)          # prompt appendix under ai/prompts, e.g. "desks/xau" (B18)
+    windows: list[DeskWindowCfg] = Field(default_factory=_default_desk_windows)          # entry-call windows (B15)
+    reopen_grace_min: int = Field(60, ge=0, le=600)     # no entry call this long after the Sunday reopen (B15)
+    friday_cutoff: DeskClockCfg = DeskClockCfg(time="12:00", tz="America/New_York")     # none after it on Friday (B15)
+
+    @model_validator(mode="after")
+    def _check(self) -> "DeskCfg":
+        names = [w.name for w in self.windows]
+        if len(set(names)) != len(names):
+            raise ValueError("desk.windows: duplicate window names")
+        return self
+
+
 class ContractCfg(_Model):
     """Execution contract facts (measured from MT5 symbol_info, P1.5; re-validated by the executor at runtime).
     The cost fields feed ``market.execution.costs`` in the snapshot so the model plans with the venue's real limits."""
@@ -205,10 +278,13 @@ class PairCfg(_Model):
     price_decimals: int = 2
     footprint_bucket: float = 1.0          # price bucket for footprint / volume profile
     flow_proxy_approved: bool = False      # use a flow_context instrument's order flow as proxy (P1.11)
+    desk: DeskCfg | None = None            # Phase 5 B14 (D-049): shadow desk — metal pairs only; None = trades as before
     instruments: list[InstrumentCfg]
 
     @model_validator(mode="after")
     def _check_roles(self) -> "PairCfg":
+        if self.desk is not None and self.asset_class != "metal":
+            raise ValueError(f"desk is only valid for metal pairs (asset_class is {self.asset_class!r})")
         primaries = [i for i in self.instruments if "analysis_primary" in i.roles]
         if len(primaries) != 1:
             raise ValueError("each pair needs exactly one `analysis_primary` instrument")
@@ -726,6 +802,38 @@ def _apply_env_overrides(raw: dict[str, Any], env: dict[str, str]) -> dict[str, 
 
 INSTANCE_ENV = "TS_INSTANCE"
 
+# instances.<PAIR>.overrides.risk may only TIGHTEN (D-049 / B14): per RiskCfg field the direction that is stricter.
+# "down" = the override must be <= the base value, "up" = >=. A field without a direction here (lists, flags) is
+# refused — a new RiskCfg field must be classified before an instance may override it (test_desk_cfg checks that).
+RISK_TIGHTEN: dict[str, Literal["down", "up"]] = {
+    "risk_per_trade_pct": "down", "max_risk_per_trade_pct": "down", "max_daily_loss_pct": "down",
+    "min_rr": "up", "max_open_positions": "down", "max_effective_leverage": "down",
+    "sl_atr_min_mult": "up", "sl_atr_max_mult": "down", "max_spread_to_sl_ratio": "down",
+    "min_confidence": "up", "account_drawdown_stop_pct": "down", "max_recommendation_age_s": "down",
+    "max_data_staleness_s": "down", "max_correlated_risk_pct": "down",
+}
+
+
+def _check_risk_tightens(instance: str, base_risk: dict[str, Any], override: Any) -> None:
+    """Refuse an instance risk override that loosens (or cannot be judged as tightening) a RiskCfg field."""
+    where = f"instances.{instance}.overrides.risk"
+    if not isinstance(override, dict):
+        raise ValueError(f"{where} must be a mapping")
+    base = RiskCfg.model_validate(base_risk or {})
+    for key, val in override.items():
+        if key not in RiskCfg.model_fields:
+            raise ValueError(f"{where}.{key}: unknown risk setting")
+        direction = RISK_TIGHTEN.get(key)
+        if direction is None:
+            raise ValueError(f"{where}.{key} may not be overridden per instance (no tightening direction is defined "
+                             "for it) — change it globally")
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            raise ValueError(f"{where}.{key}: {val!r} is not a number")
+        cur = getattr(base, key)
+        if (val > cur) if direction == "down" else (val < cur):
+            raise ValueError(f"{where}.{key}: {val} would loosen the limit {cur} (an instance may only "
+                             f"tighten: {'at most' if direction == 'down' else 'at least'} {cur})")
+
 
 def _apply_instance(raw: dict[str, Any], instance: str) -> dict[str, Any]:
     """One system per pair (D-042): only ``instance`` is enabled; state, logs, API port and MT5 magic are the
@@ -742,6 +850,11 @@ def _apply_instance(raw: dict[str, Any], instance: str) -> dict[str, Any]:
     bad = sorted(set(ov) & {"paths", "pairs", "instances", "config_hash"})
     if bad:
         raise ValueError(f"instances.{instance}.overrides may not set {bad}")
+    if "risk" in ov:
+        _check_risk_tightens(instance, out.get("risk") or {}, ov["risk"])
+    if "execution" in ov and (not isinstance(ov["execution"], dict) or "magic" in ov["execution"]):
+        raise ValueError(f"instances.{instance}.overrides.execution may not set 'magic' (the instance's magic is "
+                         "execution.magic + magic_offset)")
     out = _deep_merge(out, ov)
     pairs = out.get("pairs") or {}
     for name, p in pairs.items():

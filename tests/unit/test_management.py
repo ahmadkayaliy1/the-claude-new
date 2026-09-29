@@ -10,6 +10,7 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
+from tests.conftest import no_desk
 from tradingsystem.analysis import indicators as ind
 from tradingsystem.analysis.structure import pivots
 from tradingsystem.core.settings import ManagementCfg, PathsCfg, load_settings
@@ -358,7 +359,7 @@ class FixedMarket:
 @pytest.fixture
 def settings(tmp_path):
     s = load_settings(env_path=Path("nope.env"), extra_env={"EXECUTION_MODE": "paper", "EXECUTION_TRIGGER": "manual"})
-    return s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"))})
+    return no_desk(s.model_copy(update={"paths": PathsCfg(data_dir=str(tmp_path / "data"), logs_dir=str(tmp_path / "logs"))}))
 
 
 def with_mgmt(s, **kw):

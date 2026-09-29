@@ -57,8 +57,8 @@ def test_host_header_allow_list_blocks_dns_rebinding(env):
 
 def test_execute_refuses_what_the_gate_would_call_too_old(env):
     age = env.s.risk.max_recommendation_age_s
-    add_decision(env.store, "old", age + 60)
-    add_decision(env.store, "new", 10)
+    add_decision(env.store, "old", age + 60, pair="BTCUSDT")     # XAUUSD is a shadow desk (D-049): never executable
+    add_decision(env.store, "new", 10, pair="BTCUSDT")
     h = {"X-Dashboard-Token": TOKEN, "Origin": env.origin}
     r = env.client.post("/api/decisions/old/execute", headers=h)
     assert r.status_code == 409 and "too old" in r.text
@@ -133,3 +133,12 @@ def test_chart_routes_serve_only_configured_files_and_nothing_while_charts_are_o
         update={"enabled": False})})})
     client = TestClient(app_mod.create_app(off), base_url=env.origin)
     assert client.get("/api/charts/XAUUSD").json() == []                                # a rollback shows no leftovers
+
+
+def test_execute_refuses_a_shadow_desk_idea(env):
+    """D-049: XAUUSD's desk is in shadow - the dashboard's Execute-Now button must never queue its ideas."""
+    add_decision(env.store, "gold", 10, pair="XAUUSD")
+    h = {"X-Dashboard-Token": TOKEN, "Origin": env.origin}
+    r = env.client.post("/api/decisions/gold/execute", headers=h)
+    assert r.status_code == 409 and "shadow desk" in r.text
+    assert fresh(env)["latest_decisions"]["XAUUSD"]["execution_state"] == "not_executed"

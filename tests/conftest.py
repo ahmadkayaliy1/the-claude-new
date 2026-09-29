@@ -16,6 +16,12 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 
+def no_desk(s):
+    """The settings with every pair's desk removed. config.yaml puts XAUUSD in shadow (D-049 / B14: never traded), so
+    the executor tests that trade XAUUSD on paper (a stand-in for any traded pair) run with the desk off."""
+    return s.model_copy(update={"pairs": {k: p.model_copy(update={"desk": None}) for k, p in s.pairs.items()}})
+
+
 @pytest.fixture(scope="session")
 def real_aggtrades():
     import pyarrow.csv as pacsv

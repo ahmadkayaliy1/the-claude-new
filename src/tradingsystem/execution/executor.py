@@ -45,6 +45,7 @@ from ..storage.tablespec import spec_for
 from .action_gate import ActionContext
 from .action_gate import evaluate as gate_action
 from .backends.paper import PaperBackend, Tick
+from .desk import SHADOW_KEY, ShadowGuard, ShadowViolation, assert_not_shadow, shadow_pairs
 from .drawdown import AccountPeak
 from .exposure import live_sides
 from .management import ActionLog, MT5Legs, PaperLegs, PositionManager
@@ -54,6 +55,9 @@ from .price_mapping import check_basis, translate
 from .risk_gate import ExecContext, evaluate
 
 log = logging.getLogger("executor")
+# risk-gate checks a shadow idea is not held to (D-049): the account cannot carry the 1-oz minimum while the model is
+# asked for the trade a professional would take; ``desk_ok`` = every OTHER check passed
+DESK_WAIVED_CHECKS = ("position_size", "effective_leverage")
 STOPS_LEVEL_PRICE = {"XAUUSD@": 0.25, "BTCUSD@": 25.0, "ETHUSD@": 2.0}   # P1.5 (stops_level × point); MT5 backend reads live
 MT5_SETTLE_MS = 3_000          # after an MT5 placement, before the next candidate is gated (broker listing lag)
 SETTLE_LOOKBACK_DAYS = 45      # executed decisions older than this are no longer polled for their outcome
@@ -114,6 +118,8 @@ def all_pairs_by_symbol(s: Settings, profile: str) -> dict[str, str]:
 
 
 class Executor:
+    shadow_pairs: frozenset[str] = frozenset()      # set in __init__ (a test double built without it has no desk)
+
     def __init__(self, s: Settings) -> None:
         self.s = s
         self.reg = InstrumentRegistry.from_settings(s)
@@ -141,6 +147,15 @@ class Executor:
                                   own_pairs=set(s.enabled_pairs()),
                                   adopt_magic=base if s.paths.instance else None, family=family)
             self.mt5.assert_account()
+        # D-049 / B14: a pair whose desk is in shadow never reaches the backend. The executor checks the pair itself
+        # (handle, _handle, the management and model-action steps); this wrapper is the second layer - a mutating
+        # call that resolves to a shadow pair raises even if a later change forgets the first check
+        self.shadow_pairs = shadow_pairs(s)
+        if self.shadow_pairs:
+            if self.paper is not None:
+                self.paper = ShadowGuard(self.paper, self.shadow_pairs, self._mutation_pair)
+            if self.mt5 is not None:
+                self.mt5 = ShadowGuard(self.mt5, self.shadow_pairs, self._mutation_pair)
         self.attempts: dict[str, tuple[int, int]] = {}     # decision id → (failed attempts, next try ms)
         self.unreconciled: set[str] = set()                # 'executing' rows whose reconciliation failed
         self.reconcile_due = True                          # 'executing' rows left by a previous run: settle first
@@ -198,6 +213,35 @@ class Executor:
             if exe and exe[0].venue == "mt5":
                 out[exe[0].symbol] = p
         return out
+
+    def _mutation_pair(self, method: str, args: tuple, kwargs: dict) -> str | None:
+        """The pair a mutating backend call acts on (:class:`.desk.ShadowGuard`); None when it cannot be told."""
+        def arg(i: int, name: str):
+            return kwargs[name] if name in kwargs else (args[i] if len(args) > i else None)
+
+        def one(sql: str, val) -> str | None:
+            con = sqlite3.connect(f"file:{self.app_db.as_posix()}?mode=ro", uri=True, timeout=10)
+            try:
+                r = con.execute(sql, (val,)).fetchone()
+            finally:
+                con.close()
+            return r[0] if r else None
+
+        by_symbol = {**self.pair_by_symbol(), **(getattr(self.mt5, "pair_by_symbol", None) or {})}
+        if method == "place":
+            return kwargs.get("pair") or by_symbol.get(kwargs.get("symbol"))
+        if method in ("cancel_decision", "close_legs"):
+            return one("SELECT pair FROM ai_decisions WHERE id=?", arg(0, "decision_id"))
+        if method == "modify_leg":
+            return one("SELECT pair FROM paper_legs WHERE id=?", arg(0, "leg_id"))
+        if method in ("modify_sl", "modify_tp"):
+            return by_symbol.get(arg(1, "symbol"))
+        if method in ("close_position", "cancel_order") and self.mt5 is not None:
+            raw, ticket = self.mt5.wrapped, arg(0, "ticket")
+            found = raw._position(ticket) if method == "close_position" else next(
+                iter(raw._ask(f"order {ticket}", raw.mt5.orders_get(ticket=ticket))), None)
+            return by_symbol.get(found.symbol) if found is not None else None
+        return None
 
     # ------------------------------------------------------------------ data helpers
     def reader(self, key: str) -> InstrumentReader:
@@ -300,7 +344,10 @@ class Executor:
             rows = con.execute(
                 f"SELECT id, ts, pair, recommendation, execution_state FROM ai_decisions WHERE status='valid' "
                 f"AND decision IN ('BUY','SELL') AND execution_state IN ({','.join('?' * len(states))}) "
-                f"AND (execution_state='queued' OR ts >= ?) ORDER BY ts",
+                f"AND (execution_state='queued' OR ts >= ?) "
+                # a shadow idea is final once stored (D-049): never picked up again, whatever the trigger mode
+                f"AND (execution_detail IS NULL OR NOT json_valid(execution_detail) "
+                f"OR json_extract(execution_detail, '$.{SHADOW_KEY}') IS NULL) ORDER BY ts",
                 (*states, self.started)).fetchall()
         finally:
             con.close()
@@ -310,7 +357,13 @@ class Executor:
     def handle(self, cand: dict) -> None:
         """Gate and place one candidate. MT5: one system at a time from reading the account to the broker listing
         the new order (``mt5_placement.lock``), so two pairs' systems never both pass the correlated-risk cap on
-        the same account snapshot; a busy lock raises (the candidate is retried with backoff)."""
+        the same account snapshot; a busy lock raises (the candidate is retried with backoff).
+
+        A shadow desk's idea (D-049) is decided FIRST, before any lock or backend call: it is gated for the record and
+        stored, never placed; an exception there is recorded and fails closed (nothing is sent)."""
+        if cand.get("pair") in self.shadow_pairs:
+            self._handle_shadow(cand)
+            return
         if self.mt5 is None:
             self._handle(cand)
             return
@@ -325,14 +378,37 @@ class Executor:
                 if self._placing:                  # also when placing raised after some legs reached the broker
                     time.sleep(MT5_SETTLE_MS / 1000)   # the broker lists the new order before another system gates
 
+    def _handle_shadow(self, cand: dict) -> None:
+        """One shadow idea: gated in full and stored ``not_executed`` / ``shadow`` (:meth:`_handle`), never sent. Any
+        exception ends in an ``ingestion_events`` row and a stored ``shadow`` error record - nothing was sent, and the
+        loop goes on with the other candidates. Only when even that record cannot be written the exception goes up to
+        :meth:`process_candidates`, whose back-off and reject path also touch nothing but the database."""
+        pair, did = cand["pair"], cand["id"]
+        try:
+            self._handle(cand)
+        except Exception as exc:  # noqa: BLE001 - fail closed, never block process_candidates
+            log.exception("%s %s: shadow path failed - nothing sent", pair, did[:8])
+            self.appdb.add_event("executor", "shadow_error", f"{pair} {did[:8]}: {exc!r}"[:300])
+            self.store.set_execution_state(did, "not_executed", {SHADOW_KEY: True, "desk_ok": False,
+                                                                  "error": repr(exc)[:300], "mode": self.mode})
+
+    def _refuse(self, did: str, pair: str, state: str, detail: dict) -> None:
+        """A candidate that never reached the gate (not enabled, expired, no quote): a real pair is ``state``; a shadow
+        idea stays ``not_executed`` with the shadow record (it is still scored in R from its levels)."""
+        if pair in self.shadow_pairs:
+            self.store.set_execution_state(did, "not_executed", {SHADOW_KEY: True, "desk_ok": False, **detail})
+        else:
+            self.store.set_execution_state(did, state, detail)
+
     def _handle(self, cand: dict) -> bool:
         """True when an order reached the backend (placed or partly placed)."""
         pair, rec, did = cand["pair"], cand["rec"], cand["id"]
+        shadow = pair in self.shadow_pairs
         if pair not in self.s.enabled_pairs():
             self.store.set_execution_state(did, "rejected", {"reason": f"pair {pair} is not enabled"})
             return False
         if now_ms() >= parse_date_spec(rec["valid_until"]):
-            self.store.set_execution_state(did, "expired", {"reason": f"expired (valid until {rec['valid_until']})"})
+            self._refuse(did, pair, "expired", {"reason": f"expired (valid until {rec['valid_until']})"})
             return False
         exe = self.reg.with_role(pair, "execution")[0]
         exe_symbol = self.exec_reg.with_role(pair, "execution")[0].symbol
@@ -340,13 +416,13 @@ class Executor:
         pcfg = self.s.pairs[pair]
         eq = self.latest_quote(exe.key)
         if eq is None:
-            self.store.set_execution_state(did, "rejected", {"reason": "no execution quote"})
+            self._refuse(did, pair, "rejected", {"reason": "no execution quote"})
             return False
         basis_ok, basis_reason, rec_x = True, "same instrument", rec
         if prim.key != exe.key:
             pq = self.latest_quote(prim.key)
             if pq is None:
-                self.store.set_execution_state(did, "rejected", {"reason": "no analysis quote for basis"})
+                self._refuse(did, pair, "rejected", {"reason": "no analysis quote for basis"})
                 return False
             bc = check_basis((pq.bid + pq.ask) / 2, (eq.bid + eq.ask) / 2, self.basis_history(pair),
                              self.s.execution.max_basis_deviation_pct)
@@ -390,6 +466,20 @@ class Executor:
                                                                          rec_x["take_profits"], gate.single_leg_tp)
             if notes:
                 detail["management_notes"] = notes
+        if shadow:
+            # D-049: the full gate ran for the record; the idea is stored and scored, never placed. desk_ok = every
+            # check but the two the account's size fails (position_size, effective_leverage) passed AND the gate got
+            # as far as sizing (an early return leaves later checks unrun - not a pass)
+            failed = [n for n, ok, _ in gate.checks if not ok and n not in DESK_WAIVED_CHECKS]
+            detail.update({SHADOW_KEY: True, "desk_ok": gate.size is not None and not failed,
+                           "desk_waived": list(DESK_WAIVED_CHECKS), "desk_failed": failed,
+                           "gate_approved": gate.approved})
+            self.store.set_execution_state(did, "not_executed", detail)
+            self.appdb.add_event("executor", "shadow_idea", f"{pair} {did[:8]}: desk_ok={detail['desk_ok']}"
+                                 + (f" failed {failed}" if failed else ""))
+            log.info("%s %s shadow idea stored (desk_ok=%s, failed %s)", pair, did[:8], detail["desk_ok"], failed)
+            return False
+        assert_not_shadow(self.shadow_pairs, pair, "placement")      # unreachable for a shadow pair (returned above)
         if not gate.approved:
             detail["reason"] = "; ".join(gate.failures())
             self.store.set_execution_state(did, "rejected", detail)
@@ -719,7 +809,8 @@ class Executor:
                 "open_orders": acct.get("open_orders"),
                 "today_pnl_pct": round(today / eq * 100, 2) if eq else None,
                 "exposure": acct.get("exposure") or [], "account_drawdown": dd.as_detail() if dd else None,
-                "errors_last_5min": len(self.loop_errors), "kill_switch": switch}
+                "errors_last_5min": len(self.loop_errors), "kill_switch": switch,
+                "shadow_pairs": sorted(self.shadow_pairs & set(self.s.enabled_pairs()))}
 
     def _announce_transitions(self, switch: bool, dd) -> None:
         """Kill switch on/off and the account drawdown stop, announced once per change (not at start-up)."""
@@ -857,13 +948,15 @@ class Executor:
                                (now_ms() - SETTLE_LOOKBACK_DAYS * MS_PER_DAY, self.mode)).fetchall()
         finally:
             con.close()
-        enabled = set(self.s.enabled_pairs())
+        enabled = set(self.s.enabled_pairs()) - self.shadow_pairs      # a shadow desk has nothing to manage (D-049)
         return [{"id": r[0], "pair": r[1], "recommendation": json.loads(r[2]) if r[2] else {},
                  "execution_detail": json.loads(r[3]) if r[3] else {}} for r in rows if r[1] in enabled]
 
     def manage_positions(self) -> None:
         """P9.6: apply every open trade's declared management rules (breakeven, trailing, partials, time stop)."""
         decisions = self._open_decisions()
+        for d in decisions:
+            assert_not_shadow(self.shadow_pairs, d["pair"], "position management")
         if decisions:
             self.manager.manage(decisions, now_ms())
 
@@ -918,6 +1011,8 @@ class Executor:
             return
         now = now_ms()
         for pair in self.s.enabled_pairs():
+            if pair in self.shadow_pairs:
+                continue                       # D-049: a shadow desk's actions are never applied (there is nothing live)
             since, waiting = now - ACTION_WINDOW_MS, self._deferred_sources(pair)
             for d in self.store.pending_actions(pair, 0 if waiting else since):
                 if d["ts"] < since and d["id"] not in waiting:
@@ -945,6 +1040,7 @@ class Executor:
         carried out exactly — a restart or an unknown outcome re-reads the legs and re-sends only what did not take
         effect, never re-plans a fraction on a reduced position. Only a waiting (deferred) stop is re-checked by the
         gate every loop. Priced actions (a stop, a target) need the live basis; close and cancel_order do not."""
+        assert_not_shadow(self.shadow_pairs, pair, "position actions")
         rec, d = d["rec"], {**d, "pair": pair}
         acts = rec.get("position_actions") or []
         if not acts:
@@ -1034,6 +1130,7 @@ class Executor:
     def _send_model_plan(self, d: dict, seq: int, target: str, a: dict, plan, checks: list, before: dict) -> bool:
         """Send one planned leg action (its 'pending' row is written); True when it ended final."""
         pair, leg_key = d["pair"], plan.leg.key
+        assert_not_shadow(self.shadow_pairs, pair, "position action")
         res = self._apply_plan(plan)
         if res.status == "unknown":                   # sent, no confirmation: stays pending, re-read first
             return False
