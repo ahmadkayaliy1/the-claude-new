@@ -59,6 +59,11 @@ owner's), for one pair per session and never for the last pair still trading; a 
 never pass `--base` or `--body-file` (the body goes in `--body`). Do not pass `--actor`: everything you do is recorded
 as `operator-session:<review id>`.
 
+A proposal body is ONE line: the permission rule matches a single line, so a body with real line breaks is refused
+and you have no editor to fall back on. Where a line break belongs write the two characters backslash and n, e.g.
+`--body '## Problem\nXAU ...\n\n## Numbers\n...\n\n## Proposed change\n...\n\n## Risk\n...\n\n## Test plan\n...'`
+(all five headings are required; the tool turns the escapes into line breaks). Use `--dry-run` first when unsure.
+
 Never read `.env`, credential files or anything under a user profile, and never print a token, password or key. The
 files you may read are the project's code, configuration and docs, and the data root named in the pack; a read
 anywhere else is denied.
