@@ -92,3 +92,12 @@ def test_model_view_renders_the_fit_flag_as_int():
     v = model_view({"meta": {"as_of": "2026-09-29T10:00:00Z"},
                     "account": {"equity": 99, "min_position_risk": {"fits_now": False, "equity_for_min_lot": 413}}})
     assert v["account"]["min_position_risk"] == {"fits_now": 0, "equity_for_min_lot": 413}
+
+
+def test_the_review_sessions_are_told_the_floor_is_the_systems_and_gold_is_a_shadow_desk():
+    """B13: the 2026-09-29 daily review called the 15m ATR floor "the venue's min_stop_distance" - the operator
+    sessions' system prompt names the rules as the legend does, and says XAU ideas are shadow by design (D-049)."""
+    text = (Path(__file__).resolve().parents[2] / "tools" / "operator" / "prompts" / "_system.md").read_text(
+        encoding="utf-8")
+    assert "the venue's own minimum is `stops_level`" in text and "SYSTEM's floor" in text
+    assert "system_atr_floor" in text and "fits_now" in text and "SHADOW" in text

@@ -34,7 +34,7 @@ from ...storage.validators import validate_rows
 from ..common.appdb import AppDB
 from .convert import TickCursor, mt5_candle_gaps, rates_to_rows, ticks_to_rows
 from .servertime import MonotonicServerClock, ServerTimeModel
-from .terminal import AccountMismatch, MT5Terminal
+from .terminal import AccountMismatch, MT5Terminal, MT5Unavailable
 
 log = logging.getLogger("ingest-mt5")
 COLLECTOR = "mt5"
@@ -42,11 +42,14 @@ LIVE_GAPFILL_MAX_MS = 3 * MS_PER_DAY
 AUDIT_EVERY_S = 300
 AUDIT_WINDOW_MS = 2 * 3_600_000          # at least; 3 bars for H4
 RATES_FAIL_EVENT_AFTER = 30              # consecutive failed rate polls (≈ 30 s) while open → one event
+CONTEXT_RATES_EVERY_S = 5.0              # a candles-only context instrument (B17) polls its bars every 5 s, not every 1 s
 
 
 class MT5Sink:
     def __init__(self, inst: Instrument, s: Settings, model: ServerTimeModel) -> None:
         self.inst = inst
+        self.context = inst.is_context           # B17: candles only, optional symbol, polled less often
+        self.next_rates = 0.0
         self.hot = SQLiteHotStore(inst.hot_db_path(s.paths.data()), cache_mb=s.resource.sqlite_cache_mb)
         self.hot.ensure_tables([*table_specs(inst), *system_specs()])
         self.cal = calendar_for(inst.venue, inst.symbol, s.pairs[inst.pair].asset_class)
@@ -89,6 +92,7 @@ class MT5LiveService:
         self.instruments = [i for i in reg.all() if i.venue == "mt5"]
         self.term = MT5Terminal(s.mt5_data_profile())
         self.sinks: dict[str, MT5Sink] = {}
+        self.missing: set[str] = set()       # context instruments the broker does not have (retried at every connect)
         self.stop = False
         self.errors = 0
         self.reconnects = 0
@@ -99,7 +103,10 @@ class MT5LiveService:
         return self.term.timeframe(tf.mt5_attr)
 
     def _init_cursor(self, sink: MT5Sink) -> None:
-        """Resume the tick cursor from the last stored tick (hot, else cold), else from the newest tick."""
+        """Resume the tick cursor from the last stored tick (hot, else cold), else from the newest tick. A candles-only
+        instrument (B17) has no cursor."""
+        if "ticks" not in sink.inst.datatypes:
+            return
         spec = spec_for(sink.inst, "ticks")
         last = sink.hot.read_last(spec, 1, columns=["srv_msc"])["srv_msc"]
         srv = int(last[0]) if len(last) else None
@@ -117,10 +124,27 @@ class MT5LiveService:
             seen = int((at == srv).sum()) if len(at) else 0
         sink.cursor = TickCursor(sink.inst.symbol, srv, seen)
 
+    def _select_context(self, inst: Instrument) -> bool:
+        """Make a context symbol visible (B17). A symbol the broker does not have is reported once per connect (an
+        event and an error line) and left out — no file is created for it, nothing else is affected."""
+        try:
+            self.term.select_symbols([inst.symbol])
+        except MT5Unavailable as exc:
+            if inst.key not in self.missing:
+                log.error("%s: context symbol not available (%s) — intermarket context stays unavailable", inst.key, exc)
+                self.appdb.add_event(COLLECTOR, "context_symbol_missing", f"{inst.key}: {exc}"[:300])
+            self.missing.add(inst.key)
+            return False
+        self.missing.discard(inst.key)
+        return True
+
     def _gapfill_rates(self, sink: MT5Sink) -> None:
         """Bars closed while disconnected. Seeds ``last_closed`` so a failed fetch here is retried by the poll."""
         mt5 = self.term.mt5
-        now_srv = int(mt5.symbol_info_tick(sink.inst.symbol).time_msc)
+        tick = mt5.symbol_info_tick(sink.inst.symbol)
+        if tick is None and sink.context:            # no quote yet (a closed market): the rates poll fills the gap
+            return
+        now_srv = int(tick.time_msc)
         for tf in sink.inst.timeframes:
             spec = spec_for(sink.inst, "candles", tf)
             last = sink.hot.read_last(spec, 1, columns=["srv_time"])["srv_time"]
@@ -138,6 +162,8 @@ class MT5LiveService:
                             mt5.last_error())
 
     def _poll_ticks(self, sink: MT5Sink) -> None:
+        if "ticks" not in sink.inst.datatypes:      # candles-only context instrument (B17): no tick calls at all
+            return
         mt5, cur = self.term.mt5, sink.cursor
         ticks = mt5.copy_ticks_from(sink.inst.symbol, cur.last_srv_msc // 1000, 100_000, mt5.COPY_TICKS_ALL)
         if ticks is None:
@@ -184,6 +210,9 @@ class MT5LiveService:
                 if closed:
                     sink.last_closed[tf.value] = max(last or 0, closed[-1][1])
             f = rows[-1]
+            if "ticks" not in sink.inst.datatypes:
+                # no ticks: the newest forming bar's server time stands in for "now" (the audit floors it to each grid)
+                sink.last_tick_srv = max(sink.last_tick_srv or 0, int(f[1]))
             sink.forming[tf.value] = (tf.value, f[0], f[2], f[3], f[4], f[5], float(f[6]), now_ms())
 
     def _rates_failed(self, sink: MT5Sink, tf: Timeframe, what: str) -> None:
@@ -222,15 +251,27 @@ class MT5LiveService:
     # ------------------------------------------------------------------ lifecycle
     def connect(self) -> None:
         acc = self.term.connect()
-        self.term.select_symbols([i.symbol for i in self.instruments])
+        self.term.select_symbols([i.symbol for i in self.instruments if not i.is_context])
         log.info("MT5 connected: %s (%s), leverage 1:%d", acc.server, "demo" if acc.trade_mode == 0 else "real",
                  acc.leverage)
         for inst in self.instruments:
-            if inst.key not in self.sinks:
-                self.sinks[inst.key] = MT5Sink(inst, self.s, self.model)
-            sink = self.sinks[inst.key]
-            self._init_cursor(sink)
-            self._gapfill_rates(sink)
+            if inst.is_context and not self._select_context(inst):
+                continue
+            try:
+                if inst.key not in self.sinks:
+                    self.sinks[inst.key] = MT5Sink(inst, self.s, self.model)
+                sink = self.sinks[inst.key]
+                self._init_cursor(sink)
+                self._gapfill_rates(sink)
+            except Exception as exc:  # noqa: BLE001
+                if not inst.is_context:
+                    raise
+                # context (B17): whatever is wrong with it must never cost the trading instruments their feed
+                log.error("%s: context instrument skipped (%r)", inst.key, exc)
+                self.appdb.add_event(COLLECTOR, "context_skipped", f"{inst.key}: {exc!r}"[:300])
+                sink = self.sinks.pop(inst.key, None)
+                if sink is not None:
+                    sink.hot.close()
         self.appdb.add_event(COLLECTOR, "connect", acc.server)
         self._clear_error = True
 
@@ -284,7 +325,14 @@ class MT5LiveService:
                 self._poll_ticks(sink)
             if t0 - last_rates >= 1.0:
                 for sink in self.sinks.values():
-                    self._poll_rates(sink)
+                    if not sink.context:
+                        self._poll_rates(sink)
+                    elif t0 >= sink.next_rates:
+                        sink.next_rates = t0 + CONTEXT_RATES_EVERY_S
+                        try:
+                            self._poll_rates(sink)
+                        except Exception:  # noqa: BLE001 — a context feed must never trigger a reconnect of the others
+                            log.exception("%s: context rates poll failed", sink.inst.key)
                 last_rates = t0
             if t0 - last_flush >= 0.5:
                 for sink in self.sinks.values():
@@ -328,6 +376,8 @@ class MT5LiveService:
         if not self.archive_guard.allowed():        # low disk: the ticks stay hot until a later rollover (A7)
             return
         for sink in self.sinks.values():
+            if "ticks" not in sink.inst.datatypes:
+                continue
             spec = spec_for(sink.inst, "ticks")
             try:
                 rollover(sink.hot, self.cold, sink.inst, spec, hot_days=self.s.storage.hot_days.get("ticks", 3),

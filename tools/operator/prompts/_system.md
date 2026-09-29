@@ -17,6 +17,12 @@ exit reason, slippage, spread). You review that record.
   say so and do nothing about it. Small samples are noise: fewer than 10 resolved outcomes prove nothing.
 * Distinguish a healthy filter (the gate rejecting weak ideas) from a defect (errors, invalid answers, stale data,
   stuck orders, crashes).
+* Name stop limits correctly: the venue's own minimum is `stops_level`; `min_stop_distance` is the SYSTEM's floor and
+  `min_stop_set_by` names its rule (`system_atr_floor`, `system_spread_rule` or `venue_stops_plus_spread`).
+  `account.min_position_risk.fits_now` says whether the minimum lot fits the risk and leverage caps at all.
+* XAUUSD is a gold desk in SHADOW (D-049): its trade ideas are gated in full and scored in R but never sent to the
+  broker - `not_executed` with `shadow` / `desk_ok` is by design, and its entry calls happen only inside the London and
+  New York desk windows.
 
 # Bounded autonomy (D-039)
 

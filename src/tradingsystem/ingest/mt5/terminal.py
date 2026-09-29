@@ -118,7 +118,10 @@ class MT5Terminal:
         for n in names:
             if not self.mt5.symbol_select(n, True):
                 raise MT5Unavailable(f"symbol {n!r} not available on {self.profile.server}: {self.mt5.last_error()}")
-            out[n] = self.mt5.symbol_info(n)._asdict()
+            info = self.mt5.symbol_info(n)
+            if info is None:
+                raise MT5Unavailable(f"symbol {n!r} has no symbol_info on {self.profile.server}: {self.mt5.last_error()}")
+            out[n] = info._asdict()
         return out
 
     def timeframe(self, attr: str) -> int:

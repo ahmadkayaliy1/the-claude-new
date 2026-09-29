@@ -98,6 +98,7 @@ class MT5Backfill:
         reg = InstrumentRegistry.from_settings(s)
         self.instruments = [i for i in reg.all() if i.venue == "mt5"]
         self.progress: dict[str, str] = {}
+        self.skipped: set[str] = set()       # context instruments (B17) the broker does not have
         # D-042: the systems of other pairs share this terminal — their live feeds come first too, and only one
         # history call at a time goes to the terminal across all of them
         own = s.paths.state().resolve()
@@ -159,7 +160,8 @@ class MT5Backfill:
             try:
                 self.term.shutdown()
                 self.term.connect()
-                self.term.select_symbols([inst.symbol for inst in self.instruments])
+                self.term.select_symbols([inst.symbol for inst in self.instruments if not inst.is_context])
+                self._select_context()
                 return True
             except AccountMismatch as exc:
                 log.error("MT5 backfill refuses the terminal account: %s", exc)
@@ -175,6 +177,20 @@ class MT5Backfill:
                 self.status("reconnecting", error=f"connect: {exc!r}"[:300])
                 time.sleep(delay)
         return False
+
+    def _select_context(self) -> None:
+        """Context instruments (B17) the broker does not have are left out of this pass (reported in the progress
+        note); a missing symbol never fails the pass of the trading instruments."""
+        self.skipped = set()
+        for inst in self.instruments:
+            if not inst.is_context:
+                continue
+            try:
+                self.term.select_symbols([inst.symbol])
+            except MT5Unavailable as exc:
+                log.error("MT5 backfill: context symbol %s not available (%s) — skipped", inst.key, exc)
+                self.skipped.add(inst.key)
+                self.progress[f"candles {inst.key}"] = "symbol not available at the broker (skipped)"
 
     # ------------------------------------------------------------------ MT5 calls
     def _call(self, what: str, fn: Callable[..., Any], *args: Any) -> np.ndarray | None:
@@ -452,7 +468,8 @@ class MT5Backfill:
             if not self._connect(res):
                 finish_pass(self.appdb, COLLECTOR, res)
                 return res
-            for inst in self.instruments:
+            insts = [i for i in self.instruments if i.key not in self.skipped]
+            for inst in insts:
                 hot = SQLiteHotStore(inst.hot_db_path(self.data), cache_mb=self.s.resource.sqlite_cache_mb)
                 hots[inst.key] = hot
                 hot.ensure_tables([*table_specs(inst), *system_specs()])
@@ -461,7 +478,7 @@ class MT5Backfill:
             # archive must never starve another instrument's 4h/1d bars
             work = [(f"candles {i.key} {name}", functools.partial(self.candles, tfs=[tf for tf in i.timeframes if pick(tf)]), i)
                     for name, pick in (("1h-1w", lambda tf: tf.ms >= 3_600_000), ("1m-15m", lambda tf: tf.ms < 3_600_000))
-                    for i in self.instruments] + [(f"ticks {i.key}", self.ticks, i) for i in self.instruments]
+                    for i in insts] + [(f"ticks {i.key}", self.ticks, i) for i in insts if "ticks" in i.datatypes]
             for unit, step, inst in work:
                 # the link dropped (previous unit failed, terminal re-syncing): reconnect with backoff, or end the
                 # pass (retried within minutes) instead of failing every remaining unit on a dead link
@@ -470,6 +487,8 @@ class MT5Backfill:
                 self.status()
                 try:
                     self._check_disk()
+                    if inst.key in self.skipped or inst.key not in hots:
+                        continue
                     step(inst, hots[inst.key])
                 except DiskFullError as exc:
                     log.error("%s", exc)

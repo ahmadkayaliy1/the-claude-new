@@ -348,7 +348,7 @@ def test_higher_timeframes_of_every_instrument_come_first(bf):
     n = len(bf.instruments)
     assert all(kind == "c" and low >= 3_600_000 for kind, _, low in order[:n])
     assert all(kind == "c" and low < 3_600_000 for kind, _, low in order[n:2 * n])
-    assert [k for k, _, _ in order[2 * n:]] == ["t"] * n
+    assert [k for k, _, _ in order[2 * n:]] == ["t"] * sum("ticks" in i.datatypes for i in bf.instruments)   # B17: none for context
 
 
 # ---------------------------------------------------------------------------------------------------- disk floor (A7)

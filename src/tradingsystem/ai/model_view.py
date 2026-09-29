@@ -140,6 +140,8 @@ def model_view(payload: dict) -> dict:
                                       if a not in ("columns", "now_columns", "days")}
             if isinstance(v.get("gold_clock"), dict):
                 v["gold_clock"] = _flags(v["gold_clock"])
+            if isinstance(v.get("cross"), dict):                        # the 96-bar window is in the legend
+                v["cross"] = {a: b for a, b in v["cross"].items() if a != "bars"}
         elif k == "history" and isinstance(v, list):
             v = [{**h, "summary": (h.get("summary") or "")[:HISTORY_SUMMARY_CHARS]} if isinstance(h, dict) else h
                  for h in v]

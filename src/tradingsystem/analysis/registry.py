@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from ..core.instruments import Instrument, InstrumentRegistry
 from ..core.settings import Settings
+from .cross import neighbours
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,8 @@ class Capability:
 
 
 ANALYSES = ("price_indicators", "market_structure_smc", "price_action", "liquidity", "volume_weighted",
-            "bar_delta_cvd", "footprint", "volume_profile", "time_profile_tpo", "order_book_depth", "derivatives")
+            "bar_delta_cvd", "footprint", "volume_profile", "time_profile_tpo", "order_book_depth", "derivatives",
+            "cross_asset")
 
 
 def capability_matrix(settings: Settings, reg: InstrumentRegistry, pair: str) -> dict[str, Capability]:
@@ -71,6 +73,12 @@ def capability_matrix(settings: Settings, reg: InstrumentRegistry, pair: str) ->
         out["derivatives"] = Capability(q, usdm.key, why)
     else:
         out["derivatives"] = Capability("unavailable", None, "no derivatives instrument configured")
+
+    nbs = neighbours(settings, reg, pair)          # B6 / B17: configured here; the snapshot downgrades it when the data is not there
+    if nbs:
+        out["cross_asset"] = Capability("real", nbs[0].inst.key, "15m returns vs " + ", ".join(n.inst.key for n in nbs))
+    else:
+        out["cross_asset"] = Capability("unavailable", None, "no correlated pair or context instrument configured")
     return out
 
 

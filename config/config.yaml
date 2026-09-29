@@ -148,6 +148,21 @@ pairs:
         roles: [flow_context]
         datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics]
         start: {candles: "2025-12-11", agg_trades: "2025-12-11", funding: "2025-12-11", metrics: "2025-12-11"}
+      # B17 intermarket context for gold: candles only (no ticks, no quotes), never a decision or gate input. The symbol
+      # names are the broker's with the '@' suffix (verify after start_all: an unknown symbol logs `context_symbol_missing`
+      # and the payload says cross unavailable - nothing else is affected). Rollback = delete these two entries + restart ingest.
+      - venue: mt5
+        symbol_by_profile: {demo: "EURUSD@", live: "EURUSD@"}     # USD proxy (~58 % of DXY, no futures roll)
+        roles: [cross_context]
+        datatypes: [candles]
+        timeframes: [15m, 1h, 4h, 1d]
+        start: {candles: "-365d"}
+      - venue: mt5
+        symbol_by_profile: {demo: "XAGUSD@", live: "XAGUSD@"}     # silver: confirmation of gold's moves
+        roles: [cross_context]
+        datatypes: [candles]
+        timeframes: [15m, 1h, 4h, 1d]
+        start: {candles: "-365d"}
 
 instances:                             # D-042: one fully independent system per pair — scripts\start.bat BTCUSDT
   BTCUSDT: {api_port: 8766, magic_offset: 1}   # own data/instances/<PAIR>/app.db, logs/<PAIR>/, dashboard port,

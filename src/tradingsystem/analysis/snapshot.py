@@ -32,6 +32,7 @@ from ..storage.tablespec import spec_for
 from . import context as ctx
 from . import indicators as ind
 from . import orderflow as of
+from .cross import CrossContext
 from .daily_profiles import DailyProfiles
 from .desk_windows import desk_state_text
 from .frames import MIN_BARS, Frame, forming_bar, load_frame
@@ -302,6 +303,7 @@ class SnapshotBuilder:
         self.reg = registry
         self.kv = kv        # anything with kv_get(key, default) / kv_set(key, value) - the DecisionStore (engine_kv)
         self._profiles: DailyProfiles | None = None
+        self._cross: CrossContext | None = None
         self._sess_mem: dict[str, dict] = {}     # the session history per pair and UTC day (also cached in kv)
         self.data = settings.paths.data()
         self._readers: dict[str, InstrumentReader] = {}
@@ -321,6 +323,8 @@ class SnapshotBuilder:
         for r in self._readers.values():
             r.close()
         self._readers.clear()
+        if self._cross is not None:
+            self._cross.close()
 
     # ------------------------------------------------------------------ public
     def build(self, pair: str, as_of: int, *, account: dict | None = None, history: list[dict] | None = None,
@@ -340,6 +344,11 @@ class SnapshotBuilder:
         dec_tf = pcfg.decision_timeframe.value
         dec_atr = ((per_tf.get(dec_tf) or {}).get("indicators") or {}).get("atr14")
         market = self._market(pair, primary, execu, frames.get("1m"), as_of, exec_cal, d, dec_atr)
+        cross = self._cross_block(pair, frames.get("15m"), as_of)
+        if cross is not None:
+            market["cross"] = cross
+            if cross["data_quality"] != "real":             # the capability claim must match the payload
+                caps = {**caps, "cross_asset": Capability("unavailable", None, cross["reason"])}
         depth = self._depth(caps, as_of)
         if depth is not None and depth["data_quality"] != "real":       # the capability claim must match the payload
             caps = {**caps, "order_book_depth": Capability("unavailable", None, depth["reason"])}
@@ -576,6 +585,17 @@ class SnapshotBuilder:
         ref = rd.read_range(spec, target - DEPTH_REF_TOL_MS, target + DEPTH_REF_TOL_MS + 1, cols)
         return depth_block(cur["ts"], cur["percentage"], cur["notional"], as_of, ref_ts=ref["ts"],
                            ref_pct=ref["percentage"], ref_notional=ref["notional"])
+
+    # ------------------------------------------------------------------ cross-asset context (B6 / B17)
+    def _cross_block(self, pair: str, m15: Frame | None, as_of: int) -> dict | None:
+        """``market.cross``: the correlated sibling (BTC <-> ETH) or the gold context instruments; None when the pair has
+        neither configured. Read-only on the neighbours' hot DBs, never raises, never a decision or gate input."""
+        if self._cross is None:
+            self._cross = CrossContext(self.s, self.reg, self.data)
+        blk = self._cross.block(pair, m15, as_of)
+        if blk["data_quality"] == "unavailable" and blk.get("reason", "").startswith("no correlated"):
+            return None
+        return blk
 
     # ------------------------------------------------------------------ daily profiles (B4)
     def _daily_profiles(self, pair: str, primary: Instrument, caps, as_of: int, pcfg, d: int) -> dict | None:

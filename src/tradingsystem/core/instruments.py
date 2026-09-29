@@ -49,6 +49,12 @@ class Instrument:
     def has_role(self, role: str) -> bool:
         return role in self.roles
 
+    @property
+    def is_context(self) -> bool:
+        """A recorded-for-context instrument (B17): candles only, its symbol may be missing at the broker without
+        harming any other instrument, and nothing trades or quotes it."""
+        return self.roles == ("cross_context",)
+
     def start_ms(self, datatype: str, *, now: int | None = None) -> int | None:
         spec = self.start_specs.get(datatype)
         return None if spec is None else parse_date_spec(spec, now=now)

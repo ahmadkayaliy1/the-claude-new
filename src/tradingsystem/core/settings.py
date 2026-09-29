@@ -38,7 +38,9 @@ DataType = Literal[
     "candles", "agg_trades", "ticks", "book_ticker", "depth", "funding", "open_interest",
     "metrics", "liquidations", "mark_price",
 ]
-Role = Literal["analysis_primary", "flow_context", "execution", "quote_reference"]
+# cross_context (Phase 5 B17): a candles-only instrument recorded as intermarket context (EURUSD@, XAGUSD@ for gold); no
+# role lookup (primary, execution, quote, flow) ever returns it and no decision or gate reads it
+Role = Literal["analysis_primary", "flow_context", "execution", "quote_reference", "cross_context"]
 AgentMode = Literal[
     "single_agent_global", "agent_per_pair", "agent_per_timeframe", "agent_per_pair_and_timeframe",
     "agent_per_pair_with_risk_reviewer", "multi_provider_consensus",
@@ -266,6 +268,9 @@ class InstrumentCfg(_Model):
         unknown = set(self.start) - set(self.datatypes)
         if unknown:
             raise ValueError(f"start dates for datatypes not collected: {sorted(unknown)}")
+        if "cross_context" in self.roles and (self.roles != ["cross_context"] or self.venue != "mt5"
+                                              or self.datatypes != ["candles"]):
+            raise ValueError("a cross_context instrument is MT5, has no other role and records `candles` only")
         return self
 
 
