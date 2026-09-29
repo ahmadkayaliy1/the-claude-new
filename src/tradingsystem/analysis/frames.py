@@ -15,6 +15,8 @@ from ..storage.reader import InstrumentReader
 from ..storage.tablespec import FORMING, spec_for
 
 F = np.ndarray
+FORMING_BEHIND_MS = 60_000          # a forming row updated longer before as_of than this: the writer is down
+FORMING_AHEAD_MS = 15_000           # a row updated later than this after as_of holds ticks the screen must not know
 MIN_BARS = 30                       # below this a timeframe has no trend/indicator analysis (snapshot._analyze_tf)
 
 
@@ -62,6 +64,30 @@ def load_frame(reader: InstrumentReader, inst: Instrument, tf: Timeframe, bars: 
     fr.forming = _forming(reader, tf)
     fr.quality = _quality(fr, tf, as_of, calendar, mt5, bars)
     return fr
+
+
+def forming_bar(fr: Frame) -> dict | None:
+    """The still-open bar of ``fr`` as it was at ``fr.as_of``, or None. The FORMING table holds the LIVE state only,
+    so it is a valid as-of reading just for the bar that contains ``as_of`` and only while it was written within
+    [as_of - 60 s, as_of + 15 s] — for a replay of a past instant it is never used (no later tick leaks in). Never an
+    input to indicators, structure, zones or triggers: display context only (Phase 5 B3)."""
+    f = fr.forming
+    if not f or not fr.as_of:
+        return None
+    try:
+        if int(f["open_time"]) != fr.tf.floor(fr.as_of):
+            return None
+        upd = int(f["updated_ms"])
+        if not (fr.as_of - FORMING_BEHIND_MS <= upd <= fr.as_of + FORMING_AHEAD_MS):
+            return None
+        vals = [float(f[k]) for k in ("open", "high", "low", "close")]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(np.isfinite(vals)):
+        return None
+    vol = f.get("volume")
+    return {"open_time": int(f["open_time"]), "open": vals[0], "high": vals[1], "low": vals[2], "close": vals[3],
+            "volume": float(vol) if vol is not None else None, "age_s": max(0.0, (fr.as_of - int(f["open_time"])) / 1000)}
 
 
 def _forming(reader: InstrumentReader, tf: Timeframe) -> dict | None:

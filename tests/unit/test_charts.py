@@ -399,3 +399,75 @@ def test_mt5_instrument_renders_with_tick_volume(monkeypatch, cols):
     as_of = int(cols["open_time"][-1]) + MS_PER_MINUTE
     out = ChartRenderer(cfg(timeframes=["5m"])).render_set(MT5Reader(cols, mt5), mt5, as_of, {})
     assert [i.tf for i in out] == ["5m"] and [c["volume_kind"] for c in calls] == ["tick"]
+
+
+# ------------------------------------------------------------------- Phase 5: period levels and the forming bar
+def test_period_levels_are_drawn_on_the_daily_and_4h_charts_only(xau):
+    """B2: pwh/pwl/pmh/pml/month_open/year_open — 1d and 4h only (not 1w, 1h, 15m, 5m)."""
+    p = copy.deepcopy(xau)
+    six = {"pwh": 4400.0, "pwl": 4200.0, "pmh": 4500.0, "pml": 4100.0, "month_open": 4300.0, "year_open": 3900.0}
+    p["levels"].update(six)
+    names = lambda tf: {x["name"] for x in overlay_spec(p, tf, ["levels"])["levels"]}  # noqa: E731
+    assert set(six) <= names("1d") and set(six) <= names("4h")
+    for tf in ("1w", "1h", "15m", "5m"):
+        assert not set(six) & names(tf), tf
+    assert names("1w") == {"week_open"}                                      # the weekly chart: its own horizon
+    assert {"pdh", "pdl", "pdc", "day_open"} <= names("4h") and "day_open" not in names("1d")
+    assert names("15m") == set(p["levels"]) - set(six) and names("5m") == names("15m") == names("1h")
+
+
+class FakeForming:
+    """The hot store's FORMING table as ``frames._forming`` reads it (rows of the bar in progress per timeframe)."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def read_range(self, spec, columns=None):
+        return {k: np.array([r[k] for r in self.rows], dtype=object if k == "tf" else float)
+                for k in self.rows[0]} if self.rows else {}
+
+
+def forming_reader(cols, inst, as_of: int, close_delta: float = 1.5, tfs=("5m", "1h")) -> FakeReader:
+    """A reader whose store holds a forming row for each ``tfs`` bar containing ``as_of`` (hand-built values around the
+    last real close: a bar 5 s old, written 1 s after as_of)."""
+    r = FakeReader(cols, inst)
+    last = float(cols["close"][-1])
+    r.hot = FakeForming([{"tf": t, "open_time": float(Timeframe.parse(t).floor(as_of)), "open": last,
+                          "high": last + 40.0, "low": last - 25.0, "close": last + close_delta, "volume": 0.5,
+                          "updated_ms": float(as_of + 1_000)} for t in tfs])
+    return r
+
+
+def test_the_5m_chart_draws_the_forming_bar_and_only_the_5m_chart(monkeypatch, cols, inst):
+    """B3: a hollow candle after the last closed bar on the 5m chart; the 1h chart is byte-identical with or without
+    a forming row and keeps its cache while the forming bar moves."""
+    calls = counting(monkeypatch)
+    as_of = M5.floor(int(cols["open_time"][-1]) + MS_PER_MINUTE) + 5_000
+    c = cfg(timeframes=["1h", "5m"], overlays=[])
+    plain = ChartRenderer(c).render_set(FakeReader(cols, inst), inst, as_of, {})
+    r = ChartRenderer(c)
+    rich = r.render_set(forming_reader(cols, inst, as_of), inst, as_of, {})
+    assert [i.tf for i in rich] == ["1h", "5m"]
+    assert rich[0].png == plain[0].png                                        # 1h: closed bars only
+    assert rich[1].png != plain[1].png and calls[-1]["forming"]["close"] > 0   # 5m: the hollow bar is drawn
+    assert [k.get("forming") is not None for k in calls if k["tf"] == "1h"] == [False, False]
+    assert (rich[1].width, rich[1].height) == (W, H)
+
+    n = len(calls)
+    r.render_set(forming_reader(cols, inst, as_of), inst, as_of, {})            # same forming values: both cached
+    assert len(calls) == n
+    moved = r.render_set(forming_reader(cols, inst, as_of, close_delta=-9.0), inst, as_of, {})
+    assert [k["tf"] for k in calls[n:]] == ["5m"]                               # only the 5m chart follows its bar
+    assert moved[0].png == plain[0].png and moved[1].png != rich[1].png
+    # a forming row of a replayed past instant is another bar: ignored, the chart is the plain one
+    old = ChartRenderer(c).render_set(forming_reader(cols, inst, as_of - 10 * 300_000), inst, as_of, {})
+    assert old[1].png == plain[1].png
+
+
+def test_the_forming_bar_is_drawn_inside_the_price_band_and_leaves_the_last_close_line(cols):
+    fr = make_frame(cols, M5, 96)
+    fb = {"open_time": int(fr.open_time[-1]) + 300_000, "open": float(fr.close[-1]), "high": float(fr.close[-1]) + 500,
+          "low": float(fr.close[-1]) - 5, "close": float(fr.close[-1]) + 400, "volume": None, "age_s": 5.0}
+    a = render_png(fr, "5m", {}, width=W, height=H, title="t")
+    b = render_png(fr, "5m", {}, width=W, height=H, title="t", forming=fb)
+    assert a != b and Image.open(io.BytesIO(b)).size == (W, H)

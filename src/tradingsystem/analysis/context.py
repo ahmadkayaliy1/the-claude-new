@@ -35,23 +35,80 @@ def sessions(utc_ms: int) -> dict:
             "weekday_utc": t.strftime("%a")}
 
 
-def reference_levels(open_time: F, high: F, low: F, close: F, open_: F, as_of: int, *, day_roll: str = "utc") -> dict:
+def day_key(ms: int, day_roll: str = "utc") -> dt.date:
+    """The trading day an instant belongs to: the UTC date, or ("ny17", FX/metals) the date after 17:00 New York."""
+    t = dt.datetime.fromtimestamp(ms / 1000, tz=UTC)
+    if day_roll == "ny17":
+        return (t.astimezone(NY) + dt.timedelta(hours=7)).date()        # 17:00 NY belongs to the next trading day
+    return t.date()
+
+
+PERIOD_SLACK_DAYS = 5      # the first stored daily bar may lie this far after a month / year start (weekend, holiday)
+WEEK_SLACK_DAYS = 1        # ... after a week's start (Monday key: the metals' Sunday-evening open is already Monday's)
+
+
+def period_levels(open_time: F, open_: F, high: F, low: F, as_of: int, *, day_roll: str = "utc",
+                  day_open: float | None = None) -> dict:
+    """Previous week / month highs and lows and the month / year open from DAILY bars (Phase 5 B2).
+
+    Only completed periods: the previous week is the last full Monday–Sunday week of the trading-day key
+    (``day_roll``), the previous month the last full calendar month of that key; ``month_open`` / ``year_open`` are the
+    open of the first daily bar of the current month / year. Bars stamped at or after ``as_of`` are ignored (causal).
+    A level is left out when the bars do not reach back to its period's start (a short history is not a level).
+    ``day_open`` (today's open, known from the first bar of the day) stands in for the month / year open on the first
+    trading day of that period, when its daily bar has not closed yet."""
+    keep = np.asarray(open_time, dtype=np.int64) < as_of
+    if not keep.any():
+        return {}
+    keys = [day_key(int(x), day_roll) for x in np.asarray(open_time)[keep]]
+    o, h, lo = (np.asarray(x, dtype=float)[keep] for x in (open_, high, low))
+    today = day_key(as_of, day_roll)
+    first = keys[0]
+
+    def reaches(start: dt.date, slack: int = PERIOD_SLACK_DAYS) -> bool:
+        return first <= start + dt.timedelta(days=slack)
+
+    def pick(lo_key: dt.date, hi_key: dt.date) -> np.ndarray:            # bars with lo_key <= key < hi_key
+        return np.array([lo_key <= k < hi_key for k in keys], dtype=bool)
+
+    out: dict = {}
+    monday = today - dt.timedelta(days=today.weekday())
+    pw = pick(monday - dt.timedelta(days=7), monday)
+    if pw.any() and reaches(monday - dt.timedelta(days=7), WEEK_SLACK_DAYS):
+        out["pwh"], out["pwl"] = float(h[pw].max()), float(lo[pw].min())
+    m0 = today.replace(day=1)
+    pm0 = (m0 - dt.timedelta(days=1)).replace(day=1)
+    pm = pick(pm0, m0)
+    if pm.any() and reaches(pm0):
+        out["pmh"], out["pml"] = float(h[pm].max()), float(lo[pm].min())
+    cm = pick(m0, dt.date.max)
+    if reaches(m0):
+        if cm.any():
+            out["month_open"] = float(o[cm][0])
+        elif day_open is not None and (today - m0).days <= PERIOD_SLACK_DAYS:
+            out["month_open"] = day_open
+    y0 = today.replace(month=1, day=1)
+    cy = pick(y0, dt.date.max)
+    if reaches(y0):
+        if cy.any():
+            out["year_open"] = float(o[cy][0])
+        elif day_open is not None and (today - y0).days <= PERIOD_SLACK_DAYS:
+            out["year_open"] = day_open
+    return out
+
+
+def reference_levels(open_time: F, high: F, low: F, close: F, open_: F, as_of: int, *, day_roll: str = "utc",
+                     daily: tuple[F, F, F, F] | None = None) -> dict:
     """Previous day high/low/close, current day/week open and the Asia-session range, from closed M1/M5 bars.
 
-    ``day_roll``: "utc" (crypto) or "ny17" (FX/metals trading day rolls at 17:00 New York).
+    ``day_roll``: "utc" (crypto) or "ny17" (FX/metals trading day rolls at 17:00 New York). ``daily`` =
+    (open_time, open, high, low) of the closed daily bars adds the previous week / month levels and the month / year
+    open (``period_levels``).
     """
     if len(close) == 0:
         return {}
-
-    def day_key(ms: int) -> dt.date:
-        t = dt.datetime.fromtimestamp(ms / 1000, tz=UTC)
-        if day_roll == "ny17":
-            n = t.astimezone(NY)
-            return (n + dt.timedelta(hours=7)).date()        # 17:00 NY belongs to the next trading day
-        return t.date()
-
-    keys = np.array([day_key(int(x)) for x in open_time])
-    today = day_key(as_of)
+    keys = np.array([day_key(int(x), day_roll) for x in open_time])
+    today = day_key(as_of, day_roll)
     out: dict = {}
     prev_days = sorted({k for k in keys if k < today})
     if prev_days:
@@ -72,6 +129,8 @@ def reference_levels(open_time: F, high: F, low: F, close: F, open_: F, as_of: i
             asia.append(i)
     if asia:
         out["asia_high"], out["asia_low"] = float(high[asia].max()), float(low[asia].min())
+    if daily is not None:
+        out.update(period_levels(*daily, as_of, day_roll=day_roll, day_open=out.get("day_open")))
     return out
 
 

@@ -43,7 +43,7 @@ from ..core.timeframes import Timeframe
 from ..core.timeutil import from_ms, iso, parse_date_spec
 from ..storage.reader import InstrumentReader
 from . import indicators as ind
-from .frames import Frame, load_frame
+from .frames import Frame, forming_bar, load_frame
 
 log = logging.getLogger(__name__)
 
@@ -93,10 +93,20 @@ def token_estimate(width: int, height: int) -> int:
 
 # ------------------------------------------------------------------------------------------------------ overlay spec
 # Session and daily levels mean nothing at weekly / daily scale (and crowd the edge labels): those charts draw only
-# the levels of their own horizon; the 4h and lower charts draw every level.
-HTF_LEVELS = {"1w": frozenset({"week_open", "pwh", "pwl", "pmh", "pml", "month_open", "year_open"}),
-              "1d": frozenset({"pdh", "pdl", "pdc", "week_open", "pwh", "pwl", "pmh", "pml", "month_open",
-                               "year_open"})}
+# the levels of their own horizon; the 4h chart draws every level. The previous week / month levels and the month /
+# year open (Phase 5 B2) are drawn on the 1d and 4h charts only: at 1h and below they would sit far outside the band.
+PERIOD_LEVELS = frozenset({"pwh", "pwl", "pmh", "pml", "month_open", "year_open"})
+HTF_LEVELS = {"1w": frozenset({"week_open"}),
+              "1d": frozenset({"pdh", "pdl", "pdc", "week_open"}) | PERIOD_LEVELS}
+NO_PERIOD_LEVELS = frozenset({"1h", "15m", "5m"})
+FORMING_CHART_TFS = frozenset({"5m"})       # the hollow bar in progress is drawn on the 5m chart only (B3)
+
+
+def _draws_level(tf: str, name: str) -> bool:
+    keep = HTF_LEVELS.get(tf)
+    if keep is not None:
+        return name in keep
+    return not (tf in NO_PERIOD_LEVELS and name in PERIOD_LEVELS)
 
 
 def overlay_spec(payload: dict, tf: str, overlays: list[str]) -> dict:
@@ -106,9 +116,8 @@ def overlay_spec(payload: dict, tf: str, overlays: list[str]) -> dict:
     tfb = _as_dict(_as_dict(payload.get("timeframes")).get(tf))
     spec: dict[str, Any] = {}
     if "levels" in want:
-        keep = HTF_LEVELS.get(tf)
         spec["levels"] = [{"name": str(k), "price": float(v)} for k, v in _as_dict(payload.get("levels")).items()
-                          if _finite(v) and (keep is None or str(k) in keep)]
+                          if _finite(v) and _draws_level(tf, str(k))]
     if "zones" in want:
         z = _as_dict(tfb.get("zones"))
         spec["zones"] = ([r for r in (_zone("ob", x) for x in _rows(z.get("order_blocks"))[:MAX_ZONES]) if r]
@@ -201,9 +210,11 @@ def _mpl():
     return Figure, FigureCanvasAgg
 
 
-def render_png(frame: Frame, tf: str, spec: dict, *, width: int, height: int, title: str, warmup: int = 0) -> bytes:
+def render_png(frame: Frame, tf: str, spec: dict, *, width: int, height: int, title: str, warmup: int = 0,
+               forming: dict | None = None) -> bytes:
     """One chart as PNG bytes. The first ``warmup`` bars of ``frame`` only warm the EMAs up; the rest is drawn.
-    ``tf`` is informational (the overlay ``spec`` was already extracted for it)."""
+    ``tf`` is informational (the overlay ``spec`` was already extracted for it). ``forming`` (``frames.forming_bar``)
+    adds the bar in progress as a hollow candle after the last closed one - drawn only, never analysed."""
     n_all = len(frame)
     warmup = max(0, min(int(warmup), n_all - 1))
     sl = slice(warmup, n_all)
@@ -222,9 +233,12 @@ def render_png(frame: Frame, tf: str, spec: dict, *, width: int, height: int, ti
         axv = fig.add_subplot(gs[1], sharex=ax)
         fig.suptitle(title, fontsize=8.5, x=0.012, ha="left", y=0.985)
         x = np.arange(n, dtype=float)
-        band = _band(lo_, h)
+        band = _band(np.append(lo_, forming["low"]) if forming else lo_,
+                     np.append(h, forming["high"]) if forming else h)
         right = (n - 1) + max(4.0, RIGHT_PAD * n)
         _candles(ax, x, o, h, lo_, c)
+        if forming:
+            _hollow(ax, float(n), forming)
         _volume(axv, x, o, c, v, "tick volume" if frame.volume_kind == "tick" else "volume")
         ax.set_xlim(-1.0, right)
         ax.set_ylim(*band)
@@ -315,6 +329,16 @@ def _candles(ax, x, o, h, lo_, c) -> None:
     ax.add_collection(PolyCollection(_boxes(x, body_lo, body_lo + np.maximum(np.abs(c - o), min_body)),
                                      facecolors=colors, edgecolors=colors, linewidths=0.3, zorder=3),
                       autolim=False)
+
+
+def _hollow(ax, x: float, f: dict) -> None:
+    """The bar in progress: an unfilled body and a wick in the direction colour."""
+    from matplotlib.patches import Rectangle
+    color = UP if f["close"] >= f["open"] else DOWN
+    ax.vlines(x, f["low"], f["high"], colors=color, linewidth=0.8, zorder=2)
+    body = abs(f["close"] - f["open"])
+    ax.add_patch(Rectangle((x - 0.33, min(f["open"], f["close"])), 0.66, body, fill=False, edgecolor=color,
+                           linewidth=0.8, zorder=3))
 
 
 def _volume(axv, x, o, c, v, label: str) -> None:
@@ -492,14 +516,16 @@ class ChartRenderer:
             return None
         self._logged -= {k for k in self._logged if k[:2] == where and k[2] != "write"}   # recovered: log a relapse
         last_open = int(fr.open_time[-1])
+        # the 15m / 1h / ... charts are keyed by closed bars alone; only the 5m chart also follows its bar in progress
+        fb = forming_bar(fr) if tf in FORMING_CHART_TFS else None
         key = spec_hash({"spec": spec, "bars": drawn, "first": int(fr.open_time[-drawn]), "w": self.cfg.width,
-                         "h": self.cfg.height})
+                         "h": self.cfg.height, **({"forming": fb} if fb else {})})
         hit = self._cache.get(where)
         if hit is not None and hit[0] == last_open and hit[1] == key:
             return hit[2]
         title = (f"{inst.key} {tf} — as of {iso(last_open + tfo.ms)} (closed candles, analysis prices)")
         png = render_png(fr, tf, spec, width=self.cfg.width, height=self.cfg.height, title=title,
-                         warmup=len(fr) - drawn)
+                         warmup=len(fr) - drawn, forming=fb)
         self.renders += 1
         w, h = png_size(png)
         img = ChartImage(tf=tf, png=png, bars=drawn, width=w, height=h, token_est=token_estimate(w, h))

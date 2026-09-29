@@ -30,13 +30,15 @@ from ..storage.tablespec import spec_for
 from . import context as ctx
 from . import indicators as ind
 from . import orderflow as of
-from .frames import MIN_BARS, Frame, load_frame
+from .frames import MIN_BARS, Frame, forming_bar, load_frame
 from .price_action import patterns, range_state
-from .registry import capability_matrix
+from .registry import Capability, capability_matrix
 from .structure import analyze_structure, premium_discount
 from .zones import fair_value_gaps, nearest_active, order_blocks, update_mitigation
 
 PAYLOAD_VERSION = "3"
+FORMING_TFS = (Timeframe.M15, Timeframe.M5)   # the timeframes that show the bar in progress (B3)
+PERIOD_BARS = 380               # daily bars read for the previous week / month levels and the year open
 HTF_GATE = ("4h", "1d")         # decision context: without enough history here the AI is not asked (F11)
 RECENT_GAP_BARS = 16            # a gap this close to the decision bar blocks the AI call; older ones are warnings
 # timeframe → (bars analysed, recent candles shown)
@@ -224,6 +226,67 @@ def positioning_block(mt: dict, as_of: int) -> dict | None:
     return out
 
 
+# ------------------------------------------------------------------------------------------ order book depth (B1)
+DEPTH_MAX_AGE_MS = 2 * MS_PER_MINUTE      # a snapshot at most this old is the current book; an older one is stale
+DEPTH_LOOKBACK_MS = 30 * MS_PER_MINUTE    # how far back the newest snapshot is looked for (only to say how stale)
+DEPTH_REF_TOL_MS = 5 * MS_PER_MINUTE      # the 1-h-earlier snapshot may lie this far from its target (REST poll ~ 61 s)
+DEPTH_CHANGE_BANDS = (0.5, 1.0)           # the bands whose 1-h imbalance change is shown
+DEPTH_COLUMNS = ["band_pct", "bid_musd", "ask_musd", "imbalance"]
+
+
+def _depth_snapshot(ts, pct, notional, at: int) -> dict[float, tuple[float, float]]:
+    """{band %: (bid notional, ask notional)} of the snapshot stamped ``at`` - a band only when BOTH sides carry it
+    (the ingest writes a band only where the book reaches, per side)."""
+    m = np.asarray(ts, dtype=np.int64) == at
+    p, v = np.asarray(pct, dtype=float)[m], np.asarray(notional, dtype=float)[m]
+    side = {round(float(x), 4): float(y) for x, y in zip(p, v)}
+    return {b: (side[-b], side[b]) for b in sorted({abs(x) for x in side}) if -b in side and b in side}
+
+
+def _imbalance(bid: float, ask: float) -> float | None:
+    return (bid - ask) / (bid + ask) if bid + ask > 0 else None
+
+
+def depth_block(ts, pct, notional, as_of: int, *, ref_ts=None, ref_pct=None, ref_notional=None) -> dict:
+    """Per band +-0.1/0.25/0.5/1/2/5 % the cumulative bid and ask notional (USD millions) and the imbalance
+    (bid - ask)/(bid + ask) of the newest depth snapshot at or before ``as_of``, plus the 1-h change of the +-0.5 % and
+    +-1 % imbalance against the snapshot nearest to one hour before it (+-5 min). ``data_quality`` is ``real`` while
+    that snapshot is at most 120 s old, else ``stale`` (no bands: a book of ten minutes ago is not the book), and
+    ``unavailable`` with no snapshot at all. The bands are exactly the ones the snapshot reaches on both sides - never
+    extrapolated (BTC's +-1 % is often partial, +-2 / +-5 % are never reached)."""
+    t = np.asarray(ts, dtype=np.int64)
+    t = t[t <= as_of]
+    if not len(t):
+        return {"data_quality": "unavailable",
+                "reason": f"no depth snapshot in the last {DEPTH_LOOKBACK_MS // 60_000} min"}
+    last = int(t.max())
+    age = as_of - last
+    if age > DEPTH_MAX_AGE_MS:
+        return {"data_quality": "stale", "time": iso(last), "age_s": round(age / 1000),
+                "reason": f"newest depth snapshot is {round(age / 1000)} s old (limit {DEPTH_MAX_AGE_MS // 1000} s)"}
+    snap = _depth_snapshot(ts, pct, notional, last)
+    rows = [[b, _r(bid / 1e6, 2), _r(ask / 1e6, 2), _r(_imbalance(bid, ask), 2)]
+            for b, (bid, ask) in snap.items() if _imbalance(bid, ask) is not None]
+    out: dict = {"data_quality": "real", "time": iso(last), "age_s": round(age / 1000), "band_columns": DEPTH_COLUMNS,
+                 "bands": rows}
+    if ref_ts is not None and len(ref_ts):
+        rt = np.asarray(ref_ts, dtype=np.int64)
+        rt = rt[rt < last]
+        if len(rt):
+            ref = int(rt[np.argmin(np.abs(rt - (last - MS_PER_HOUR)))])
+            if abs(ref - (last - MS_PER_HOUR)) <= DEPTH_REF_TOL_MS:
+                old = _depth_snapshot(ref_ts, ref_pct, ref_notional, ref)
+                chg = {}
+                for b in DEPTH_CHANGE_BANDS:
+                    if b in snap and b in old:
+                        a, z = _imbalance(*snap[b]), _imbalance(*old[b])
+                        if a is not None and z is not None:
+                            chg[f"{b:g}"] = _r(a - z, 2)
+                if chg:
+                    out["imbalance_change_1h"] = chg
+    return out
+
+
 class SnapshotBuilder:
     def __init__(self, settings: Settings, registry: InstrumentRegistry) -> None:
         self.s = settings
@@ -260,6 +323,12 @@ class SnapshotBuilder:
         dec_tf = pcfg.decision_timeframe.value
         dec_atr = ((per_tf.get(dec_tf) or {}).get("indicators") or {}).get("atr14")
         market = self._market(pair, primary, execu, frames.get("1m"), as_of, exec_cal, d, dec_atr)
+        depth = self._depth(caps, as_of)
+        if depth is not None and depth["data_quality"] != "real":       # the capability claim must match the payload
+            caps = {**caps, "order_book_depth": Capability("unavailable", None, depth["reason"])}
+        orderflow = self._orderflow(pair, primary, frames, caps, as_of, pcfg, d)
+        if depth is not None:
+            orderflow["depth"] = depth
         payload = {
             "meta": {"pair": pair, "as_of": iso(as_of), "decision_timeframe": dec_tf,
                      "price_reference": primary.key, "execution_instrument": execu.key,
@@ -269,12 +338,12 @@ class SnapshotBuilder:
                                      price=_mid(market.get("execution"))),
             "market": market,
             "capabilities": {k: {"quality": v.quality, "reason": v.reason} for k, v in caps.items()},
-            "levels": self._levels(frames.get("1h"), as_of, pcfg.asset_class, d),
+            "levels": self._levels(frames.get("1h"), as_of, pcfg.asset_class, d, primary, cal),
             "timeframes": per_tf,
             "confluence": ctx.confluence({t: {"trend": v["structure"]["trend"],
                                               "ema_alignment": v["indicators"]["ema_alignment"]}
                                           for t, v in per_tf.items()}),
-            "orderflow": self._orderflow(pair, primary, frames, caps, as_of, pcfg, d),
+            "orderflow": orderflow,
             "derivatives": self._derivatives(pair, caps, as_of, d),
             "history": history or [],
             "memory": memory or {},
@@ -351,6 +420,10 @@ class SnapshotBuilder:
         }
         if fr.tf in (Timeframe.H1, Timeframe.M15, Timeframe.H4):
             out["regime"] = ctx.regime(h, l, c)
+        if fr.tf in FORMING_TFS and (fb := forming_bar(fr)) is not None:
+            # display context only: never in ``recent``, never read by indicators, structure, zones or the triggers
+            out["forming"] = [iso(fb["open_time"]), _r(fb["open"], d), _r(fb["high"], d), _r(fb["low"], d),
+                              _r(fb["close"], d), _r(fb["volume"], 3), round(fb["age_s"])]
         return out
 
     # ------------------------------------------------------------------ blocks
@@ -448,12 +521,39 @@ class SnapshotBuilder:
                                "translates them by the live basis before sending orders")
         return out
 
-    def _levels(self, h1: Frame | None, as_of: int, asset_class: str, d: int) -> dict:
+    def _levels(self, h1: Frame | None, as_of: int, asset_class: str, d: int, primary: Instrument | None = None,
+                cal: SessionCalendar | None = None) -> dict:
         if h1 is None or not len(h1):
             return {}
-        lv = ctx.reference_levels(h1.open_time, h1.high, h1.low, h1.close, h1.open, as_of,
-                                  day_roll="ny17" if asset_class in ("metal", "fx") else "utc")
+        roll = "ny17" if asset_class in ("metal", "fx") else "utc"
+        daily = None
+        if primary is not None and Timeframe.D1 in primary.timeframes:
+            # PW / PM and the month / year open need a year of daily bars (the analysed 1d frame has 200)
+            fr = load_frame(self.reader(primary), primary, Timeframe.D1, PERIOD_BARS, as_of, cal)
+            if len(fr):
+                daily = (fr.open_time, fr.open, fr.high, fr.low)
+        lv = ctx.reference_levels(h1.open_time, h1.high, h1.low, h1.close, h1.open, as_of, day_roll=roll, daily=daily)
         return {k: _r(v, d) for k, v in lv.items()}
+
+    def _depth(self, caps, as_of: int) -> dict | None:
+        """The order book depth block (B1) of the capability's source instrument; None where depth is not collected
+        (the capability says so: the broker's book of XAU is empty)."""
+        cap = caps["order_book_depth"]
+        if cap.quality != "real" or not cap.source:
+            return None
+        inst = self.reg.get(cap.source)
+        if "depth" not in inst.datatypes:
+            return None
+        rd, spec = self.reader(inst), spec_for(inst, "depth")
+        cols = ["ts", "percentage", "notional"]
+        cur = rd.read_range(spec, as_of - DEPTH_LOOKBACK_MS, as_of + 1, cols)
+        block = depth_block(cur["ts"], cur["percentage"], cur["notional"], as_of)
+        if block["data_quality"] != "real":
+            return block
+        target = int(cur["ts"][cur["ts"] <= as_of].max()) - MS_PER_HOUR
+        ref = rd.read_range(spec, target - DEPTH_REF_TOL_MS, target + DEPTH_REF_TOL_MS + 1, cols)
+        return depth_block(cur["ts"], cur["percentage"], cur["notional"], as_of, ref_ts=ref["ts"],
+                           ref_pct=ref["percentage"], ref_notional=ref["notional"])
 
     def _orderflow(self, pair: str, primary: Instrument, frames: dict[str, Frame], caps, as_of: int, pcfg,
                    d: int) -> dict:
