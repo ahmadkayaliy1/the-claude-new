@@ -475,6 +475,11 @@ class AICfg(_Model):
     # Phase 5 A5 (D-046): no trader call while the pair's execution market is closed and nothing of the pair is open
     # or pending (the setup signature still advances, so the reopen does not fire on the closed session's structure)
     skip_closed_market: bool = True
+    # Phase 5 B12: a pair WITHOUT a desk gets no entry call while ``account.min_position_risk.fits_now`` is false (the
+    # minimum lot at the minimum stop breaks the risk or leverage cap: any answer would be rejected at the gate); the
+    # setup signature advances, reviews / event calls of a pair holding something still run; absent fits_now = unknown
+    # = never suppressed. A desk pair uses its windows (B15) instead. false = today's behaviour
+    skip_entry_calls_when_no_fit: bool = True
     transient_retry_s: float = Field(60.0, ge=0, le=600)   # OAuth refresh race / 403: one retry after this; 0 = off
     # share of daily_calls_per_pair kept for the busy UTC hours [start, end): BEFORE the window starts in the UTC
     # quota day a pair may use at most (1 − share) × cap, so the afternoon sessions keep calls; from `start` on every

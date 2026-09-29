@@ -52,6 +52,7 @@ from ..core.timeutil import MS_PER_DAY, MS_PER_HOUR, iso, now_ms
 from ..core.tunables import Tunables, tunables_of
 from ..ingest.common.appdb import AppDB
 from ..storage.tablespec import spec_for
+from .desk_windows import desk_window_state, last_window_end
 from .registry import matrix_markdown
 from .snapshot import SnapshotBuilder, data_problems, to_json
 
@@ -63,6 +64,7 @@ QUIET_MS = 10 * 60_000      # repeated warnings (AI not ready, quota) are logged
 EXECUTOR_FRESH_MS = 120_000  # the executor's account report is used while it is at most this old
 MAX_FAILS = 8               # back-off exponent cap
 EVENT_COALESCE_MS = 60_000  # executor events are gathered this long before they wake the model (fill + order …)
+ENTRY_KINDS = ("strong", "weak", "idle", "close")   # trigger strengths that are entry calls (B12 / B15)
 # executor events that wake the model (Phase 3): a placement, a fill, a closed position, a settled outcome, and the
 # result of its own position_actions
 WAKE_EVENTS = ("order", "mgmt_filled", "mgmt_position_closed", "outcome", "action_applied", "action_rejected")
@@ -106,6 +108,9 @@ class Engine:
         self._closed_seen: dict[str, int | None] = {}  # pair → last screen bar stored when its closed-market
         #                                                signature was last taken (rebuilt only when data moved)
         self._quiet: dict[str, tuple[str, int]] = {}
+        self._fits: dict[str, bool] = {}             # pair → last fits_now the payload showed (absent = never set)
+        self._held_back: dict[str, dict] = {}        # pair → its entry-call suppression now (B12 / B15), for the status
+        self._skip_noted: dict[str, tuple[str, int]] = {}   # pair → (key, time) of the last skipped event
         self._reserve_off_noted: set[str] = set()   # providers told once: quota day not the UTC day → no reserve
         self._tick_error: str | None = None
         self.stop = False
@@ -356,10 +361,74 @@ class Engine:
             if at_close:
                 log.info("%s %s close %s: trigger=%s (%s) %s", pair, (tf if at_dec else stf).value,
                          iso(bar if at_dec else sbar), fire, strength, "; ".join(reasons)[:300])
+            if fire and self._suppressed(pair, now, cal, strength, payload):
+                fire = False
+            elif not fire and pair in self._held_back and not self._entry_suppression(pair, now, cal, payload)[0]:
+                self._held_back.pop(pair, None)          # the status line says what holds the pair back NOW
             if fire:
                 fired.append((pair, reasons, strength, payload))
         if fired:
             self._dispatch(fired, now)
+
+    # ------------------------------------------------------------------ no-fit / desk windows (Phase 5 B12, B15)
+    def _entry_suppression(self, pair: str, now: int, cal: SessionCalendar,
+                           payload: dict | None) -> tuple[bool, str, str]:
+        """(suppress?, reason, event key) for ``pair`` now. A desk pair: outside ``desk.windows`` (B15 —
+        :func:`desk_window_state`; one key per gap between windows). Other pairs: ``ai.skip_entry_calls_when_no_fit``
+        and the payload's ``account.min_position_risk.fits_now`` is False (B12; absent = unknown = never; the last
+        value seen stands between screens)."""
+        desk = self.s.pairs[pair].desk
+        if desk is not None:
+            ok, why = desk_window_state(desk, now, cal, pair)
+            return (not ok, why, f"{why}:{last_window_end(desk, now)}")
+        if not self.s.ai.skip_entry_calls_when_no_fit:
+            return False, "", ""
+        fit = (((payload or {}).get("account") or {}).get("min_position_risk") or {}).get("fits_now")
+        if fit is not None:
+            self._fits[pair] = bool(fit)
+        fit = self._fits.get(pair)
+        return fit is False, "no_fit", "no_fit"
+
+    def _suppressed(self, pair: str, now: int, cal: SessionCalendar, strength: str,
+                    payload: dict | None) -> bool:
+        """True = this fired call is not made: the setup signature and the last-call price advance (as A5's closed
+        market, so the window / fit coming back does not fire on old structure) and one ``skipped: <reason>`` event
+        is recorded per hour (no fit) or per gap between windows (desk). A pair holding a position or a pending order
+        keeps its review and event calls (only entry triggers wait); a pair whose holdings are unknown is never
+        held back by B12 (a desk pair holds nothing by design, so unknown counts as nothing there). Never raises."""
+        try:
+            hold, why, key = self._entry_suppression(pair, now, cal, payload)
+            if not hold:
+                self._held_back.pop(pair, None)
+                return False
+            held = self._holds(pair)
+            if held is None and self.s.pairs[pair].desk is None:
+                return False
+            if held and strength not in ENTRY_KINDS:
+                return False
+            self._held_back[pair] = {"reason": why, "since": self._held_back.get(pair, {}).get("since", iso(now))}
+            sig = getattr(self, "_sig", {}).get(pair)
+            if payload is not None and sig is not None:
+                self.store.kv_set(f"{pair}:signature", sig)
+                mid = _payload_mid(payload)
+                if mid:
+                    self.store.kv_set(f"{pair}:last_call_price", mid)
+            if not held and self._events.get(pair):
+                self._events[pair] = []                  # the events stay in history; they do not wake a later call
+                self._save_cursor()
+            prev = self._skip_noted.get(pair)
+            if prev is None or prev[0] != key or (why == "no_fit" and now - prev[1] >= MS_PER_HOUR):
+                self._skip_noted[pair] = (key, now)
+                msg = (f"{pair}: {strength} entry call not made - "
+                       + ("the minimum lot does not fit the risk / leverage caps (account.min_position_risk.fits_now "
+                          "is false)" if why == "no_fit" else f"desk call window closed ({why})"))
+                log.info("%s", msg)
+                self.appdb.add_event("engine", f"skipped: {why if why == 'no_fit' else 'outside_desk_window'}",
+                                     f"{pair}: {why}; {msg}"[:300])
+            return True
+        except Exception:  # noqa: BLE001 — bookkeeping: on any doubt the call goes ahead as before
+            log.exception("%s: could not apply the entry-call suppression", pair)
+            return False
 
     # ------------------------------------------------------------------ closed execution market (Phase 5 A5)
     def _closed_market(self, pair: str, now: int, cal: SessionCalendar) -> bool:
@@ -672,6 +741,7 @@ class Engine:
                                   "max": max(self._build_ms) if self._build_ms else None,
                                   "median": int(statistics.median(self._build_ms)) if self._build_ms else None,
                                   "n": len(self._build_ms)},
+            "entry_calls_held_back": dict(self._held_back) or None,
             "events_waiting": {p: len(v) for p, v in self._events.items() if v},
             "usage_gauge": self._gauge_detail(),
             "adaptive": self._overlay_detail()})

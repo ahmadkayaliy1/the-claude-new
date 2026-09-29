@@ -206,6 +206,7 @@ ai:
   max_backoff_minutes: 120             # spacing doubles after each failed cycle of a pair, up to this
   cycle_deadline_s: 600                # an AI cycle is cut off after this (unfinished pairs stored as 'error')
   skip_closed_market: true             # Phase 5: no trader call while the execution market is closed and nothing is open
+  skip_entry_calls_when_no_fit: true   # B12: no entry call while the minimum lot does not fit the risk/leverage caps (no desk)
   transient_retry_s: 60                # OAuth refresh race / 403 "Request not allowed": one retry after this (0 = off)
   quota_reserve_share: 0.4             # keep 40 % of daily_calls_per_pair for the busy hours below (0 = no reserve)
   quota_reserve_hours_utc: [12, 21]    # [start, end) UTC: London afternoon + New York

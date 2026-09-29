@@ -240,6 +240,22 @@ def test_a_cycle_held_back_with_calls_left_is_rationed_not_lost(dr, tmp_path):
     assert dr.calls_left("the 12 left are kept for") == 12 and dr.calls_left("quota exhausted") is None
 
 
+def test_deliberately_skipped_entry_calls_are_a_note_not_a_loss(dr, tmp_path):
+    """B12 / B15: 'skipped: no_fit' / 'skipped: outside_desk_window' events are named in the availability notes
+    (per pair) and never count as lost cycles."""
+    base = base_at(tmp_path)
+    _, db = system_db(dr, base, "BTCUSDT")
+    add_events(db, [
+        {"ts": T("2026-09-30T06:05:10Z"), "collector": "engine", "event": "skipped: no_fit",
+         "detail": "BTCUSDT: no_fit; BTCUSDT: strong entry call not made"},
+        {"ts": T("2026-09-30T06:06:10Z"), "collector": "engine", "event": "skipped: no_fit",
+         "detail": "ETHUSDT: no_fit; ETHUSDT: strong entry call not made"}])
+    av = dr.collect(base, since=T("2026-09-30T06:00:00Z"), until=T("2026-09-30T07:00:00Z"),
+                    now=T("2026-09-30T08:00:00Z"), pair="BTCUSDT")["per_pair"]["BTCUSDT"]["availability"]
+    assert any("1 `skipped: no_fit` event(s)" in n for n in av["notes"])
+    assert av["lost_total"] == 0
+
+
 # --------------------------------------------------------------------------- gate, SL, outcomes
 def test_gate_rejections_are_classified_with_the_min_lot_split_and_not_gated(dr, tmp_path):
     base = base_at(tmp_path)
