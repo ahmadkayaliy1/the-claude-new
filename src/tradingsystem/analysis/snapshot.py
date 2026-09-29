@@ -34,7 +34,8 @@ from . import indicators as ind
 from . import orderflow as of
 from .cross import CrossContext
 from .daily_profiles import DailyProfiles
-from .desk_windows import desk_state_text
+from . import news as newsmod
+from .desk_windows import desk_news_reason, desk_state_text
 from .frames import MIN_BARS, Frame, forming_bar, load_frame
 from .gold_clock import clock_block, gold_history, round_levels
 from .price_action import patterns, range_state
@@ -44,7 +45,7 @@ from .structure import analyze_structure, premium_discount
 from .zones import fair_value_gaps, nearest_active, order_blocks, update_mitigation
 
 log = logging.getLogger("engine")
-PAYLOAD_VERSION = "3"
+PAYLOAD_VERSION = "4"
 SESSION_KEY = "sess1"           # engine_kv key prefix of the per-day session history (B5 / B16); bump on a new definition
 GOLD_HISTORY_DAYS = 90          # 15m bars read (before the UTC day start) for a desk pair's measured sweep share
 FORMING_TFS = (Timeframe.M15, Timeframe.M5)   # the timeframes that show the bar in progress (B3)
@@ -349,6 +350,12 @@ class SnapshotBuilder:
             market["cross"] = cross
             if cross["data_quality"] != "real":             # the capability claim must match the payload
                 caps = {**caps, "cross_asset": Capability("unavailable", None, cross["reason"])}
+        news_st = None
+        if pcfg.news_blackout.enabled:                      # B8: the stored calendar's state at as_of (read-only)
+            news_st = newsmod.state_now(pcfg.news_blackout, self.s.paths.shared(), as_of)
+            market["news"] = newsmod.block(news_st, as_of)
+            if not news_st.fresh:
+                caps = {**caps, "news_calendar": Capability("unavailable", None, news_st.reason)}
         depth = self._depth(caps, as_of)
         if depth is not None and depth["data_quality"] != "real":       # the capability claim must match the payload
             caps = {**caps, "order_book_depth": Capability("unavailable", None, depth["reason"])}
@@ -379,7 +386,7 @@ class SnapshotBuilder:
             "performance": performance or {},
         }
         self._session_blocks(payload, pair, primary, cal, exec_cal, frames.get("15m"), per_tf.get("15m"), as_of, pcfg, d,
-                             dec_atr)
+                             dec_atr, news_st)
         payload["meta"]["data_warnings"] = [
             f"{t}: {f.quality.get('status')}" + (f" ({len(f)} bars)" if f.quality.get("short_history") else "")
             for t, f in frames.items() if f.quality.get("status") != "ok"]
@@ -646,7 +653,7 @@ class SnapshotBuilder:
         return hist
 
     def _session_blocks(self, payload: dict, pair: str, primary: Instrument, cal, exec_cal, m15: Frame | None,
-                        tf15: dict | None, as_of: int, pcfg, d: int, dec_atr: float | None) -> None:
+                        tf15: dict | None, as_of: int, pcfg, d: int, dec_atr: float | None, news_st=None) -> None:
         """Adds ``market.session_stats`` (all pairs) and, for a desk pair, ``market.gold_clock`` and ``levels.round``.
         Advice blocks: a failure leaves them out and is logged, it never breaks the payload."""
         if m15 is None or Timeframe.M15 not in primary.timeframes:
@@ -665,7 +672,7 @@ class SnapshotBuilder:
                 payload["market"]["session_stats"] = {"data_quality": "unavailable",
                                                       "reason": "fewer than 30 closed 15m bars before this UTC day"}
             if gold:
-                window = desk_state_text(pcfg.desk, as_of, exec_cal, pair)
+                window = desk_state_text(pcfg.desk, as_of, exec_cal, pair, desk_news_reason(news_st))
                 payload["market"]["gold_clock"] = clock_block(as_of, m15.open_time, m15.high, m15.low, m15.close, tf_ms,
                                                               hist.get("gold") or {}, window, d)
                 ap = payload["market"].get("analysis_price") or {}

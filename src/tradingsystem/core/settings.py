@@ -221,7 +221,7 @@ class DeskCfg(_Model):
     ("live") mode is a future owner decision (H32) and does not exist. Code default of ``PairCfg.desk`` is None =
     the pair trades as before."""
     mode: Literal["shadow"] = "shadow"
-    brief: str = Field("", max_length=200)          # prompt appendix under ai/prompts, e.g. "desks/xau" (B18)
+    brief: str = Field("", pattern=r"^(desks/[a-z0-9_]+)?$")   # prompt appendix under ai/prompts: "desks/xau" (B18)
     windows: list[DeskWindowCfg] = Field(default_factory=_default_desk_windows)          # entry-call windows (B15)
     reopen_grace_min: int = Field(60, ge=0, le=600)     # no entry call this long after the Sunday reopen (B15)
     friday_cutoff: DeskClockCfg = DeskClockCfg(time="12:00", tz="America/New_York")     # none after it on Friday (B15)
@@ -231,6 +231,33 @@ class DeskCfg(_Model):
         names = [w.name for w in self.windows]
         if len(set(names)) != len(names):
             raise ValueError("desk.windows: duplicate window names")
+        return self
+
+
+NewsTier = Literal["fomc", "high", "medium"]
+
+
+class NewsBlackoutCfg(_Model):
+    """News blackout from a public weekly economic-calendar feed (Phase 5 B8, D-046 a; the gold tiers of D-049).
+    ``windows`` = minutes [before, after] a release per tier; a tier left out is never blacked out (``analysis/news.py``
+    classifies: ``fomc`` = the FOMC statement / rate decision / press conference, ``high`` = every other high-impact
+    release of ``currencies``, ``medium`` = PPI, retail sales, ISM, JOLTS and GDP when the feed rates them medium).
+    While the fetched file is fresh (``stale_hours``) the gate refuses an entry inside a window (check
+    ``news_blackout``) and entry calls wait; a stale file = the capability unavailable + one warning event and no
+    blackout — except for a desk pair, whose entry calls then stop altogether (D-049: no money is at stake in shadow).
+    Code default: off."""
+    enabled: bool = False
+    source_url: str = Field("https://nfs.faireconomy.media/ff_calendar_thisweek.json", pattern=r"^https://")
+    refresh_minutes: int = Field(60, ge=15, le=1440)       # the feed allows 2 downloads per 5 min; once an hour is plenty
+    stale_hours: float = Field(24.0, gt=0, le=72)
+    currencies: list[str] = Field(default_factory=lambda: ["USD"], min_length=1)
+    windows: dict[NewsTier, tuple[int, int]] = Field(default_factory=lambda: {"fomc": (15, 15), "high": (15, 15)})
+
+    @model_validator(mode="after")
+    def _check(self) -> "NewsBlackoutCfg":
+        for tier, (before, after) in self.windows.items():
+            if not (0 <= before <= 240 and 0 <= after <= 240):
+                raise ValueError(f"news_blackout.windows.{tier}: minutes must be within 0..240")
         return self
 
 
@@ -284,6 +311,7 @@ class PairCfg(_Model):
     footprint_bucket: float = 1.0          # price bucket for footprint / volume profile
     flow_proxy_approved: bool = False      # use a flow_context instrument's order flow as proxy (P1.11)
     desk: DeskCfg | None = None            # Phase 5 B14 (D-049): shadow desk — metal pairs only; None = trades as before
+    news_blackout: NewsBlackoutCfg = NewsBlackoutCfg()   # Phase 5 B8: off unless the pair's config turns it on
     instruments: list[InstrumentCfg]
 
     @model_validator(mode="after")

@@ -126,3 +126,13 @@ def test_register_versions_never_raises(tmp_path):
     st = DecisionStore(tmp_path / "app.db", "cfg")
     st.close()                                                        # a closed connection → logged, not raised
     register_versions(st, pr, "agent_per_pair")
+
+
+def test_phase5_versions():
+    """Phase 5 checkpoint B: one version bump for the payload, the view and the prompts (B7, B13, B18)."""
+    from tradingsystem.ai.model_view import VIEW_VERSION
+    from tradingsystem.analysis.snapshot import PAYLOAD_VERSION
+    lib = versions()
+    assert PAYLOAD_VERSION == "4" and VIEW_VERSION == "3"
+    assert lib["shared/payload_legend"] == 5 and lib["shared/trader_persona"] == 3 and lib["desks/xau"] == 1
+    assert lib["risk_reviewer/system"] == 4

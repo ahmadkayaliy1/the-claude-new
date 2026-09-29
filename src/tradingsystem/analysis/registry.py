@@ -26,7 +26,7 @@ class Capability:
 
 ANALYSES = ("price_indicators", "market_structure_smc", "price_action", "liquidity", "volume_weighted",
             "bar_delta_cvd", "footprint", "volume_profile", "time_profile_tpo", "order_book_depth", "derivatives",
-            "cross_asset")
+            "cross_asset", "news_calendar")
 
 
 def capability_matrix(settings: Settings, reg: InstrumentRegistry, pair: str) -> dict[str, Capability]:
@@ -79,6 +79,10 @@ def capability_matrix(settings: Settings, reg: InstrumentRegistry, pair: str) ->
         out["cross_asset"] = Capability("real", nbs[0].inst.key, "15m returns vs " + ", ".join(n.inst.key for n in nbs))
     else:
         out["cross_asset"] = Capability("unavailable", None, "no correlated pair or context instrument configured")
+    nb = settings.pairs[pair].news_blackout          # B8: only a pair with the blackout on lists it (the snapshot
+    if nb.enabled:                                   # downgrades it while the stored calendar is not fresh)
+        out["news_calendar"] = Capability("real", None, f"{', '.join(nb.currencies)} releases from the weekly calendar "
+                                                        "feed (fetched hourly)")
     return out
 
 
@@ -88,7 +92,8 @@ def matrix_markdown(settings: Settings, reg: InstrumentRegistry) -> str:
     lines = ["# Capability matrix (generated — `python -m tradingsystem engine --capabilities`)", "",
              "| analysis | " + " | ".join(pairs) + " |", "|---|" + "---|" * len(pairs)]
     for a in ANALYSES:
-        cells = [f"**{mats[p][a].quality}** — {mats[p][a].reason}" for p in pairs]
+        cells = [f"**{mats[p][a].quality}** — {mats[p][a].reason}" if a in mats[p] else "— (not configured)"
+                 for p in pairs]
         lines.append(f"| {a} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 

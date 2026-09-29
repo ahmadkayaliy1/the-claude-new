@@ -392,6 +392,21 @@ class Executor:
             self.store.set_execution_state(did, "not_executed", {SHADOW_KEY: True, "desk_ok": False,
                                                                   "error": repr(exc)[:300], "mode": self.mode})
 
+    def _news_check(self, pair: str) -> tuple[bool, str] | None:
+        """B8: the gate's ``news_blackout`` check from the stored calendar (``data/shared/news_calendar.json``, written by
+        the engine) - None for a pair without the blackout (no check, its gate output unchanged). Refused inside a
+        release's window while the file is fresh; a stale or unreadable file applies no blackout and says so
+        (§3.9.1 a); an unexpected error here refuses (fail closed)."""
+        cfg = self.s.pairs[pair].news_blackout
+        if not cfg.enabled:
+            return None
+        try:
+            from ..analysis import news
+            return news.gate_check(news.state_now(cfg, self.s.paths.shared(), now_ms()))
+        except Exception as exc:  # noqa: BLE001 - a money path: unknown = refused
+            log.exception("%s: news blackout check failed", pair)
+            return False, f"news blackout check failed ({type(exc).__name__}) - refused"
+
     def _refuse(self, did: str, pair: str, state: str, detail: dict) -> None:
         """A candidate that never reached the gate (not enabled, expired, no quote): a real pair is ``state``; a shadow
         idea stays ``not_executed`` with the shadow record (it is still scored in R from its levels)."""
@@ -446,7 +461,8 @@ class Executor:
             kill_switch=self.kill_switch(pair), basis_ok=basis_ok, basis_reason=basis_reason,
             sibling_risk_pct_by_pair=acct.get("sibling_risk_pct_by_pair", {}),
             live_sides=live_sides(acct.get("exposure") or [], pair),
-            account_drawdown_pct=dd.drawdown_pct if dd else None, account_drawdown_tripped=bool(dd and dd.tripped))
+            account_drawdown_pct=dd.drawdown_pct if dd else None, account_drawdown_tripped=bool(dd and dd.tripped),
+            news=self._news_check(pair))
         gate = evaluate(rec_x, pair, ctx, self.s.risk, self.s.risk.correlated_groups,
                         min_confidence=self.tunables.get(pair).min_confidence)
         detail = {"gate": [{"check": n, "ok": ok, "detail": d} for n, ok, d in gate.checks],

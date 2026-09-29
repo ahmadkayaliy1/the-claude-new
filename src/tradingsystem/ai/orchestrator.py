@@ -238,9 +238,15 @@ class Orchestrator:
                 "charts_note": NO_CHARTS, "playbook": tn.playbook or NO_PLAYBOOK, "tp_hint": tn.tp_hint or NO_TP_HINT,
                 **extra}
 
-    def _render(self, role: str, system_vars: dict, user_vars: dict):
+    def _brief(self, pair: str | None) -> str | None:
+        """The desk brief appended to a desk pair's trader, reviewer and escalation prompts (B18, D-049); None for a
+        pair without a desk (its prompts stay byte-identical)."""
+        desk = self.s.pairs[pair].desk if pair in self.s.pairs else None
+        return (desk.brief or None) if desk is not None else None
+
+    def _render(self, role: str, system_vars: dict, user_vars: dict, appendix: str | None = None):
         """Render a role and register the prompt versions it used (``prompt_versions``; never fails the cycle)."""
-        pr = render(role, system_vars, user_vars)
+        pr = render(role, system_vars, user_vars, appendix=appendix)
         try:
             from .prompts import register_versions
             register_versions(self.store, pr, role, lib_hash=self.library_hash)
@@ -629,7 +635,7 @@ class Orchestrator:
         images, note = await self.charts_for(pair, as_of, payload) if charts else ([], NO_CHARTS)
         uv = self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account,
                              tn=tn, charts_note=note)
-        pr = self._render("agent_per_pair", self._system_vars(pair, account, tn), uv)
+        pr = self._render("agent_per_pair", self._system_vars(pair, account, tn), uv, appendix=self._brief(pair))
         gen = await self._gen(prov, Recommendation, pr.system, pr.user, "agent_per_pair", pair, images=images)
         rec = self._stamp(self._record(pair, "agent_per_pair", reason, payload, gen, prov, pr.prompt_hash), tn)
         rec.trigger_strength, setup = (trigger or (None, None, False))[:2]
@@ -639,7 +645,7 @@ class Orchestrator:
             return rec
         rv = self._render("risk_reviewer", self._system_vars(pair, account, tn),
                     self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account,
-                                    tn=tn, proposal=json.dumps(rec.recommendation)))
+                                    tn=tn, proposal=json.dumps(rec.recommendation)), appendix=self._brief(pair))
         g2 = await self._gen(prov, RiskReview, rv.system, rv.user, "risk_reviewer", pair)
         rec.sub_outputs.append({"role": "trader", "label": pair, "provider": prov.name, "model": rec.model,
                                 "prompt_hash": pr.prompt_hash, "ok": True, "output": rec.recommendation,
@@ -707,7 +713,8 @@ class Orchestrator:
             prov = await self._escalation_provider(min(ESCALATION_SIGN_IN_WAIT_S, esc.timeout_s / 2))
             if not getattr(prov, "supports_images", False):
                 images, uv = [], {**uv, "charts_note": NO_CHARTS}
-            pr = self._render("escalation", self._system_vars(pair, account, tn), {**uv, "proposal": json.dumps(first)})
+            pr = self._render("escalation", self._system_vars(pair, account, tn), {**uv, "proposal": json.dumps(first)},
+                              appendix=self._brief(pair))
             until = time.monotonic() + esc.timeout_s        # its own time limit (a retry must fit it too)
             cycle_end = _CYCLE_END.get()
             g = await asyncio.wait_for(self._gen(prov, EscalationReview, pr.system, pr.user, "escalation", pair,

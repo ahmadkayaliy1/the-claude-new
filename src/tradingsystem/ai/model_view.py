@@ -19,8 +19,11 @@ from typing import Any
 
 from ..core.timeutil import iso
 
-VIEW_VERSION = "2"
-RECENT = {"1w": 4, "1d": 6, "4h": 8, "1h": 8, "15m": 16, "5m": 12, "1m": 10}
+VIEW_VERSION = "3"
+RECENT = {"1w": 4, "1d": 6, "4h": 8, "1h": 8, "15m": 16, "5m": 12}
+# Phase 5 B7 (D-046 c): the 1m timeframe stays in the stored payload (data gate, dashboard) but leaves the view - it pays
+# for the new blocks (depth, levels, profiles, session statistics, cross, news)
+VIEW_DROP_TFS = ("1m",)
 ZONE_COLS = ("dir", "top", "bottom", "formed", "fill_pct", "touched", "strength_atr", "age_bars")
 EVENT_COLS = ("time", "kind", "dir", "level")
 QUALITY_KEEP = ("status", "coverage", "last_bar_end_lag_s", "stale", "missing_last_bar", "short_history", "gaps")
@@ -119,7 +122,8 @@ def model_view(payload: dict) -> dict:
         if k == "meta":
             continue
         if k in ("timeframes", "timeframe") and isinstance(v, dict):   # a single-TF analyst slice keeps its candles
-            v = {tf: (_timeframe(tf, t, trim=k == "timeframes") if isinstance(t, dict) else t) for tf, t in v.items()}
+            v = {tf: (_timeframe(tf, t, trim=k == "timeframes") if isinstance(t, dict) else t) for tf, t in v.items()
+                 if not (k == "timeframes" and tf in VIEW_DROP_TFS)}
         elif k == "capabilities" and isinstance(v, dict):
             v = _capabilities(v)
         elif k == "account" and isinstance(v, dict):
@@ -142,6 +146,8 @@ def model_view(payload: dict) -> dict:
                 v["gold_clock"] = _flags(v["gold_clock"])
             if isinstance(v.get("cross"), dict):                        # the 96-bar window is in the legend
                 v["cross"] = {a: b for a, b in v["cross"].items() if a != "bars"}
+            if isinstance(v.get("news"), dict) and v["news"].get("data_quality") == "real":   # capabilities say it
+                v["news"] = {a: b for a, b in v["news"].items() if a != "data_quality"}
         elif k == "history" and isinstance(v, list):
             v = [{**h, "summary": (h.get("summary") or "")[:HISTORY_SUMMARY_CHARS]} if isinstance(h, dict) else h
                  for h in v]

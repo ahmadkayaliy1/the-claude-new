@@ -727,8 +727,19 @@ def test_the_builder_adds_session_stats_for_every_pair_and_the_gold_blocks_only_
     pcfg = env.s.pairs["XAUUSD"]
     execu = env.reg.with_role("XAUUSD", "execution")[0]
     cal = calendar_for(execu.venue, execu.symbol, pcfg.asset_class)
-    # the window state is B15's own function, not a copy: 07:25 UTC is 08:25 in London (BST), inside 07:45-11:00
-    assert gc_["desk_window"] == desk_state_text(pcfg.desk, AS_OF_REAL, cal, "XAUUSD") == "open"
+    # the window state is B15's own function, not a copy: 07:25 UTC is 08:25 in London (BST), inside 07:45-11:00;
+    # without a news calendar file the desk makes no entry call (B8, D-049) and the payload says so
+    assert gc_["desk_window"] == desk_state_text(pcfg.desk, AS_OF_REAL, cal, "XAUUSD", "news_stale")
+    assert gc_["desk_window"] == "closed:news_stale" and xau["market"]["news"]["data_quality"] == "unavailable"
+    assert xau["capabilities"]["news_calendar"]["quality"] == "unavailable" and "news" not in btc["market"]
+    from tradingsystem.analysis import news as newsmod                  # the real weekly file, fetched 1 h before
+    raw = (REAL / "ff_calendar_thisweek_2026-09-29.json").read_bytes()
+    opener = lambda req, timeout: __import__("io").BytesIO(raw)       # noqa: E731
+    newsmod.fetch(pcfg.news_blackout, newsmod.calendar_path(env.s.paths.shared()), AS_OF_REAL - 3_600_000,
+                  opener=opener)
+    xau = b.build("XAUUSD", AS_OF_REAL)
+    assert xau["market"]["gold_clock"]["desk_window"] == desk_state_text(pcfg.desk, AS_OF_REAL, cal, "XAUUSD") == "open"
+    assert xau["market"]["news"]["blackout"] == "none" and xau["capabilities"]["news_calendar"]["quality"] == "real"
     ind15 = xau["timeframes"]["15m"]["indicators"]
     px, atr = ind15["close"], ind15["atr14"]                                        # no quote stored: the last 15m close
     rnd = xau["levels"]["round"]

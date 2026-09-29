@@ -134,6 +134,16 @@ pairs:
         - {name: new_york, tz: America/New_York, start: "08:15", end: "11:30"}
       reopen_grace_min: 60
       friday_cutoff: {time: "12:00", tz: America/New_York}
+    news_blackout:                   # B8 (D-046 a) with the gold tiers (D-049): the XAU engine fetches the public weekly
+      enabled: true                  # calendar hourly into data/shared/news_calendar.json; the gate refuses entries inside
+      source_url: https://nfs.faireconomy.media/ff_calendar_thisweek.json    # a window while the file is fresh; stale ->
+      refresh_minutes: 60            # no blackout + one warning (and, for this desk, no entry calls). Rollback: enabled: false
+      stale_hours: 24
+      currencies: [USD]
+      windows:                       # minutes [before, after] the release
+        fomc: [60, 75]               # FOMC statement / rate decision / press conference
+        high: [30, 30]               # every other high-impact USD release (CPI, NFP, core PCE, ...)
+        medium: [10, 10]             # PPI, retail sales, ISM, JOLTS, GDP when rated medium
     instruments:
       - venue: mt5
         symbol_by_profile: {demo: "XAUUSD@", live: "XAUUSD@"}

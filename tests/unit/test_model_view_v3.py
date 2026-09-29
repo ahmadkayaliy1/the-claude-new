@@ -50,3 +50,22 @@ def test_forming_and_the_period_levels_are_rendered_and_documented():
     assert "[open_time, open, high, low, close, volume, age_s]" in text and "NOT in `recent`" in text
     for name in ("pwh", "pwl", "pmh", "pml", "month_open", "year_open"):
         assert f"`{name}`" in text
+
+
+def test_the_1m_timeframe_leaves_the_view_but_stays_in_the_stored_payload():
+    """B7 / D-046 (c): the 1m view pays for the new blocks; the stored payload keeps it (data gate, dashboard)."""
+    from tradingsystem.ai.model_view import VIEW_VERSION
+    tfs = {tf: {"bars": 30, "quality": {"status": "ok"}, "recent": [[1, 2, 3, 4, 5, 6]]} for tf in ("1h", "15m", "5m", "1m")}
+    payload = {"timeframes": tfs}
+    v = model_view({"meta": {"as_of": AS_OF}, **payload})
+    assert set(v["timeframes"]) == {"1h", "15m", "5m"} and "1m" in payload["timeframes"]
+    assert v["meta"]["view_version"] == VIEW_VERSION == "3"
+    single = model_view({"meta": {"as_of": AS_OF}, "timeframe": {"1m": tfs["1m"]}})    # an analyst slice keeps it
+    assert set(single["timeframe"]) == {"1m"}
+
+
+def test_the_legend_names_every_new_market_block():
+    text = LEGEND.read_text(encoding="utf-8")
+    for block in ("market.session_stats", "market.gold_clock", "market.cross", "market.news", "levels.round",
+                  "orderflow.daily_profiles", "timeframes.15m.forming", "`pwh`/`pwl`", "min_stop_set_by", "fits_now"):
+        assert block in text, block

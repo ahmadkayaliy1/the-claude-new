@@ -52,7 +52,8 @@ from ..core.timeutil import MS_PER_DAY, MS_PER_HOUR, iso, now_ms
 from ..core.tunables import Tunables, tunables_of
 from ..ingest.common.appdb import AppDB
 from ..storage.tablespec import spec_for
-from .desk_windows import desk_window_state, last_window_end
+from . import news as newsmod
+from .desk_windows import desk_news_reason, desk_window_state, last_window_end
 from .registry import matrix_markdown
 from .snapshot import SnapshotBuilder, data_problems, to_json
 
@@ -113,6 +114,9 @@ class Engine:
         self._held_back: dict[str, dict] = {}        # pair → its entry-call suppression now (B12 / B15), for the status
         self._skip_noted: dict[str, tuple[str, int]] = {}   # pair → (key, time) of the last skipped event
         self._reserve_off_noted: set[str] = set()   # providers told once: quota day not the UTC day → no reserve
+        self._news_fetchers: dict[str, newsmod.Fetcher] = {}   # pair → its calendar download (B8; pairs with it on)
+        self._news_state: dict[str, newsmod.NewsState] = {}    # pair → the news state at this tick
+        self._news_stale_noted: set[str] = set()     # pairs whose stale calendar was reported (once per episode)
         self._tick_error: str | None = None
         self.stop = False
 
@@ -315,6 +319,7 @@ class Engine:
         policy = self._policy()
         fired: list[tuple[str, list[str], str, dict | None]] = []
         for pair, pcfg in self.s.enabled_pairs().items():
+            self._news_tick(pair, now)
             if pair in self.inflight:
                 continue                                        # its cycle is still running
             execu = self.reg.with_role(pair, "execution")[0]
@@ -379,9 +384,12 @@ class Engine:
         and the payload's ``account.min_position_risk.fits_now`` is False (B12; absent = unknown = never; the last
         value seen stands between screens)."""
         desk = self.s.pairs[pair].desk
+        news = self._news_state.get(pair)
         if desk is not None:
-            ok, why = desk_window_state(desk, now, cal, pair)
+            ok, why = desk_window_state(desk, now, cal, pair, desk_news_reason(news))
             return (not ok, why, f"{why}:{last_window_end(desk, now)}")
+        if news is not None and news.blocked:              # B8: no entry call inside a release's blackout window
+            return True, "news_blackout", f"news_blackout:{news.blackout[1].time_ms}"
         if not self.s.ai.skip_entry_calls_when_no_fit:
             return False, "", ""
         fit = (((payload or {}).get("account") or {}).get("min_position_risk") or {}).get("fits_now")
@@ -420,16 +428,45 @@ class Engine:
             prev = self._skip_noted.get(pair)
             if prev is None or prev[0] != key or (why == "no_fit" and now - prev[1] >= MS_PER_HOUR):
                 self._skip_noted[pair] = (key, now)
-                msg = (f"{pair}: {strength} entry call not made - "
-                       + ("the minimum lot does not fit the risk / leverage caps (account.min_position_risk.fits_now "
-                          "is false)" if why == "no_fit" else f"desk call window closed ({why})"))
+                text = {"no_fit": "the minimum lot does not fit the risk / leverage caps (account.min_position_risk"
+                                  ".fits_now is false)",
+                        "news_blackout": "inside a scheduled release's news blackout window (B8)"}
+                msg = f"{pair}: {strength} entry call not made - " + text.get(why, f"desk call window closed ({why})")
                 log.info("%s", msg)
-                self.appdb.add_event("engine", f"skipped: {why if why == 'no_fit' else 'outside_desk_window'}",
-                                     f"{pair}: {why}; {msg}"[:300])
+                kind = why if why in text else "outside_desk_window"
+                self.appdb.add_event("engine", f"skipped: {kind}", f"{pair}: {why}; {msg}"[:300])
             return True
         except Exception:  # noqa: BLE001 — bookkeeping: on any doubt the call goes ahead as before
             log.exception("%s: could not apply the entry-call suppression", pair)
             return False
+
+    # ------------------------------------------------------------------ news calendar (Phase 5 B8)
+    def _news_tick(self, pair: str, now: int) -> None:
+        """For a pair with ``news_blackout.enabled``: start the calendar download when due (a daemon thread writes
+        ``data/shared/news_calendar.json``), read the stored file's state at ``now`` for the suppression, and report a
+        stale calendar once per episode (event ``news_stale`` + a warning). Never raises."""
+        cfg = self.s.pairs[pair].news_blackout
+        if not cfg.enabled:
+            return
+        try:
+            f = self._news_fetchers.get(pair)
+            if f is None:
+                f = self._news_fetchers[pair] = newsmod.Fetcher(
+                    cfg, self.s.paths.shared(), on_event=lambda kind, text: self.appdb.add_event("engine", kind,
+                                                                                               f"{pair}: {text}"[:300]))
+            f.maybe_fetch(now)
+            st = newsmod.state_now(cfg, self.s.paths.shared(), now)
+        except Exception as e:  # noqa: BLE001 - never stops the loop; an unknown state is a stale one
+            log.exception("%s: news calendar", pair)
+            st = newsmod.NewsState(False, f"news calendar error ({type(e).__name__})", None, ())
+        self._news_state[pair] = st
+        if not st.fresh and pair not in self._news_stale_noted:
+            self._news_stale_noted.add(pair)
+            log.warning("%s: %s - the news blackout is not applied%s", pair, st.reason,
+                        " and the desk makes no entry call" if self.s.pairs[pair].desk is not None else "")
+            self.appdb.add_event("engine", "news_stale", f"{pair}: {st.reason}"[:300])
+        elif st.fresh:
+            self._news_stale_noted.discard(pair)
 
     # ------------------------------------------------------------------ closed execution market (Phase 5 A5)
     def _closed_market(self, pair: str, now: int, cal: SessionCalendar) -> bool:

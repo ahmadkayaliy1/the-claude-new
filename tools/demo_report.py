@@ -493,13 +493,17 @@ def availability(con: sqlite3.Connection, sp: Settings, pair: str, since: int, u
                 mark(ev, ts)
         if down_since is not None:
             mark("stopped", down_since, until - 1)
-        # B12 / B15: entry calls the engine deliberately did not make (one event per hour / per gap between windows)
+        # B12 / B15 / B8: entry calls the engine deliberately did not make (one event per hour / per gap between
+        # windows / per release)
+        why = {"skipped: no_fit": " (the minimum lot does not fit the risk / leverage caps; "
+                                  "ai.skip_entry_calls_when_no_fit)",
+               "skipped: outside_desk_window": " (the desk's call windows, B15)",
+               "skipped: news_blackout": " (a scheduled release's news blackout, B8)"}
         for ev, n in con.execute("SELECT event, count(*) FROM ingestion_events WHERE collector='engine' AND ts>=? "
-                                 "AND ts<? AND event IN ('skipped: no_fit', 'skipped: outside_desk_window') "
-                                 "AND detail LIKE ? GROUP BY event", (since, until, f"{pair}:%")):
-            notes.append(f"{n} `{ev}` event(s): entry calls deliberately not made" +
-                         (" (the minimum lot does not fit the risk / leverage caps; ai.skip_entry_calls_when_no_fit)"
-                          if ev == "skipped: no_fit" else " (the desk's call windows, B15)"))
+                                 "AND ts<? AND event IN ('skipped: no_fit', 'skipped: outside_desk_window', "
+                                 "'skipped: news_blackout') AND detail LIKE ? GROUP BY event",
+                                 (since, until, f"{pair}:%")):
+            notes.append(f"{n} `{ev}` event(s): entry calls deliberately not made" + why.get(ev, ""))
     else:
         notes.append("no ingestion_events table")
     if rp._cols(con, "ai_decisions"):

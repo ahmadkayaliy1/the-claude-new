@@ -71,9 +71,15 @@ class RenderedPrompt:
         return hashlib.sha256(self.system.encode()).hexdigest()[:16]
 
 
-def render(role: str, system_vars: dict[str, object], user_vars: dict[str, object]) -> RenderedPrompt:
+_APPENDIX = re.compile(r"^desks/[a-z0-9_]+$")
+
+
+def render(role: str, system_vars: dict[str, object], user_vars: dict[str, object],
+           appendix: str | None = None) -> RenderedPrompt:
     """Render a role. ``system_vars`` must be stable across cycles (keeps the system prompt cacheable);
-    per-cycle values (time, payload) belong in ``user_vars``."""
+    per-cycle values (time, payload) belong in ``user_vars``. ``appendix`` (Phase 5 B18, D-049) names a versioned
+    library file (``desks/xau``) appended verbatim after the system prompt - constant per pair, no placeholder, its
+    version recorded like the others; None leaves the system prompt exactly as before."""
     if role not in ROLE_FILES:
         raise PromptError(f"unknown prompt role {role!r}")
     sys_file, user_file = ROLE_FILES[role]
@@ -90,6 +96,10 @@ def render(role: str, system_vars: dict[str, object], user_vars: dict[str, objec
         own = var in base                          # a caller-supplied block replaces the shared file (still checked)
         base.setdefault(var, _fill(text(rel, record=not own), system_vars, var))
     system = _fill(text(sys_file), base, sys_file)
+    if appendix:
+        if not _APPENDIX.match(appendix) or not (DIR / f"{appendix}.md").is_file():
+            raise PromptError(f"unknown prompt appendix {appendix!r} (a desks/<name> file of the prompt library)")
+        system = system + "\n\n" + text(f"{appendix}.md")      # verbatim: a desk brief has no placeholders
     user = _fill(text(user_file), {**system_vars, **user_vars}, user_file)
     return RenderedPrompt(role, system, user, used)
 

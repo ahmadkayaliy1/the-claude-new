@@ -28,7 +28,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tradingsystem.ai.triggers import decide  # noqa: E402
-from tradingsystem.analysis.desk_windows import desk_window_state  # noqa: E402
+from tradingsystem.analysis import news as newsmod  # noqa: E402
+from tradingsystem.analysis.desk_windows import desk_news_reason, desk_window_state  # noqa: E402
 from tradingsystem.analysis.snapshot import SnapshotBuilder  # noqa: E402
 from tradingsystem.core.instruments import InstrumentRegistry  # noqa: E402
 from tradingsystem.core.sessions import calendar_for  # noqa: E402
@@ -69,7 +70,7 @@ def replay(pair: str, hours: float, end_ms: int | None, data_dir: str | None, eq
     start = end - int(hours * 3_600_000)
     plain, rules = Track(), Track()
     build_ms: list[int] = []
-    screens = 0
+    screens = news_not_replayed = 0
     try:
         for bar_close in range(start, end + 1, stf.ms):
             now = bar_close + SETTLE_MS
@@ -83,9 +84,17 @@ def replay(pair: str, hours: float, end_ms: int | None, data_dir: str | None, eq
             atr = ((payload.get("timeframes") or {}).get(dec.value) or {}).get("indicators", {}).get("atr14")
             mid = mid_of(payload)
             fit = (((payload.get("account") or {}).get("min_position_risk")) or {}).get("fits_now")
+            nst = None
+            if pcfg.news_blackout.enabled:              # B8: only where the stored calendar covers this instant
+                nst = newsmod.state_now(pcfg.news_blackout, s.paths.shared(), now)
+                if not nst.fresh:
+                    news_not_replayed += 1
+                    nst = None
             if pcfg.desk is not None:
-                ok, why = desk_window_state(pcfg.desk, now, cal, pair)
+                ok, why = desk_window_state(pcfg.desk, now, cal, pair, desk_news_reason(nst))
                 held = None if ok else why
+            elif nst is not None and nst.blocked:
+                held = "news_blackout"
             elif s.ai.skip_entry_calls_when_no_fit and fit is False:
                 held = "no_fit"
             else:
@@ -118,7 +127,8 @@ def replay(pair: str, hours: float, end_ms: int | None, data_dir: str | None, eq
             "calls_per_day": round(per_day, 1), "by_strength": by,
             "calls_without_rules": len(plain.fires),
             "calls_per_day_without_rules": round(len(plain.fires) * 24 / hours, 1) if hours else 0,
-            "suppressed": rules.suppressed, "desk": pcfg.desk is not None, "equity": equity, "cap": s.ai.daily_calls_per_pair,
+            "suppressed": rules.suppressed, "desk": pcfg.desk is not None,
+            "news_not_replayed_screens": news_not_replayed if pcfg.news_blackout.enabled else None, "equity": equity, "cap": s.ai.daily_calls_per_pair,
             "within_cap": per_day <= s.ai.daily_calls_per_pair,
             "snapshot_build_ms": {"median": statistics.median(build_ms) if build_ms else None,
                                   "p95": sorted(build_ms)[int(0.95 * (len(build_ms) - 1))] if build_ms else None,

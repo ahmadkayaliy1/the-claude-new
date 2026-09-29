@@ -40,6 +40,9 @@ class ExecContext:
     live_sides: dict[str, list[str]] = field(default_factory=dict)
     account_drawdown_pct: float | None = None
     account_drawdown_tripped: bool = False
+    # Phase 5 B8: (ok, detail) of the pair's news blackout (analysis.news.gate_check); None = the pair has none - no
+    # check is added, so the gate output of a pair without it is unchanged
+    news: tuple[bool, str] | None = None
 
 
 @dataclass
@@ -127,6 +130,8 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
     add("not_expired", ctx.now_ms < vu, f"valid until {rec['valid_until']}")
     add("recommendation_age", age <= risk.max_recommendation_age_s, f"{age:.0f}s old (≤{risk.max_recommendation_age_s}s)")
     add("confidence", rec.get("confidence", 0) >= min_confidence, f"{rec.get('confidence')} (≥{min_confidence})")
+    if ctx.news is not None:
+        add("news_blackout", ctx.news[0], ctx.news[1])
     if sl is None:
         return GateResult(False, checks)
     spread = ctx.ask - ctx.bid

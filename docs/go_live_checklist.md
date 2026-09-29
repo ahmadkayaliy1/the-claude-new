@@ -72,6 +72,7 @@ At ≈ $100 the gate refuses most ideas by design (D-046 d); these classes are t
 | `market_open`, `not_expired`, `recommendation_age`, `market_in_zone`, `pending_price_valid` | the idea no longer fits the market or the clock at the gate |
 | `effective_leverage` | the leverage cap |
 | `daily_loss_worst_case` | realised + open SL risk + this trade would pass the daily limit (a protective refusal, not a trip) |
+| `news_blackout` | inside a scheduled high-impact USD release's blackout window (B8; XAUUSD only, which stays out of go-live) |
 
 **Not expected — each one is explained before go-live:** `stop_loss_present` (an idea without SL reached the gate),
 `sl_side`, `is_trade`, `quote_fresh` (a stale feed at the gate), `basis` (analysis and execution prices apart),

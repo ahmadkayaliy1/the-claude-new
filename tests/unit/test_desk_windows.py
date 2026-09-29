@@ -110,11 +110,16 @@ def test_grace_zero_and_custom_length():
     assert state(ALL_DAY.model_copy(update={"reopen_grace_min": 90}), 2026, 9, 27, 23, 20) == (False, "reopen_grace")
 
 
-def test_the_news_hook_blocks_and_names_its_reason(monkeypatch):
-    assert dw.desk_news_block("XAUUSD", utc(2026, 9, 29, 8)) is None       # B8 fills it; nothing wired yet
-    monkeypatch.setattr(dw, "desk_news_block", lambda pair, now: "news_stale")
-    assert desk_window_state(CFG, utc(2026, 9, 29, 7, 50), CAL) == (False, "news_stale")
-    assert desk_state_text(CFG, utc(2026, 9, 29, 7, 50), CAL) == "closed:news_stale"
+def test_the_news_state_blocks_and_names_its_reason():
+    """B8: the engine passes desk_news_reason(state) - stale -> news_stale, inside a window -> news_blackout."""
+    fresh_quiet = SimpleNamespace(fresh=True, blackout=None)
+    assert dw.desk_news_reason(None) is None and dw.desk_news_reason(fresh_quiet) is None
+    assert dw.desk_news_reason(SimpleNamespace(fresh=False, blackout=None)) == "news_stale"
+    assert dw.desk_news_reason(SimpleNamespace(fresh=True, blackout=("high",))) == "news_blackout"
+    assert desk_window_state(CFG, utc(2026, 9, 29, 7, 50), CAL, "XAUUSD", "news_stale") == (False, "news_stale")
+    assert desk_window_state(CFG, utc(2026, 9, 29, 3, 0), CAL, "XAUUSD", "news_stale") == (False, "outside_window")
+    assert desk_state_text(CFG, utc(2026, 9, 29, 7, 50), CAL, "XAUUSD", "news_blackout") == "closed:news_blackout"
+    assert desk_window_state(CFG, utc(2026, 9, 29, 7, 50), CAL, "XAUUSD", None)[0] is True
 
 
 def test_state_text():
@@ -136,6 +141,9 @@ WED_0510 = utc(2026, 9, 23, 5, 10) + 6_000        # XAU open, outside both windo
 WED_0655 = utc(2026, 9, 23, 6, 55) + 6_000        # London window open (BST: 06:45-10:00 UTC)
 
 
+FRESH_QUIET = SimpleNamespace(fresh=True, blackout=None, blocked=False)
+
+
 @pytest.fixture
 def desk(eng, monkeypatch):
     """The engine with the real XAU payload for every build; dispatches are recorded (BTC/ETH have no desk)."""
@@ -147,6 +155,8 @@ def desk(eng, monkeypatch):
     monkeypatch.setattr(eng.orch, "payload", build)
     monkeypatch.setattr(eng, "_dispatch", lambda fired, now: rec.dispatched.extend(f[0] for f in fired))
     monkeypatch.setattr(eng, "_data_ready", lambda pair, bar, tf=None: True)
+    # a fresh news calendar with no release near (B8's own engine cases are in test_news.py)
+    monkeypatch.setattr(eng, "_news_tick", lambda pair, now: eng._news_state.__setitem__(pair, FRESH_QUIET))
     eng.rec = rec
     assert eng.s.pairs["XAUUSD"].desk is not None and eng.s.pairs["BTCUSDT"].desk is None
     return eng

@@ -1,0 +1,6 @@
+<!-- prompt: desks/xau · version 1 -->
+## Gold desk (XAUUSD) - shadow
+
+- Your gold trades are recorded and scored in R on real prices, not sent, until the account can carry 1 oz at a professional stop. Propose the trade a professional would take, with its real structural stop; never shrink a stop to fit. `account.min_position_risk` does not bind these ideas; the stop distances in `market.execution.costs` do.
+- Routine: bias from 4h/1d structure → location: the Asia range edges (`market.gold_clock`), PDH/PDL, PW/PM, the $10/$50 levels (`levels.round`) → confirmation: `market.cross` votes and silver (`confirms_xau_extreme`) → session behaviour (`market.session_stats`, `london_asia_sweep_days`) → entry: LIMIT or STOP at the level (your answer arrives 1-3 minutes after the screen; MARKET only when price is at your entry now) → stop behind the sweep wick or the structure, plus the spread, plus a buffer beyond the round number → targets at least 2R after the spread (the opposite range edge, the next $10/$50 level, PDH/PDL).
+- Intraday ideas only: none inside or just before a `market.news` blackout, near the 17:00 New York rollover or the Sunday reopen. Conflicting votes or no clear location → NO_TRADE.

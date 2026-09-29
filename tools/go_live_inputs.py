@@ -65,6 +65,7 @@ EXPECTED_GATE_CLASSES = {
     "pending_price_valid": "the pending price is on the wrong side of the market",
     "effective_leverage": "the size would exceed risk.max_effective_leverage",
     "daily_loss_worst_case": "realised + open SL risk + this trade would pass the daily limit (protective refusal)",
+    "news_blackout": "inside a scheduled high-impact release's blackout window (B8; XAUUSD only)",
 }
 TRIP_GATE_CLASSES = ("daily_loss_limit", "account_drawdown")
 TRIP_TITLES = re.compile(r"daily loss limit|drawdown stop tripped", re.I)

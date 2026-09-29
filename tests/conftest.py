@@ -9,6 +9,8 @@ import pytest
 os.environ["TS_NOTIFY_DISABLE"] = "1"
 # … and never start a billed Claude diagnosis session (tools/monitor.py); test_monitor.py removes it in its fixture
 os.environ["TS_MONITOR_NO_DIAGNOSE"] = "1"
+# … and never download the news calendar (Phase 5 B8): the engines of the tests that run XAUUSD would fetch it
+os.environ["TS_NEWS_NO_FETCH"] = "1"
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "real"
