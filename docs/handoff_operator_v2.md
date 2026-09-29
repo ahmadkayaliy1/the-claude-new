@@ -42,6 +42,15 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-09-29 — H26a done ≈ 05:40 UTC: checkpoint A runs in production (`main` 0de05ab).** Verified read-only:
+  the three per-pair supervisors up (0 restarts), the five `TradingSystemOps-*` tasks, the first backup
+  `backups\20260929T053958Z.zip`, `diagnose_enabled: false` removed, the recorder restarted by its task at
+  05:42:50 UTC. The first daily review after the merge (05:39 UTC, Opus, diff guard clean) found four facts for
+  checkpoint B (PROJECT_STATUS P12.5 note 8): XAUUSD cannot size any trade at ≈ $99 (minimum stop 3.3 > 2.97
+  allowed) yet spent 24 calls / ≈ 590 k input tokens; an operator session cannot create a proposal (a multi-line
+  `--body` never matches the `propose.py` allow rule; Write is disallowed); `snapshot_build_ms` ≈ 5.9 s on
+  BTC/ETH (B7 wants < 3 s); prompt-cache read share 0.33. Next: checkpoint B in a new session.
+
 * **2026-09-29 — Phase 5 checkpoint A "ready and safe" is DONE on `feat/phase5-goes-deeper` (worktree
   `C:\the_claude_new_wt\phase5`); production runs Phase 4 until the user's H26a.** 1425 unit tests, no live
   call. Built in the order of §3.9.1 (A0 shared keys → A1 tracker → A9 integrity → A2/A3 backup + recorder
