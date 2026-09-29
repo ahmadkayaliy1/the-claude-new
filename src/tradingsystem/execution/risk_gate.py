@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from ..core.settings import RiskCfg
 from ..core.timeutil import parse_date_spec
-from .sizing import SizeResult, single_leg_index, size_position, split_volume
+from .sizing import SizeResult, effective_leverage, single_leg_index, size_position, split_volume
 
 
 @dataclass
@@ -173,8 +173,7 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
         checks[i] = ("rr_after_costs", ok, f"{_rr_text(rr, risk.min_rr, ok)} (single leg at TP{single + 1}: "
                                            f"{size.lots} lots cannot be split)")
     if size.ok:
-        notional = size.lots * ctx.contract_size * entry
-        lev = notional / ctx.equity
+        lev = effective_leverage(size.lots, ctx.contract_size, entry, ctx.equity)
         add("effective_leverage", lev <= risk.max_effective_leverage, f"{lev:.1f}× ≤ {risk.max_effective_leverage}×")
     add("max_open_positions", ctx.open_positions < risk.max_open_positions,
         f"{ctx.open_positions} open positions/pending orders (< {risk.max_open_positions})")

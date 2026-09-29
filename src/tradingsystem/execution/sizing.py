@@ -65,3 +65,23 @@ def size_position(*, equity: float, target_risk_pct: float, max_risk_pct: float,
         reason = "sized to target risk"
     actual = lots * per_lot
     return SizeResult(True, lots, actual, actual / equity * 100, reason, target_risk_pct, min_lot_risk_pct)
+
+
+def effective_leverage(lots: float, contract_size: float, entry: float, equity: float) -> float:
+    """Notional / equity — the risk gate's ``effective_leverage`` check and the snapshot's fit fields use this."""
+    return lots * contract_size * entry / equity
+
+
+def min_lot_fit(*, equity: float, entry: float, stop_dist: float, contract_size: float, volume_min: float,
+                volume_step: float, max_risk_pct: float, max_leverage: float) -> dict:
+    """Does the minimum lot pass BOTH the per-trade risk cap (``size_position``, at the given stop distance) and the
+    leverage cap (the gate checks it only after sizing passes, so a failing size hides it)? Also the equity at which
+    it would: max(min-lot risk / cap, min-lot notional / leverage cap)."""
+    s = size_position(equity=equity, target_risk_pct=max_risk_pct, max_risk_pct=max_risk_pct, entry=entry,
+                      stop=entry - stop_dist, contract_size=contract_size, volume_min=volume_min,
+                      volume_step=volume_step)
+    lev = effective_leverage(volume_min, contract_size, entry, equity)
+    min_lot_risk_usd = s.min_lot_risk_pct / 100 * equity
+    need = max(min_lot_risk_usd / (max_risk_pct / 100), volume_min * contract_size * entry / max_leverage)
+    return {"fits_now": s.min_lot_risk_pct <= max_risk_pct and lev <= max_leverage, "leverage_at_min_lot": lev,
+            "leverage_cap": max_leverage, "equity_for_min_lot": need}

@@ -105,6 +105,9 @@ def model_view(payload: dict) -> dict:
             v = _capabilities(v)
         elif k == "account" and isinstance(v, dict):
             v = {a: b for a, b in v.items() if a != "equity_source"}
+            if isinstance(v.get("min_position_risk"), dict):          # fits_now as 1/0, like the other flags
+                v["min_position_risk"] = {a: (int(b) if isinstance(b, bool) else b)
+                                          for a, b in v["min_position_risk"].items()}
         elif k == "market" and isinstance(v, dict):
             v = {a: b for a, b in v.items() if a != "note"}
         elif k == "history" and isinstance(v, list):

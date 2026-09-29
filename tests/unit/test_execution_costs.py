@@ -26,14 +26,14 @@ def test_min_stop_holds_for_any_spread_up_to_the_conservative_one():
     assert c["min_stop_distance"] >= gate_min(conservative, 150.0) * STOP_BOUND_MARGIN - 0.01
     for spread in (26.0, 30.0, conservative, conservative * 1.09):
         assert c["min_stop_distance"] >= gate_min(spread, 150.0), spread
-    assert c["min_stop_set_by"] == "spread_rule" and c["stops_level"] == 25.0 and c["spread_now"] == 26.0
+    assert c["min_stop_set_by"] == "system_spread_rule" and c["stops_level"] == 25.0 and c["spread_now"] == 26.0
     assert c["max_stop_distance"] <= 5 * 150.0 / STOP_BOUND_MARGIN + 1e-9           # rounded down, inside the gate
     assert c["swap_per_night_at_min_lot_usd"]["long"] == pytest.approx(-84251.14 * 0.01 * 0.15 / 360, abs=1e-3)
 
 
 def test_atr_floor_and_rounding():
     c = execution_costs(BTC, 84238.14, 84264.14, np.array([]), np.array([]), 400.0, RISK, 2)
-    assert c["min_stop_set_by"] == "atr_floor" and c["min_stop_distance"] == pytest.approx(220.0)   # 200 × 1.1
+    assert c["min_stop_set_by"] == "system_atr_floor" and c["min_stop_distance"] == pytest.approx(220.0)   # 200 × 1.1
     assert c["max_stop_distance"] == pytest.approx(1818.18)                                        # 2000 / 1.1 down
     xau = {"contract_size": 100, "volume_min": 0.01, "tick_size": 0.01, "stops_level_points": 25,
            "swap_long": -37.2, "swap_short": 21.15, "swap_mode": "points"}

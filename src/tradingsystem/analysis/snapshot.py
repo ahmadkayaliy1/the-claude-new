@@ -24,6 +24,7 @@ from ..core.sessions import SessionCalendar, calendar_for
 from ..core.settings import RiskCfg, Settings
 from ..core.timeframes import Timeframe
 from ..core.timeutil import MS_PER_HOUR, MS_PER_MINUTE, iso
+from ..execution.sizing import min_lot_fit
 from ..storage.reader import InstrumentReader
 from ..storage.tablespec import spec_for
 from . import context as ctx
@@ -41,6 +42,14 @@ RECENT_GAP_BARS = 16            # a gap this close to the decision bar blocks th
 # timeframe → (bars analysed, recent candles shown)
 TF_PLAN: dict[str, tuple[int, int]] = {"1w": (80, 6), "1d": (200, 10), "4h": (240, 12), "1h": (300, 12),
                                        "15m": (320, 16), "5m": (300, 12), "1m": (240, 10)}
+
+
+def _mid(q: dict | None) -> float | None:
+    """Mid of an execution quote block (bid/ask), None when either is missing."""
+    try:
+        return (float(q["bid"]) + float(q["ask"])) / 2
+    except (TypeError, KeyError, ValueError):
+        return None
 
 
 def _r(x, d: int):
@@ -73,11 +82,13 @@ def execution_costs(contract: dict, bid: float, ask: float, spreads_1h: np.ndarr
     p95_24h = float(np.percentile(spreads_24h, 95)) if len(spreads_24h) else 0.0
     spread = max(spread_now, p90_1h, p95_24h)
     stops = float(contract.get("stops_level_points") or 0) * tick
-    parts = {"stops_level_plus_spread": stops + spread}
+    # label = the rule that binds: the venue's own minimum is stops_level (+ spread); the ATR floor and the spread
+    # rule are the SYSTEM's (risk_gate), not the venue's
+    parts = {"venue_stops_plus_spread": stops + spread}
     if risk.max_spread_to_sl_ratio > 0:
-        parts["spread_rule"] = spread / risk.max_spread_to_sl_ratio
+        parts["system_spread_rule"] = spread / risk.max_spread_to_sl_ratio
     if atr:
-        parts["atr_floor"] = risk.sl_atr_min_mult * atr
+        parts["system_atr_floor"] = risk.sl_atr_min_mult * atr
     step = max(tick, 10.0 ** -d)
     min_stop = np.ceil(max(parts.values()) * STOP_BOUND_MARGIN / step - 1e-9) * step        # tolerance: float noise
     max_stop = np.floor(risk.sl_atr_max_mult * atr / STOP_BOUND_MARGIN / step + 1e-9) * step if atr else None
@@ -254,7 +265,8 @@ class SnapshotBuilder:
                      "price_reference": primary.key, "execution_instrument": execu.key,
                      "payload_version": PAYLOAD_VERSION, "config_hash": self.s.config_hash},
             "account": self._account(account, execu, dec_atr,
-                                     ((market.get("execution") or {}).get("costs") or {}).get("min_stop_distance"), d),
+                                     ((market.get("execution") or {}).get("costs") or {}).get("min_stop_distance"), d,
+                                     price=_mid(market.get("execution"))),
             "market": market,
             "capabilities": {k: {"quality": v.quality, "reason": v.reason} for k, v in caps.items()},
             "levels": self._levels(frames.get("1h"), as_of, pcfg.asset_class, d),
@@ -343,9 +355,11 @@ class SnapshotBuilder:
 
     # ------------------------------------------------------------------ blocks
     def _account(self, account: dict | None, execu: Instrument, atr: float | None, min_stop: float | None,
-                 d: int) -> dict:
+                 d: int, price: float | None = None) -> dict:
         """The account state passed in, plus what the minimum executable position risks (rule 8): the execution
-        instrument's minimum lot at the minimum stop distance the gate accepts (``market.execution.costs``)."""
+        instrument's minimum lot at the minimum stop distance the gate accepts (``market.execution.costs``). With the
+        execution price the fit fields say whether that lot passes the risk cap AND the leverage cap (B13); the sizing
+        and gate arithmetic is ``execution.sizing``'s, not a copy."""
         if not account:
             return {}
         out = dict(account)
@@ -359,6 +373,17 @@ class SnapshotBuilder:
                 "risk_pct_at_min_lot_and_min_stop": round(per_unit * sl / eq * 100, 2),
                 "max_stop_distance_at_min_lot_within_max_risk":
                     _r(eq * self.s.risk.max_risk_per_trade_pct / 100 / per_unit, d)}
+            if price and price > 0:
+                try:
+                    f = min_lot_fit(equity=eq, entry=price, stop_dist=sl, contract_size=spec["contract_size"],
+                                    volume_min=spec["volume_min"], volume_step=spec.get("volume_step") or spec["volume_min"],
+                                    max_risk_pct=self.s.risk.max_risk_per_trade_pct,
+                                    max_leverage=self.s.risk.max_effective_leverage)
+                    out["min_position_risk"].update({
+                        "fits_now": f["fits_now"], "leverage_at_min_lot": round(f["leverage_at_min_lot"], 1),
+                        "leverage_cap": f["leverage_cap"], "equity_for_min_lot": round(f["equity_for_min_lot"])})
+                except Exception:                                   # fit fields are advice: never break the payload
+                    pass
         return out
 
     def quote_at(self, inst: Instrument, as_of: int) -> dict | None:
