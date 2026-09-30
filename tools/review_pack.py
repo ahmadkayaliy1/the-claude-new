@@ -709,6 +709,7 @@ def pair_report(s: Settings, pair: str, since: int, now: int, usage_rows: dict[s
                 for m in _rows(con, q, tuple(chunk)):
                     metrics[m["decision_id"]] = m
         rep["funnel"] = _funnel(decs, metrics)
+        rep["data_asks"] = data_asks(decs)              # D-046 (b): the evidence for the deferred MCP data tools
         ideas = [d for d in decs if d.get("decision") in ("BUY", "SELL")]
         rep["attribution"] = {k: _breakdown(ideas, k) for k in ("session", "regime", "setup_kinds", "trigger_strength")}
         rep["position_actions"] = _position_actions(con, pair, since, until)
@@ -733,6 +734,30 @@ def pair_report(s: Settings, pair: str, since: int, now: int, usage_rows: dict[s
     finally:
         con.close()
     return rep
+
+
+DATA_ASK_RE = re.compile(r"\b(more|longer|deeper|additional|extra|missing|need|needs|needed|would help|lack|lacks|"
+                         r"without)\b.{0,60}\b(candles?|bars?|history|depth|order ?book|footprint|ticks?|data)\b"
+                         r"|\b(candles?|history|depth|order ?book|data)\b.{0,40}\b(insufficient|too short|not enough|"
+                         r"unavailable|missing)\b", re.I)
+DATA_ASK_BUILD_SHARE = 0.10        # D-046 (b): build the bounded MCP data tools when at least 10 % of decisions ask
+
+
+def data_asks(decs: list[dict[str, Any]]) -> dict[str, Any]:
+    """D-046 (b): the valid decisions whose ``data_quality_notes`` ask for more candles, depth or history - the evidence
+    for building the deferred MCP tools (§3.9 item 9) once the share reaches 10 %."""
+    valid = [d for d in decs if d.get("status") == "valid"]
+    asks, examples = 0, []
+    for d in valid:
+        notes = (_json(d.get("recommendation"), {}) or {}).get("data_quality_notes") or []
+        hit = next((str(n) for n in notes if isinstance(n, str) and DATA_ASK_RE.search(n)), None)
+        if hit:
+            asks += 1
+            if len(examples) < 3:
+                examples.append(hit[:160])
+    share = asks / len(valid) if valid else None
+    return {"decisions": len(valid), "asking_for_more_data": asks, "share": _round(share, 3),
+            "build_threshold": DATA_ASK_BUILD_SHARE, "examples": examples}
 
 
 def _funnel(decs: list[dict[str, Any]], metrics: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1198,6 +1223,11 @@ def _render(d: dict[str, Any], n_ideas: int, n_health: int, n_rows: int) -> str:
               f"{_counts(C(f['by_trigger_strength']))}) → decisions {_counts(C(f['decisions']))}")
             p(f"  → ideas {f['ideas']} → execution {_counts(C(f['execution']))} · gate failures by check: "
               f"{_counts(C(f['gate_failures_by_check']))} → placed {f['placed']}")
+            da = r.get("data_asks") or {}
+            if da.get("decisions"):
+                p(f"  data asks (D-046 b): {da['asking_for_more_data']} of {da['decisions']} decisions ask for more "
+                  f"candles / depth / history ({da['share']:.1%}; build the MCP data tools at >= "
+                  f"{da['build_threshold']:.0%})" + (f" - e.g. {da['examples'][0]!r}" if da.get("examples") else ""))
             broker = ", ".join(f"{k} {v['n']} ({v['pnl_usd']:+} USD)"
                                for k, v in f["broker_outcomes"].items()) or "none"
             p(f"  → broker outcomes {broker} · virtual {_counts(C(f['virtual_outcomes']))} (resolved "

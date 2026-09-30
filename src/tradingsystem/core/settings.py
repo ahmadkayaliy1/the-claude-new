@@ -406,6 +406,13 @@ class AIProviderCfg(_Model):
     max_concurrency: int = 1               # claude_code: CLI processes at once (~170 MB each)
     temperature: float | None = None      # sampling temperature; None = the model default (Gemini 3.x wants that)
     quota_reset_tz: str | None = None      # daily-quota reset time zone (Gemini: America/Los_Angeles); None = UTC
+    # Reserved (D-046 b, §3.9 item 8 deferred): "per_call" is the only accepted value. A persistent session would hold
+    # one `claude -p --input-format stream-json --output-format stream-json --session-id <per-pair uuid>
+    # --autocompact 100k --tools ""` process per pair in the engine: one user line per event, the result parsed per
+    # turn, a daily restart with `--resume` (uuid in engine_kv), the process killed with the engine (no orphan). Not
+    # built: 300-500 MB per pair against < 0.5 GB free, an OAuth-refresh race on a long-lived process, autocompact
+    # dropping the persona, and no evidence of data-starved decisions (the review pack counts the ones that ask).
+    session_mode: Literal["per_call"] = "per_call"
 
 
 class AIBudgetCfg(_Model):

@@ -42,6 +42,19 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-09-29 — Phase 5 checkpoint B "goes deeper" (with the gold shadow desk, D-049) is DONE on
+  `feat/phase5-goes-deeper` (worktree `C:\the_claude_new_wt\phase5`); production runs checkpoint A until the user's
+  H26b.** 1686 unit tests. A first session (Sonnet) built B11, B13, B14, B12 + B15, B1–B5 + B16; a second (Opus)
+  checked them (green; one gap fixed — the operator prompt now names the stop rules and the desk), profiled the snapshot
+  build (not the bottleneck; the 5.9 s was a post-restart cold build) and built B6 + B17, B8, B18 + B7, B19, B9, B10.
+  The ONE live call (BTC, 12:01 UTC right after the reset, scratch root): valid first attempt, 6 images, input 25,688
+  tokens (+398 vs the day's production median), 47.7 s, every new block stored, build 1.66 s cold / 0.41 s warm
+  (docs/measurements/phase5_live.md). XAU: 29 → 9 setup/idle calls a day under the windows (replay); the gold-proxy
+  study FAILS (corr 0.408 < 0.5, H25 closed); the random-entry baseline for gold stops of 2–2.9 is −0.05…−0.11 R
+  (docs/measurements/gold_desk.md). Review: 6 lenses (money path, engine call path, payload/budget, ops/rollback, prompts vs code, research tools) + one skeptic per finding, one agent at a time: 17 findings, 14 confirmed (1 medium: a shadow idea's gate verdict never reached the model's history; 13 low) and fixed in e7fcb0e; a re-review of the fixes (all 14 correct, no regression) and an independent final check ("ready to merge": production's config.local.yaml loads with the branch for every system, stop_all -> merge -> start_all is sufficient, the rollback to 0de05ab works, BTC/ETH golden and shadow tests pass) - its 2 confirmed findings were this docs step and the missing D-046 (b) placeholders (the reserved `session_mode: per_call` and the review pack's data-ask counter), both done; 1 refuted. As built: §3.9 "4.9 As built". D-050. User steps: H26b in
+  PROJECT_STATUS (stop_all → merge → start_all, with the checks listed there). The demo window ends 2026-10-02 21:50
+  UTC: then `tools\demo_report.py --out data\reviews\demo.md` and `tools\go_live_inputs.py`.
+
 * **2026-09-29 — D-049: gold becomes a professional desk in SHADOW (checkpoint B rows B11–B19 added to §3.9.1).**
   A read-only design workflow (facts → pro practice → design → skeptic) found that the XAU blocker is our own
   0.5×ATR(15m) stop floor (the model called it "the venue's"), that 1 oz at $97 is 42× leverage against the
@@ -875,6 +888,56 @@ User actions: H22 `pip install mcp` (only for 9) · H23 attach `CalendarExport.m
 `session_mode: persistent` for 24 h (optional) · H25 `flow_proxy_approved: true` only after the study · H26 merge + restart.
 Risks: persistent-mode RAM on this laptop (opt-in only); MCP extra turns (+25–30 k tokens each, capped 2/day/pair); the news
 file depends on the terminal (fail-open with a warning; never a silent trade during a known event when the file is fresh).
+
+##### 4.9 As built (checkpoint B, 2026-09-29) — where the implementation differs from §3.9 / §3.9.1
+- **Build and sessions:** B11 → B13 → B14 → B12 + B15 → B1–B5 + B16 were built by a first session (Sonnet) in the order of
+  §3.9.1; a second session (Opus) checked them (tests green, one gap fixed: the operator sessions' prompt now names the stop
+  rules and the shadow desk — the "review prompt" part of B13), then built B6 + B17 → B8 → B18 + B7 → B19, B9, B10.
+- **Snapshot profile (note 8c):** the build is not the bottleneck — standalone 0.19–0.44 s warm (0.9–1.8 s cold, the first
+  build reads the Parquet days), the production engine's median 0.82 s (BTC) / 0.85 s (ETH), max 2.9–3.7 s over its last
+  20 screens (2026-09-29 ≈ 08:10 UTC). The 5.9 s of the 05:39 review was the post-restart cold path. Hot SQLite fetches are
+  ~70 % of a warm build, the footprint's aggTrades read ~55 %. Nothing was optimised; B1–B6 add ≈ 5–40 ms.
+- **B6 + B17 (`market.cross`):** one reader for both kinds of neighbour (a `correlated_groups` sibling built from
+  `settings.pairs`, or the pair's own `cross_context` instruments). Votes are a list `"<ASSET>:up|down"` = what the asset's
+  1h trend implies for the pair given the correlation's sign (not the study's `{usd, silver, agree_with_htf}` object).
+  `EURUSD@` and `XAGUSD@` verified read-only at Windsor (EURUSD@ 100 k contract, not in Market Watch until the ingest
+  selects it; XAGUSD@ 5 000 oz). The live ingest never asks a context symbol for ticks and polls its bars every 5 s; a
+  missing symbol is one `context_symbol_missing` event; the backfill skips it the same way. Ingest RSS +0.8 MB with the
+  two sinks (fake terminal, real bars; the terminal's own history cache not included).
+- **B8 (news):** Forex Factory's own weekly export (`nfs.faireconomy.media/ff_calendar_thisweek.json`, no key, 2 downloads
+  per 5 min allowed) — verified 2026-09-29. Config `pairs.<PAIR>.news_blackout {enabled, source_url, refresh_minutes,
+  stale_hours, currencies, windows{fomc, high, medium}}` (the spec's `minutes_before/after` + `impact` became the tier
+  windows; code default off, B8's base ±15 for fomc/high; XAUUSD on with the D-049 tiers 60/75, 30/30, 10/10). "fomc" =
+  the statement / rate decision / press conference / projections only — the members' speeches are not a tier. Fresh =
+  the fetch's New York week, that week's events present, ≤ 24 h old. The XAU engine downloads at most hourly (15 min
+  after a failure) in a daemon thread; readers only read the file. The gate check `news_blackout` exists only for a pair
+  with the blackout (BTC/ETH gate output unchanged); an unexpected error in it refuses. Entry calls wait inside a window
+  (event `skipped: news_blackout`); a desk pair makes no entry call while the calendar is stale (`closed:news_stale`),
+  a non-desk pair ignores a stale file (fail-open, §3.9.1 a).
+- **B18:** `render(..., appendix=("desks/xau", "desks/xauusd_fields"))` appends the brief `ai/prompts/desks/xau.md`
+  (version 1, ≈ 280 tokens) and the gold field notes `desks/xauusd_fields.md` (version 1: the legend of the gold-only
+  blocks — gold clock, round numbers, news, the gold part of cross, a shadow idea's history — moved out of the shared
+  legend so BTC/ETH do not pay for them) to the XAU trader, reviewer and escalation system prompts. The field notes stay
+  while the XAU payload carries gold blocks, also with the desk turned off.
+- **B7:** PAYLOAD_VERSION 4, VIEW_VERSION 3, legend v5, trader_persona v3 (5m + the forming bar instead of 5m / 1m),
+  risk_reviewer/system v4. The 1m timeframe stays in the stored payload (the data gate reads it) and leaves the view.
+  Budget measured on every 5-min screen of the stored day 2026-09-28 (BTCUSDT, 289 screens, production data read-only):
+  the view's median 19,059 chars (production code) → 17,755 (−1,304); the legend +2.1 k chars (after the gold lines
+  moved); net ≈ +0.2 k tokens per BTC call. XAU dry build: the gold-specific delta ≈ 750–800 tokens (≤ 800): the appendix 2.0 k chars + the gold blocks 0.6–1.2 k.
+- **B19:** `tools/desk_report.py` (read-only) — the baseline uses the ideas' own stop sizes (else 2 / 2.9 / 5 / 9), every
+  5-min close inside the desk windows over 90 days, the per-bar broker spread, flat at 17:00 New York; `demo_report` shows
+  the desk counts (no baseline there).
+- **B9:** `research/gold_flow/study.py` → docs/exploration/gold_flow.md: 247 overlapping days in 33 s (pyarrow, one day-file at a time): pooled 1-min corr 0.408 at k = 0, no lead/lag, one sign in every 4-week window → FAILS the |corr| ≥ 0.5 rule; H25 closed. Monday gap: perp weekend move vs broker gap corr 0.971 (41 weekends). P7.1 (price matching) not run: the recorder
+  holds ≈ 48 h of the 72 h needed (≈ 2026-09-30 10:00 UTC if it holds) — its analysis stays for the next idle run.
+- **B10:** `go_live_inputs` / the checklist know `news_blackout` as an expected class; XAU stays out of go-live (H32).
+- **The live call** (BTC, 2026-09-29 12:01 UTC, right after the reset, scratch root, docs/measurements/phase5_live.md): valid on the first attempt, 6 images, input 25,688 tokens (+398 vs the day's production median 25,290; ≤ 26.7 k), 47.7 s, every new block in the stored payload; the build 1.66 s cold / 0.41 s warm measured right after on the same root (`engine --once` records none).
+- **Review fixes (as built):** a shadow idea is recorded whatever the trigger mode and when it was stored while the executor was down (24 h); `history[]` shows a shadow idea's `desk_ok` and failed checks; the desk's `levels.asia_*` = the gold clock's 00–07 UTC range (one Asia range on the charts and in the text); the 5m chart draws the forming bar from the payload; daily profiles carry their price bucket; `news.fetch` keeps the previous file when the feed has no event of this week; a non-object calendar file is stale, never an exception; the gold field notes are their own appendix (`desks/xauusd_fields`) that stays while the payload carries gold blocks; a non-finite instance risk override is refused; the operator prompt reads the desk mode from the pack; `desk_report` breaks down by session and guards the output path.
+- **D-046 (b) placeholders (added after the final check):** `ai.providers.<name>.session_mode` accepts only `per_call` (the
+  persistent-session design is the field's comment); `tools/review_pack.py` counts the valid decisions whose
+  `data_quality_notes` ask for more candles / depth / history (`data_asks`, a line in the pack) — build the MCP data
+  tools once ≥ 10 % ask.
+- **Deferred / not built:** items 8 and 9 (D-046 b); P7.1 (the recorder holds ≈ 48 h of the 72 h — for the next idle run,
+  H5 stays blocked); the hollow forming bar on the 15m chart (cache cost).
 
 ### 3.9.1 Phase 5 as approved (2026-09-28) — two checkpoints, the owner's decisions, the fold-ins
 
